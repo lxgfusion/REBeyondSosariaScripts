@@ -1,0 +1,8 @@
+# The repo copies are LF; the DEPLOYED copies under the Razor Scripts folders
+# are CRLF. Keeping that distinction is what makes
+#
+#     diff --strip-trailing-cr Scripts/harvest_runner.py <deployed copy>
+#
+# report only real drift. A global core.autocrlf=true would check these out as
+# CRLF and make every line read as changed, so pin the line endings here.
+* text=auto eol=lf

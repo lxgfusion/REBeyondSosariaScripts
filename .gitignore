@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+
+# Local Claude Code settings: personal permission rules, carries the local
+# Windows username and machine paths. The shared conventions live in CLAUDE.md.
+.claude/settings.local.json
