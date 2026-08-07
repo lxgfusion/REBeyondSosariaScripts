@@ -258,6 +258,8 @@ def build_species():
     # Longest first so "hell cat" beats "cat".
     _patterns.sort(key=lambda pair: -len(pair[0]["name"]))
 
+    build_never_patterns()
+
 
 def match_species(text):
     if not text:
@@ -377,11 +379,29 @@ def _mob_name_uncached(mob):
     return None
 
 
-def is_never_tameable(name):
-    low = (name or "").lower()
+_never_patterns = []
+
+
+def build_never_patterns():
+    """Compile NEVER_TAME_WORDS with a LEADING word boundary.
+
+    A bare substring test matches inside unrelated words: "orc" is in
+    "s-orc-eress", so "Vela the sorceress" was reported as untameable. Anchoring
+    only the START of the word fixes that while still catching the inflections
+    that matter - "orcish" and "orcs" are still blocked, because there the match
+    does begin at a word boundary.
+    """
+    del _never_patterns[:]
     for word in NEVER_TAME_WORDS:
         word = word.strip().lower()
-        if word and word in low:
+        if word:
+            _never_patterns.append((word, re.compile(r"\b" + re.escape(word))))
+
+
+def is_never_tameable(name):
+    low = (name or "").lower()
+    for word, pattern in _never_patterns:
+        if pattern.search(low):
             return word
     return None
 
@@ -601,6 +621,84 @@ def report_summary(held):
                 "one and rerun.", HUE_WARN)
 
 
+def report_body_filter(held):
+    """Section 5 - run TameAndFill's ACTUAL scan, body filter and all.
+
+    Everything above scans with no body filter, on purpose. That proves what is
+    standing there, but it deliberately skips the one call the real script makes
+    and this one otherwise does not:
+
+        f = Mobiles.Filter(); for body in _body_owners: f.Bodies.Add(body)
+
+    If the creature is present, correctly named, on the catalogued body, not
+    ignored and within skill - and the real script still walks past it - then
+    this filter is the only remaining suspect. So run it exactly as
+    find_candidates() does and report what comes back.
+    """
+    rule("5. THE REAL SCAN - Mobiles.Filter with Bodies, as find_candidates()")
+
+    if not held:
+        log("No deeds held, so the real scan would be empty regardless.",
+            HUE_WARN)
+        return
+
+    body_owners = {}
+    for species_name in held:
+        species = _species.get(species_name)
+        if species is None:
+            continue
+        for body in species["bodies"]:
+            body_owners.setdefault(body, []).append(species_name)
+
+    log("Filter bodies: %s"
+        % ", ".join("0x%X (%s)" % (b, "/".join(body_owners[b]))
+                    for b in sorted(body_owners)))
+
+    try:
+        f = Mobiles.Filter()
+        f.Enabled = True
+        f.RangeMax = SCAN_RANGE
+        f.CheckIgnoreObject = True
+        for body in body_owners:
+            f.Bodies.Add(body)
+        found = Mobiles.ApplyFilter(f)
+    except Exception as exc:
+        log("*** THE BODY FILTER THREW: %s ***" % exc, HUE_BAD)
+        log("That is the bug - find_candidates() cannot run at all.", HUE_BAD)
+        return
+
+    found = list(found or [])
+    log("The real scan returned %d creature(s)." % len(found),
+        HUE_GOOD if found else HUE_BAD)
+    for mob in found:
+        log("  RETURNED: %-22s body 0x%-4X  %d tiles"
+            % (mob_name(mob) or "(name will not load)", mob.Body,
+               Player.DistanceTo(mob)), HUE_GOOD)
+
+    # Cross-check against the unfiltered scan: anything on a filter body that
+    # the plain scan sees but this one does not is the smoking gun.
+    plain = [m for m in scan_mobiles(check_ignore=True)
+             if m.Body in body_owners]
+    missing = [m for m in plain
+               if m.Serial not in dict((x.Serial, 1) for x in found)]
+
+    if missing:
+        log("*** BODY FILTER IS DROPPING CREATURES ***", HUE_BAD)
+        log("%d creature(s) on a filter body are visible to a plain scan but "
+            "are NOT returned when Bodies is set:" % len(missing), HUE_BAD)
+        for mob in missing:
+            log("  DROPPED: %-22s body 0x%-4X  %d tiles"
+                % (mob_name(mob) or "(name will not load)", mob.Body,
+                   Player.DistanceTo(mob)), HUE_BAD)
+        log("This is a Razor Enhanced filter problem, not a config problem - "
+            "find_candidates() would have to stop using Bodies.", HUE_WARN)
+    elif found:
+        log("Body filter agrees with the plain scan - it is NOT the fault.",
+            HUE_GOOD)
+        log("If TameAndFill still ignores these, it is running a STALE COPY: "
+            "hit Reload in the Scripting tab.", HUE_WARN)
+
+
 def write_dump():
     try:
         with open(DUMP_PATH, "w") as fh:
@@ -640,6 +738,7 @@ def main():
     held = report_deeds()
     report_mobiles(held)
     report_summary(held)
+    report_body_filter(held)
     write_dump()
 
 
