@@ -275,6 +275,38 @@ load (`REQUIRE_NAME_MATCH = True`). Plus a `NEVER_TAME_WORDS` backstop.
 If regenerating the catalogue, use `(?<![=!<>])=(?!=)` and sanity-check: no
 undeclared shared bodies, nothing below ~`0x10`.
 
+### "It ignores cats and chickens" — UNREPRODUCED, 2026-08-06
+
+Reported, then withdrawn ("mine seems to be working fine as is right now").
+`diag_tame_candidates.py` dumps taken beside a cat and a chicken show the path
+is **healthy**, so there is nothing outstanding here:
+
+| Checked | Result |
+|---|---|
+| Bodies | cat `0xC9`, chicken `0xD0` — **match the catalogue** |
+| Deeds | `A Taming Order -> cat [0/30]`, `-> chicken [0/40]` — both parse |
+| Ignore list | hiding nothing |
+| Skill / followers | 148.0, 0/5 |
+| Verdict | **"WOULD BE TAMED. Nothing in the config blocks this one."** |
+
+Do not go looking for a body-value fix here — the bodies were verified correct
+in game. If it recurs, section 5 of the diagnostic is the next cut: it runs the
+real `Mobiles.Filter` with `Bodies` set, which is the only structural difference
+between the diagnostic and `find_candidates()`.
+
+### `NEVER_TAME_WORDS` matches inside words — real, latent
+
+The same dumps caught `Vela the sorceress -> IGNORED: matched 'orc'`, because
+`is_never_tameable()` used a bare substring test and "orc" sits inside
+"s-orc-eress". Fixed in `diag_tame_candidates.py` by anchoring only the START of
+the word (`\borc` still blocks "orcish" and "orcs").
+
+**`tame_animals.py` / `TameAndFill.py` still carry the substring version.** Left
+alone deliberately: the guard only ever runs on creatures already matching a
+catalogue body, and no catalogue species name contains a NEVER word mid-word —
+verified by script over all 112 — so the practical impact today is zero. Worth
+folding in next time that file is opened for another reason.
+
 ### Deed format (from Item Inspector)
 
 ```
