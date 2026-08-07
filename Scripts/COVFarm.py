@@ -1,0 +1,715 @@
+"""
+COVFarm - camp the Slasher of Veils and kill it from range.
+===========================================================
+
+For Razor Enhanced (IronPython 3.4). Target: RunUO/ServUO-derived freeshard.
+
+What it does
+------------
+1. Sits and waits for the monster to spawn.
+2. Opens with WILDFIRE on it.
+3. Holds a set distance - 5 tiles by default - while spamming NETHER BLAST,
+   stepping back whenever the monster closes and following when it drifts off.
+4. Stops when the monster is dead, then goes back to waiting for the next one.
+
+Inspected target (Enhanced Mobile Inspector):
+
+    Name:      The Slasher of Veils
+    MobileID:  0x02E5
+    Serial:    0x0003FE1B      (changes every spawn - NOT used)
+    Notoriety: 6
+
+The serial is deliberately not configured: it is different for every spawn.
+The script matches on NAME, using the body only as a cheap pre-filter, which is
+the rule this project learned the hard way - a body value alone is not proof of
+what something is.
+
+BEFORE YOU RUN IT
+-----------------
+Check SPELL_ATTACK / SPELL_OPENER in section 2. "Wildfire" is a Spellweaving
+spell and "Nether Blast" is not one of the stock Mysticism names, so it is
+probably custom to this shard. If a cast does nothing, set that spell's
+"school" explicitly - the script prints what it tried and what the server said.
+
+Stand where you want to fight BEFORE starting. The script holds position while
+waiting and only moves once the monster is up.
+
+Safety
+------
+* It never attacks anything whose name does not match. A wrong body is not
+  enough to make it swing.
+* It stops and says so if your health drops below FLEE_AT_HITS_PERCENT, if you
+  die, or if you run out of the reagents/mana to keep casting.
+* Your journal is not wiped - it reads new lines through a timestamp cursor.
+"""
+
+import math
+import re
+import time
+
+
+SCRIPT_VERSION = "1.0.0"
+
+
+# #############################################################################
+# ##                            C O N F I G                                  ##
+# #############################################################################
+
+# =============================================================================
+# 1. THE MONSTER
+# =============================================================================
+#
+#   name       Matched case-insensitively as a SUBSTRING of the creature's
+#              name. Mobiles.Filter().Name is an EXACT match and fails silently
+#              when a shard renames something, so matching is done here instead.
+#   bodies     Cheap pre-filter for the scan. Leave the list EMPTY to scan on
+#              name alone, which is slower but survives a body change.
+#   notoriety  Optional extra check. 6 is "murderer" (red). None to skip.
+
+TARGET_NAME = "Slasher of Veils"
+TARGET_BODIES = [0x02E5]
+TARGET_NOTORIETY = 6
+
+# How far out to look for it. Bounded on purpose - an unset RangeMax means
+# everything the client knows about.
+SCAN_RANGE = 20
+
+
+# =============================================================================
+# 2. THE SPELLS
+# =============================================================================
+#
+#   name    Exactly as the shard names the spell.
+#   school  Which Spells.Cast* function to use. "auto" lets Razor work it out
+#           from the name, which is right most of the time. If a spell will not
+#           fire, set this: "magery", "necro", "chivalry", "bushido",
+#           "ninjitsu", "spellweaving", "mysticism", "mastery", "cleric",
+#           "druid".
+#   target  "mobile"   - target the monster itself.
+#           "location" - target the ground under it. Field spells usually want
+#                        this. If a cast is refused, try the other one.
+#   mana    Do not start the cast below this much mana. 0 to ignore.
+#
+# Wildfire is a SPELLWEAVING spell in stock UO and lays a field on the ground,
+# so it targets a location. Nether Blast is not a stock spell name at all, so
+# "auto" is a guess - if it does not fire, that is the first thing to change.
+
+SPELL_OPENER = {
+    "name":   "Wildfire",
+    "school": "auto",
+    "target": "location",
+    "mana":   40,
+}
+
+SPELL_ATTACK = {
+    "name":   "Nether Blast",
+    "school": "auto",
+    "target": "mobile",
+    "mana":   30,
+}
+
+# Recast the opener every this many ms during the fight. Fields expire, so a
+# long fight may want it refreshed. 0 = cast it ONCE per spawn, which is what
+# was asked for.
+OPENER_RECAST_MS = 0
+
+
+# =============================================================================
+# 3. POSITIONING
+# =============================================================================
+
+# The distance to hold. The script steps away when the monster is closer than
+# this and follows when it is further.
+KEEP_DISTANCE = 5
+
+# How much drift to tolerate before correcting. Without this the character
+# jitters back and forth on the spot every single tick.
+DISTANCE_SLACK = 1              # so 4-6 tiles is "fine" at KEEP_DISTANCE 5
+
+# Never let it get further than this - beyond it the spell is out of range.
+MAX_CAST_DISTANCE = 10
+
+
+# =============================================================================
+# 4. SAFETY
+# =============================================================================
+
+# Break off if your health drops below this percentage. 0 disables it.
+FLEE_AT_HITS_PERCENT = 40
+
+# Where to run when breaking off: how many tiles to put between you and it.
+FLEE_DISTANCE = 15
+
+# Stop the whole script after breaking off, rather than waiting for the next
+# spawn. Leave True until you trust it.
+STOP_AFTER_FLEE = True
+
+# Wait for mana rather than spamming failed casts. The script pauses until it
+# has enough for the next spell.
+WAIT_FOR_MANA = True
+MANA_WAIT_TIMEOUT_MS = 60000
+
+
+# =============================================================================
+# 5. TIMING  -  all values in milliseconds
+# =============================================================================
+
+SPAWN_POLL_MS = 1500            # how often to look for the monster
+FIGHT_POLL_MS = 200             # the main fight tick
+MOVE_PAUSE_MS = 250             # between movement steps
+CAST_TIMEOUT_MS = 5000          # how long to wait for the targeting cursor
+CAST_SETTLE_MS = 400            # after the cursor opens, before answering it
+AFTER_CAST_MS = 1500            # recovery between casts
+TARGET_PROPS_MS = 1000          # how long to wait for a creature's tooltip
+
+# Give up on a single fight after this long and go back to waiting.
+FIGHT_TIMEOUT_MS = 10 * 60 * 1000
+
+DEBUG = True
+
+
+# #############################################################################
+# ##                          END OF CONFIG                                  ##
+# #############################################################################
+
+HUE_INFO = 0x03B2
+HUE_GOOD = 0x0044
+HUE_WARN = 0x0035
+HUE_BAD = 0x0021
+HUE_STEP = 0x0480
+
+# Server replies worth reacting to. Annotated with the cliloc they came from so
+# they can be checked against shard source.
+MSG_OUT_OF_RANGE = [
+    "That is too far away",                       # 500237
+    "Target is not in line of sight",             # 500237 / 501943
+    "You cannot see that",
+]
+MSG_NO_MANA = [
+    "You do not have enough mana",                # 502625
+    "Insufficient mana",
+]
+MSG_FIZZLE = [
+    "The spell fizzles",                          # 502632
+    "You have not yet recovered",                 # 502644
+]
+
+_journal_cursor = 0.0
+
+SCHOOLS = {
+    "magery":       "CastMagery",
+    "necro":        "CastNecro",
+    "chivalry":     "CastChivalry",
+    "bushido":      "CastBushido",
+    "ninjitsu":     "CastNinjitsu",
+    "spellweaving": "CastSpellweaving",
+    "mysticism":    "CastMysticism",
+    "mastery":      "CastMastery",
+    "cleric":       "CastCleric",
+    "druid":        "CastDruid",
+}
+
+
+# =============================================================================
+# LOGGING
+# =============================================================================
+
+def log(text, hue=HUE_INFO):
+    Misc.SendMessage("[COV] " + text, hue, False)
+
+
+def debug(text, hue=HUE_INFO):
+    if DEBUG:
+        log(text, hue)
+
+
+# =============================================================================
+# JOURNAL  -  timestamp cursor, so the journal is never wiped
+# =============================================================================
+
+def reset_journal():
+    global _journal_cursor
+    newest = 0.0
+    try:
+        for entry in Journal.GetJournalEntry(0.0) or []:
+            if entry.Timestamp > newest:
+                newest = entry.Timestamp
+    except Exception:
+        pass
+    _journal_cursor = newest
+
+
+def new_lines():
+    """Journal lines since the last call, lowercased."""
+    global _journal_cursor
+    out = []
+    try:
+        entries = Journal.GetJournalEntry(_journal_cursor) or []
+    except Exception:
+        return out
+    for entry in entries:
+        try:
+            stamp = entry.Timestamp
+        except Exception:
+            continue
+        if stamp <= _journal_cursor:
+            continue
+        _journal_cursor = max(_journal_cursor, stamp)
+        if entry.Text:
+            out.append(entry.Text.lower())
+    return out
+
+
+def lines_match(lines, phrases):
+    for line in lines:
+        for phrase in phrases:
+            if phrase.strip().lower() in line:
+                return phrase
+    return None
+
+
+# =============================================================================
+# GEOMETRY AND MOVEMENT
+# =============================================================================
+
+def distance_to(mob):
+    if not mob:
+        return float("inf")
+    try:
+        return Player.DistanceTo(mob)
+    except Exception:
+        dx = Player.Position.X - mob.Position.X
+        dy = Player.Position.Y - mob.Position.Y
+        return math.sqrt(dx * dx + dy * dy)
+
+
+def direction_name(dx, dy):
+    """UO directions. X grows EAST, Y grows SOUTH."""
+    if dx > 0 and dy < 0:
+        return "Right"      # NE
+    if dx > 0 and dy > 0:
+        return "Down"       # SE
+    if dx < 0 and dy > 0:
+        return "Left"       # SW
+    if dx < 0 and dy < 0:
+        return "Up"         # NW
+    if dx > 0:
+        return "East"
+    if dx < 0:
+        return "West"
+    if dy > 0:
+        return "South"
+    return "North"
+
+
+def step(direction):
+    """One step. Player.Run takes one argument on current builds; older ones
+    took two, so tolerate both rather than picking a side."""
+    try:
+        return Player.Run(direction)
+    except TypeError:
+        return Player.Run(direction, True)
+    except Exception:
+        return False
+
+
+def step_away_from(mob):
+    dx = Player.Position.X - mob.Position.X
+    dy = Player.Position.Y - mob.Position.Y
+    if dx == 0 and dy == 0:
+        return step("North")        # standing on it; any direction will do
+    return step(direction_name(dx, dy))
+
+
+def step_toward(mob):
+    dx = mob.Position.X - Player.Position.X
+    dy = mob.Position.Y - Player.Position.Y
+    if dx == 0 and dy == 0:
+        return False
+    return step(direction_name(dx, dy))
+
+
+def hold_distance(mob):
+    """One correction step. True if we are in the band and can cast."""
+    gap = distance_to(mob)
+
+    if gap < KEEP_DISTANCE - DISTANCE_SLACK:
+        step_away_from(mob)
+        Misc.Pause(MOVE_PAUSE_MS)
+        return False
+    if gap > KEEP_DISTANCE + DISTANCE_SLACK:
+        step_toward(mob)
+        Misc.Pause(MOVE_PAUSE_MS)
+        return False
+    return gap <= MAX_CAST_DISTANCE
+
+
+def flee_from(mob):
+    """Put real distance between us and it."""
+    log("Breaking off - running to %d tiles." % FLEE_DISTANCE, HUE_BAD)
+    deadline = time.time() + 20.0
+    while time.time() < deadline:
+        fresh = Mobiles.FindBySerial(mob.Serial)
+        if fresh is None:
+            return True
+        if distance_to(fresh) >= FLEE_DISTANCE:
+            return True
+        step_away_from(fresh)
+        Misc.Pause(MOVE_PAUSE_MS)
+    return False
+
+
+# =============================================================================
+# FINDING THE MONSTER
+# =============================================================================
+
+def name_matches(mob):
+    """The NAME decides. A matching body is not enough to act on."""
+    name = mob.Name
+    if not name:
+        try:
+            Mobiles.WaitForProps(mob, TARGET_PROPS_MS)
+            fresh = Mobiles.FindBySerial(mob.Serial)
+            if fresh is not None:
+                name = fresh.Name
+        except Exception:
+            pass
+    if not name:
+        return False
+    return TARGET_NAME.strip().lower() in name.lower()
+
+
+def find_target():
+    """The monster, or None. Nearest first if several are up."""
+    f = Mobiles.Filter()
+    f.Enabled = True
+    f.RangeMax = SCAN_RANGE          # never leave this unset
+    f.CheckIgnoreObject = False
+    for body in TARGET_BODIES:
+        f.Bodies.Add(body)
+
+    try:
+        found = Mobiles.ApplyFilter(f) or []
+    except Exception as exc:
+        debug("Scan failed: %s" % exc, HUE_WARN)
+        return None
+
+    candidates = []
+    for mob in found:
+        if TARGET_NOTORIETY is not None:
+            try:
+                if mob.Notoriety != TARGET_NOTORIETY:
+                    continue
+            except Exception:
+                pass
+        if not name_matches(mob):
+            continue
+        candidates.append(mob)
+
+    if not candidates:
+        return None
+    candidates.sort(key=distance_to)
+    return candidates[0]
+
+
+def is_dead(mob_serial):
+    """Careful: Hits 0/0 means the tooltip has not loaded, NOT that it died.
+
+    The inspector dump of a live Slasher showed 0/0 for exactly that reason, so
+    treating a zero as death would end every fight on the first tick.
+    """
+    mob = Mobiles.FindBySerial(mob_serial)
+    if mob is None:
+        return True
+    try:
+        if mob.HitsMax > 0 and mob.Hits <= 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+# =============================================================================
+# CASTING
+# =============================================================================
+
+def clear_cursor():
+    """Drop a stale cursor before every cast.
+
+    Target.WaitForTarget returns True for a cursor that is ALREADY open, so a
+    leaked one silently swallows the next TargetExecute and the cast looks like
+    it simply did nothing.
+    """
+    try:
+        Target.ClearQueue()
+        if Target.HasTarget():
+            Target.Cancel()
+            Misc.Pause(200)
+            Target.ClearQueue()
+        return not Target.HasTarget()
+    except Exception:
+        return False
+
+
+def start_cast(spell):
+    """Begin the cast, no target attached. Returns False if it could not."""
+    name = spell["name"]
+    school = (spell.get("school") or "auto").strip().lower()
+
+    try:
+        if school in SCHOOLS:
+            getattr(Spells, SCHOOLS[school])(name)
+        else:
+            Spells.Cast(name)
+        return True
+    except Exception as exc:
+        log("Could not cast %r (%s)." % (name, exc), HUE_BAD)
+        log("Check the spell name and its \"school\" in section 2.", HUE_WARN)
+        return False
+
+
+def cast_at(spell, mob):
+    """Cast one spell at the monster. Returns "ok", "range", "mana" or "fail".
+
+    Deliberately casts WITHOUT a target and answers the cursor by hand. The
+    built-in one-shot target form is documented as unreliable on free shards,
+    and the manual sequence - clear the cursor, cast, wait, settle, answer - is
+    the one confirmed working on this shard.
+    """
+    if spell.get("mana") and Player.Mana < spell["mana"]:
+        return "mana"
+
+    if not clear_cursor():
+        log("A target cursor is stuck open; cannot cast cleanly.", HUE_BAD)
+        return "fail"
+
+    new_lines()                       # start this cast with a clean read
+    if not start_cast(spell):
+        return "fail"
+
+    if not Target.WaitForTarget(CAST_TIMEOUT_MS, False):
+        said = lines_match(new_lines(), MSG_NO_MANA)
+        clear_cursor()                # or it survives into the next cast
+        if said:
+            return "mana"
+        debug("%s: no target cursor appeared." % spell["name"], HUE_WARN)
+        return "fail"
+
+    Misc.Pause(CAST_SETTLE_MS)
+
+    mode = (spell.get("target") or "mobile").strip().lower()
+    fresh = Mobiles.FindBySerial(mob.Serial)
+    if fresh is None:
+        clear_cursor()
+        return "ok"                   # it died mid-cast; nothing to aim at
+
+    try:
+        if mode == "location":
+            Target.TargetExecute(fresh.Position.X, fresh.Position.Y,
+                                 fresh.Position.Z)
+        else:
+            Target.TargetExecute(fresh.Serial)
+    except Exception as exc:
+        log("Targeting failed (%s)." % exc, HUE_BAD)
+        clear_cursor()
+        return "fail"
+
+    Misc.Pause(AFTER_CAST_MS)
+
+    lines = new_lines()
+    if lines_match(lines, MSG_OUT_OF_RANGE):
+        return "range"
+    if lines_match(lines, MSG_NO_MANA):
+        return "mana"
+    if lines_match(lines, MSG_FIZZLE):
+        return "fail"
+    return "ok"
+
+
+def wait_for_mana(spell, mob):
+    """Hold position and distance until there is mana for the next cast."""
+    need = spell.get("mana") or 0
+    if not WAIT_FOR_MANA or Player.Mana >= need:
+        return Player.Mana >= need
+
+    log("Out of mana - holding at range until it comes back.", HUE_WARN)
+    deadline = time.time() + MANA_WAIT_TIMEOUT_MS / 1000.0
+    while time.time() < deadline:
+        if Player.IsGhost:
+            return False
+        fresh = Mobiles.FindBySerial(mob.Serial)
+        if fresh is None:
+            return False
+        hold_distance(fresh)          # keep kiting rather than standing still
+        if Player.Mana >= need:
+            return True
+        Misc.Pause(FIGHT_POLL_MS)
+    log("Still no mana after %d seconds." % (MANA_WAIT_TIMEOUT_MS / 1000),
+        HUE_BAD)
+    return False
+
+
+# =============================================================================
+# THE FIGHT
+# =============================================================================
+
+def hits_percent():
+    try:
+        if Player.HitsMax > 0:
+            return 100.0 * Player.Hits / Player.HitsMax
+    except Exception:
+        pass
+    return 100.0
+
+
+def should_flee():
+    return FLEE_AT_HITS_PERCENT > 0 and hits_percent() < FLEE_AT_HITS_PERCENT
+
+
+def fight(mob):
+    """Work one monster until it dies, we break off, or time runs out."""
+    serial = mob.Serial
+    log("Engaging %s at %d tiles." % (mob.Name or "target", distance_to(mob)),
+        HUE_GOOD)
+
+    deadline = time.time() + FIGHT_TIMEOUT_MS / 1000.0
+    opened = False
+    last_opener = 0.0
+
+    while time.time() < deadline:
+        if Player.IsGhost:
+            log("You are dead. Stopping.", HUE_BAD)
+            return "dead"
+
+        if is_dead(serial):
+            log("%s is dead." % TARGET_NAME, HUE_GOOD)
+            return "killed"
+
+        current = Mobiles.FindBySerial(serial)
+        if current is None:
+            return "killed"
+
+        if should_flee():
+            log("Health %.0f%% - below FLEE_AT_HITS_PERCENT." % hits_percent(),
+                HUE_BAD)
+            flee_from(current)
+            return "fled"
+
+        # Position first: there is no point casting from the wrong range.
+        if not hold_distance(current):
+            continue
+
+        # The opener, then the attack spell on repeat.
+        want_opener = not opened or (
+            OPENER_RECAST_MS > 0 and
+            (time.time() - last_opener) * 1000.0 >= OPENER_RECAST_MS)
+
+        spell = SPELL_OPENER if want_opener else SPELL_ATTACK
+
+        if spell.get("mana") and Player.Mana < spell["mana"]:
+            if not wait_for_mana(spell, current):
+                if Player.IsGhost or Mobiles.FindBySerial(serial) is None:
+                    continue
+                log("Cannot keep casting - stopping this fight.", HUE_BAD)
+                return "nomana"
+            continue
+
+        result = cast_at(spell, current)
+
+        if result == "ok":
+            if want_opener:
+                opened = True
+                last_opener = time.time()
+                debug("%s away." % spell["name"], HUE_GOOD)
+        elif result == "range":
+            debug("Out of range or line of sight - closing.", HUE_WARN)
+            fresh = Mobiles.FindBySerial(serial)
+            if fresh is not None:
+                step_toward(fresh)
+                Misc.Pause(MOVE_PAUSE_MS)
+        elif result == "mana":
+            if not wait_for_mana(spell, current):
+                if Player.IsGhost or Mobiles.FindBySerial(serial) is None:
+                    continue
+                return "nomana"
+        else:
+            Misc.Pause(FIGHT_POLL_MS)
+
+    log("Fight timed out after %d minutes." % (FIGHT_TIMEOUT_MS / 60000),
+        HUE_WARN)
+    return "timeout"
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def preflight():
+    log("COVFarm v%s" % SCRIPT_VERSION, HUE_STEP)
+
+    if not TARGET_NAME.strip():
+        log("TARGET_NAME is empty - nothing to hunt.", HUE_BAD)
+        return False
+
+    log("Hunting: %r  bodies %s  notoriety %s"
+        % (TARGET_NAME,
+           ["0x%X" % b for b in TARGET_BODIES] or "(name only)",
+           TARGET_NOTORIETY if TARGET_NOTORIETY is not None else "any"))
+    log("Opener: %s (%s, %s)  Attack: %s (%s, %s)"
+        % (SPELL_OPENER["name"], SPELL_OPENER["school"],
+           SPELL_OPENER["target"],
+           SPELL_ATTACK["name"], SPELL_ATTACK["school"],
+           SPELL_ATTACK["target"]))
+    log("Holding %d tiles (%d-%d), casting out to %d."
+        % (KEEP_DISTANCE, KEEP_DISTANCE - DISTANCE_SLACK,
+           KEEP_DISTANCE + DISTANCE_SLACK, MAX_CAST_DISTANCE))
+    if FLEE_AT_HITS_PERCENT > 0:
+        log("Will break off below %d%% health." % FLEE_AT_HITS_PERCENT)
+    else:
+        log("FLEE_AT_HITS_PERCENT is 0 - it will NEVER break off.", HUE_WARN)
+
+    if Player.IsGhost:
+        log("You are dead. Resurrect first.", HUE_BAD)
+        return False
+    return True
+
+
+def main():
+    if not preflight():
+        return
+
+    reset_journal()
+    log("Waiting for %s to spawn..." % TARGET_NAME, HUE_INFO)
+
+    waiting_logged = True
+    while True:
+        Misc.Pause(SPAWN_POLL_MS)      # never busy-wait
+
+        if Player.IsGhost:
+            log("You are dead. Stopping.", HUE_BAD)
+            return
+
+        mob = find_target()
+        if mob is None:
+            if not waiting_logged:
+                log("Waiting for %s to spawn..." % TARGET_NAME, HUE_INFO)
+                waiting_logged = True
+            continue
+
+        waiting_logged = False
+        outcome = fight(mob)
+
+        if outcome in ("dead",):
+            return
+        if outcome == "fled" and STOP_AFTER_FLEE:
+            log("Stopped after breaking off. Set STOP_AFTER_FLEE = False to "
+                "keep farming.", HUE_WARN)
+            return
+        if outcome == "nomana":
+            log("Stopping - could not keep casting.", HUE_BAD)
+            return
+
+        Misc.Pause(2000)
+
+
+main()
