@@ -17,7 +17,12 @@ What it does
    between each. A single cast blocks for several seconds, and the monster
    walks for all of them, so checking only at the top of the loop lets it
    reach melee range unanswered.
-4. Stops when the monster is dead, then goes back to waiting for the next one.
+4. Confirms the kill by finding its CORPSE, then goes back to waiting.
+
+   Death is never inferred from the monster disappearing. It disappears from
+   Razor's mobile list whenever it leaves range or line of sight, so treating
+   that as a kill ended fights with the boss still alive. Only a corpse that
+   was not already on the ground counts.
 
 Inspected target (Enhanced Mobile Inspector):
 
@@ -43,6 +48,9 @@ waiting and only moves once the monster is up.
 
 Safety
 ------
+* A kill needs a corpse. Corpses lie around for minutes, so the corpses already
+  present when the fight starts are recorded and never counted - otherwise the
+  previous kill's corpse would mark the next spawn dead the instant it engaged.
 * It never attacks anything whose name does not match. A wrong body is not
   enough to make it swing.
 * It stops and says so if your health drops below FLEE_AT_HITS_PERCENT, if you
@@ -154,7 +162,49 @@ KITE_TICK_MS = 150
 
 
 # =============================================================================
-# 4. SAFETY
+# 4. DEATH CONFIRMATION  -  nothing counts as a kill without a corpse
+# =============================================================================
+#
+# The monster vanishing from Razor's mobile list is NOT proof it died. It also
+# vanishes when it walks out of range, breaks line of sight, or the client
+# de-syncs for a moment - and calling that a kill ends the fight while the boss
+# is still alive and coming for you.
+#
+# So a corpse has to appear. Inspected (Enhanced Item Inspector):
+#
+#     Name:   a slasher of veils corpse
+#     ItemID: 0x2006      Corpse: Yes      Ground: Yes
+#     Amount: 741         <- 0x2E5, the creature's BODY value
+#
+# Two ways to recognise it, either is enough: the name, or that Amount field,
+# which carries the body of whatever died. The body check keeps working if the
+# shard renames the creature.
+
+CORPSE_IDS = [0x2006]
+
+# Matched case-insensitively against the corpse's name. Leave empty to rely on
+# the body value alone.
+CORPSE_NAME_HINT = "slasher of veils"
+
+# Also accept a corpse whose Amount equals the monster's body value.
+CORPSE_MATCH_BODY = True
+
+# How far from us to look for it.
+CORPSE_SEARCH_RANGE = 8
+
+# CRITICAL: corpses lie around for minutes, so a corpse that was ALREADY on the
+# ground when the fight started is not proof of anything - it is last spawn's.
+# The script records the corpses present at engage and only accepts a NEW one.
+# There is no setting for that; it is not optional.
+
+# If the monster disappears and no corpse shows up within this long, it did not
+# die - it went out of sight. The script says so and goes back to waiting
+# rather than claiming a kill it did not make.
+CORPSE_GRACE_MS = 8000
+
+
+# =============================================================================
+# 5. SAFETY
 # =============================================================================
 
 # Break off if your health drops below this percentage. 0 disables it.
@@ -174,7 +224,7 @@ MANA_WAIT_TIMEOUT_MS = 60000
 
 
 # =============================================================================
-# 5. TIMING  -  all values in milliseconds
+# 6. TIMING  -  all values in milliseconds
 # =============================================================================
 
 SPAWN_POLL_MS = 1500            # how often to look for the monster
@@ -494,21 +544,84 @@ def find_target():
     return candidates[0]
 
 
-def is_dead(mob_serial):
-    """Careful: Hits 0/0 means the tooltip has not loaded, NOT that it died.
+def mobile_present(serial):
+    """Is the monster still in Razor's mobile list?
 
-    The inspector dump of a live Slasher showed 0/0 for exactly that reason, so
-    treating a zero as death would end every fight on the first tick.
+    NOT the same question as "is it alive". It also goes missing when it walks
+    out of range or line of sight, which is why this is only ever one half of
+    the death check.
     """
-    mob = Mobiles.FindBySerial(mob_serial)
-    if mob is None:
-        return True
+    return Mobiles.FindBySerial(serial) is not None
+
+
+def corpses_in_range():
+    """Every corpse on the ground near us."""
+    out = []
     try:
-        if mob.HitsMax > 0 and mob.Hits <= 0:
-            return True
+        f = Items.Filter()
+        f.Enabled = True
+        f.RangeMax = CORPSE_SEARCH_RANGE      # never leave this unset
+        f.OnGround = 1
+        found = Items.ApplyFilter(f) or []
+    except Exception as exc:
+        debug("Corpse scan failed: %s" % exc, HUE_WARN)
+        return out
+
+    for item in found:
+        try:
+            is_corpse = item.ItemID in CORPSE_IDS
+            if not is_corpse:
+                is_corpse = bool(getattr(item, "IsCorpse", False))
+            if is_corpse:
+                out.append(item)
+        except Exception:
+            continue
+    return out
+
+
+def snapshot_corpses():
+    """Serials of the corpses already lying here BEFORE the fight starts.
+
+    Without this the script would read the previous kill's corpse - they last
+    for minutes - and declare the fresh spawn dead the instant it engaged.
+    """
+    known = {}
+    for corpse in corpses_in_range():
+        known[corpse.Serial] = True
+    if known:
+        debug("%d corpse(s) already here; they will not count as a kill."
+              % len(known))
+    return known
+
+
+def corpse_matches(item, body):
+    """Is this corpse the monster's? Name or body value, either will do."""
+    try:
+        name = (item.Name or "").lower()
     except Exception:
-        pass
+        name = ""
+
+    if CORPSE_NAME_HINT and CORPSE_NAME_HINT.strip().lower() in name:
+        return True
+
+    # A corpse's Amount carries the body of whatever died - 741 is 0x2E5.
+    if CORPSE_MATCH_BODY and body:
+        try:
+            if item.Amount == body:
+                return True
+        except Exception:
+            pass
     return False
+
+
+def find_new_corpse(known, body):
+    """A corpse that was NOT here when the fight began. The proof of a kill."""
+    for corpse in corpses_in_range():
+        if corpse.Serial in known:
+            continue
+        if corpse_matches(corpse, body):
+            return corpse
+    return None
 
 
 # =============================================================================
@@ -653,25 +766,49 @@ def should_flee():
 def fight(mob):
     """Work one monster until it dies, we break off, or time runs out."""
     serial = mob.Serial
+    body = mob.Body
     log("Engaging %s at %d tiles." % (mob.Name or "target", distance_to(mob)),
         HUE_GOOD)
+
+    # Anything already on the floor is last spawn's, and must never be read as
+    # proof that THIS one died.
+    known_corpses = snapshot_corpses()
 
     deadline = time.time() + FIGHT_TIMEOUT_MS / 1000.0
     opened = False
     last_opener = 0.0
+    missing_since = None
 
     while time.time() < deadline:
         if Player.IsGhost:
             log("You are dead. Stopping.", HUE_BAD)
             return "dead"
 
-        if is_dead(serial):
-            log("%s is dead." % TARGET_NAME, HUE_GOOD)
+        # A corpse is the ONLY thing that counts as a kill.
+        corpse = find_new_corpse(known_corpses, body)
+        if corpse is not None:
+            log("%s is dead - corpse confirmed (%s)."
+                % (TARGET_NAME, corpse.Name or "0x%X" % corpse.Serial),
+                HUE_GOOD)
             return "killed"
 
         current = Mobiles.FindBySerial(serial)
         if current is None:
-            return "killed"
+            # Gone from the mobile list. That is NOT death - it also happens
+            # when it steps out of range or behind something. Wait a moment for
+            # a corpse to settle the question.
+            if missing_since is None:
+                missing_since = time.time()
+                debug("Lost sight of it - waiting for a corpse to confirm.",
+                      HUE_WARN)
+            elif (time.time() - missing_since) * 1000.0 >= CORPSE_GRACE_MS:
+                log("It vanished and left no corpse - not dead, just out of "
+                    "sight. Going back to waiting.", HUE_WARN)
+                return "lost"
+            Misc.Pause(FIGHT_POLL_MS)
+            continue
+
+        missing_since = None
 
         if should_flee():
             log("Health %.0f%% - below FLEE_AT_HITS_PERCENT." % hits_percent(),
@@ -797,6 +934,10 @@ def main():
         if outcome == "nomana":
             log("Stopping - could not keep casting.", HUE_BAD)
             return
+        if outcome == "lost":
+            log("Re-acquiring - it may still be up.", HUE_WARN)
+        elif outcome == "timeout":
+            log("Giving up on that one and looking again.", HUE_WARN)
 
         Misc.Pause(2000)
 

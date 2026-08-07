@@ -136,6 +136,33 @@ class StubMobiles(object):
         pass
 
 
+class Corpse(object):
+    """From the real dump: a slasher of veils corpse, 0x2006, Amount 0x2E5."""
+
+    def __init__(self, serial=0x40A7E26A, name="a slasher of veils corpse",
+                 item_id=0x2006, amount=0x02E5):
+        self.Serial = serial
+        self.Name = name
+        self.ItemID = item_id
+        self.Amount = amount
+        self.IsCorpse = True
+
+
+GROUND = []
+
+
+class StubItems(object):
+    class Filter(object):
+        def __init__(self):
+            self.Enabled = False
+            self.RangeMax = None
+            self.OnGround = None
+
+    def ApplyFilter(self, f):
+        assert f.RangeMax is not None, "RangeMax must always be set"
+        return list(GROUND)
+
+
 class Entry(object):
     def __init__(self, text, ts):
         self.Text = text
@@ -208,32 +235,77 @@ def load():
     env = {"__name__": "covfarm_under_test", "Misc": StubMisc(),
            "Player": StubPlayer(), "Mobiles": StubMobiles(),
            "Journal": JOURNAL, "Target": TARGET, "Spells": SPELLS,
-           "Items": None, "Gumps": None, "PathFinding": None, "Timer": None}
+           "Items": StubItems(), "Gumps": None, "PathFinding": None, "Timer": None}
     exec(compile(src, SCRIPT, "exec"), env)
     return env
 
 
 print("=" * 100)
-print("1. DEATH DETECTION - the Hits 0/0 trap from the real dump")
+print("1. DEATH CONFIRMATION - only a NEW corpse counts as a kill")
 print("=" * 100)
 m = load()
 del MOBS[:]
+del GROUND[:]
 
-alive_unloaded = Mob(hits=0, hits_max=0)        # verbatim from the dump
-MOBS.append(alive_unloaded)
-check("living monster with UNLOADED props (0/0) is NOT dead",
-      m["is_dead"](alive_unloaded.Serial), False)
+boss = Mob()
+MOBS.append(boss)
 
-alive_unloaded.Hits, alive_unloaded.HitsMax = 45000, 60000
-check("wounded monster is not dead", m["is_dead"](alive_unloaded.Serial), False)
+check("no corpse -> not dead",
+      m["find_new_corpse"]({}, boss.Body) is None, True)
+check("monster is present", m["mobile_present"](boss.Serial), True)
 
-alive_unloaded.Hits, alive_unloaded.HitsMax = 0, 60000
-check("zero hits WITH a known max is dead",
-      m["is_dead"](alive_unloaded.Serial), True)
+GROUND.append(Corpse())
+found = m["find_new_corpse"]({}, boss.Body)
+check("its corpse IS the proof of death", found is not None, True)
 
+print()
+print("   -- the trap: last spawn's corpse must not count --")
+del GROUND[:]
+stale = Corpse(serial=0xDEAD0001)
+GROUND.append(stale)
+known = m["snapshot_corpses"]()          # taken at engage, as fight() does
+check("the corpse already here is recorded", stale.Serial in known, True)
+check("and is NOT read as a fresh kill",
+      m["find_new_corpse"](known, boss.Body), None)
+
+fresh = Corpse(serial=0xBEEF0002)
+GROUND.append(fresh)
+got = m["find_new_corpse"](known, boss.Body)
+check("a NEW corpse alongside it does count",
+      got is not None and got.Serial, 0xBEEF0002)
+
+print()
+print("   -- recognising it by name OR by body value --")
+del GROUND[:]
+GROUND.append(Corpse(name="a slasher of veils corpse", amount=0))
+check("matched on the name alone",
+      m["find_new_corpse"]({}, boss.Body) is not None, True)
+
+del GROUND[:]
+GROUND.append(Corpse(name="a corpse", amount=0x02E5))
+check("matched on Amount = body value (survives a rename)",
+      m["find_new_corpse"]({}, boss.Body) is not None, True)
+
+del GROUND[:]
+GROUND.append(Corpse(name="a dire wolf corpse", amount=0x0019))
+check("somebody else's corpse is ignored",
+      m["find_new_corpse"]({}, boss.Body), None)
+
+del GROUND[:]
+GROUND.append(Corpse(name="a slasher of veils corpse", item_id=0x1234))
+GROUND[0].IsCorpse = False
+check("a non-corpse item with the right name is ignored",
+      m["find_new_corpse"]({}, boss.Body), None)
+
+print()
+print("   -- THE REPORTED BUG: vanishing is not dying --")
 del MOBS[:]
-check("monster gone from the world is dead",
-      m["is_dead"](0x0003FE1B), True)
+del GROUND[:]
+check("gone from the mobile list", m["mobile_present"](0x0003FE1B), False)
+check("but with NO corpse, that is NOT a kill",
+      m["find_new_corpse"]({}, 0x02E5), None)
+print("        (it walked out of range or line of sight - the old code")
+print("         called this dead and ended the fight with the boss alive)")
 
 print()
 print("=" * 100)
