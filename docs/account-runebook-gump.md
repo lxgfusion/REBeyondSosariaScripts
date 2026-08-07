@@ -94,7 +94,7 @@ with the page's entry buttons sorted ascending (excluding controls `1-5`, `503`,
 This matters because the inspector shows text but not button ids, so it is
 unknown whether page 2's buttons restart at `10` or continue at `19`. Pairing by
 display order is correct either way, and
-[`tests/test_mining_runner.py`](../tests/test_mining_runner.py) asserts both.
+[`tests/test_harvest_runner.py`](../tests/test_harvest_runner.py) asserts both.
 
 Lines that are not entries — `New Rune`, `New Runebook`, `Organize`, the folder
 name, the header, the `Page X/Y` footer — carry no entry button and are skipped

@@ -5,8 +5,8 @@ source rather than typed by hand. Body values come from both `Body = ...`
 assignments and `BaseMount` `base(name, body, mountItemID, ...)` arguments.
 
 This is the data behind `ANIMAL_CATALOGUE` in
-[`Scripts/tame_animals.py`](../Scripts/tame_animals.py). Confirm anything
-surprising against your own shard - use `Scripts/diag_deed_target.py` on a
+[`Scripts/TameAndFill.py`](../Scripts/TameAndFill.py). Confirm anything
+surprising against your own shard - use `diag_deed_target.py` on a
 tamed pet to read a live body value.
 
 Species marked `*` share a body value with another species, so a body match
@@ -131,7 +131,7 @@ Min taming of `-` means the source sets no `MinTameSkill`.
 
 ## Body collisions
 
-These body values are used by more than one species. `tame_animals.py` reads the
+These body values are used by more than one species. `TameAndFill.py` reads the
 creature's name before touching anything with one of these bodies, and walks away
 if it cannot resolve the name - a missed tame beats a pet with no deed for it.
 

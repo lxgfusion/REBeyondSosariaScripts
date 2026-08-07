@@ -8,20 +8,22 @@ at a RunUO/ServUO-derived freeshard.
 
 | Script | What it does |
 |---|---|
-| [`Scripts/tame_animals.py`](Scripts/tame_animals.py) | Reads the taming order deeds in your pack and hunts only those species. Walks to each one, tames it, and puts it in the deed for its species. |
-| [`Scripts/diag_deeds.py`](Scripts/diag_deeds.py) | Troubleshooting. Dumps every item you carry with the verdict the tamer would reach — whether it reads as a deed, and which species it names. |
+| [`Scripts/TameAndFill.py`](Scripts/TameAndFill.py) | Reads the taming order deeds in your pack and hunts only those species. Walks to each one, tames it, and puts it in the deed for its species. |
 | [`Scripts/COVFarm.py`](Scripts/COVFarm.py) | **Camps the Slasher of Veils and kills it from range.** Waits for the spawn, opens with Wildfire, then holds a set distance while spamming Nether Blast until it dies. Matches the monster on its name, with the body only as a pre-filter. Breaks off below a configurable health percentage. |
 | [`Scripts/petcommandcenter2.py`](Scripts/petcommandcenter2.py) | **Deploy and shrink your pets by speaking a phrase.** Say one phrase to release every pet statue in your pack and issue the guard command; say another to shrink the nearest pets back in. Set `SETUP_MODE = True` and it walks you through targeting your statues and shrink tool, then prints a finished config block to paste in — no reading item IDs out of the inspector. |
-| [`Scripts/diag_tame_candidates.py`](Scripts/diag_tame_candidates.py) | Troubleshooting. **Run this when the tamer ignores a species.** Scans with *no* body filter and reproduces the tamer's decision for every creature in range, naming the reason. Catches the silent case where the shard's body value differs from the catalogue — the scan filter never returns those creatures, so nothing is logged at all. Also reports what Razor's ignore list is hiding. Read-only. |
-| [`Scripts/diag_deed_target.py`](Scripts/diag_deed_target.py) | Troubleshooting. Tries five deed double-click-and-target sequences against one already-tamed pet to find which your shard accepts. |
 | [`Scripts/harvest_runner.py`](Scripts/harvest_runner.py) | **Mining + lumberjacking on one script.** Account-runebook travel, per-job rune routes, smelting, drop-off runs, vendor rounds, meditation-backed mana, and the Greyskull call-out. |
 | [`Scripts/mining_runner.py`](Scripts/mining_runner.py) | Superseded by `harvest_runner.py`. Kept as a working fallback until the integrated script is confirmed in-game — delete it once it is. |
-| [`Scripts/diag_ar_gump.py`](Scripts/diag_ar_gump.py) | Troubleshooting. Dumps the account runebook gump — layout, text, buttons, page markers — to a file. |
-| [`Scripts/diag_vendors.py`](Scripts/diag_vendors.py) | Troubleshooting. Lists nearby NPCs with the exact names Razor sees and their context menu entries. |
-| [`Scripts/diag_journal.py`](Scripts/diag_journal.py) | Troubleshooting. Live journal tap — prints every incoming line with its type, speaker and text, and whether it matches a watch phrase. |
 | [`Scripts/resource_order_runner.py`](Scripts/resource_order_runner.py) | **Fills resource orders.** Counts the chest's ingots by hue, takes orders it can afford out of the book, fills them, then recalls to `RO > RO` and drags the completed deeds to the Resource Gatherer. Keeps 100 of each metal behind. Confirmed end-to-end in game. |
-| [`Scripts/diag_order_names.py`](Scripts/diag_order_names.py) | Walks all 540 pages of the Resource Order Book and records the exact name of every resource it asks for, with counts. Read-only. Run once to stop guessing at names. |
-| [`Scripts/diag_resource_orders.py`](Scripts/diag_resource_orders.py) | Groundwork for the resource-order filler. Does the chest ingot census and fill budget for real, and dumps the order book's two gumps with each row paired to its own button. Read-only. |
+
+## A note on the diagnostics
+
+Several of these scripts were built alongside `diag_*.py` troubleshooting
+companions — they dump what Razor actually sees (gump layouts, NPC tooltips,
+pack contents, creature bodies) instead of guessing. Those are not in this
+repo, which is kept to the scripts that get run day to day, but they are what
+found nearly every root cause recorded in `docs/`. If you are debugging one of
+these scripts, writing a throwaway dump script first is almost always faster
+than reasoning about it.
 
 ## Installing a script
 
@@ -30,7 +32,7 @@ at a RunUO/ServUO-derived freeshard.
 2. In Razor Enhanced, open **Scripting**, hit **Reload**, select the script.
 3. Optionally bind it to a hotkey.
 
-## `tame_animals.py`
+## `TameAndFill.py`
 
 ### The deeds decide what gets hunted
 
@@ -94,7 +96,7 @@ hunt list (`SKIP_FULL_DEEDS`), and progress is shown in the `DEBUG` scan output.
 
 An item only counts as a deed if its name or tooltip contains one of
 `DEED_NAME_HINTS` (default `order`, `deed`, `contract`) **and** it names a
-species in the catalogue. Run [`Scripts/diag_deeds.py`](Scripts/diag_deeds.py) —
+species in the catalogue. Run `diag_deeds.py` —
 it prints every item you carry, the exact tooltip text read from it, and which of
 those two checks failed. It changes nothing, so it's safe to run any time.
 
@@ -160,7 +162,7 @@ The combined `Items.UseItem(deed, pet)` form is deliberately **not** used: the
 Razor docs warn its built-in target "may not work on some free shards."
 
 If the deed step ever breaks again, stand next to one already-tamed animal and run
-[`Scripts/diag_deed_target.py`](Scripts/diag_deed_target.py). It tries five
+`diag_deed_target.py`. It tries five
 sequences and stops at the first that consumes the pet, dumping the deed tooltip
 and journal at each step.
 
@@ -461,7 +463,7 @@ Detection uses a journal **timestamp cursor** rather than `Search` + `Clear`, so
 one chant fires exactly once, chants said before the script started are ignored,
 and the mining and meditation journal checks are left undisturbed.
 
-If it still doesn't trigger, run [`Scripts/diag_journal.py`](Scripts/diag_journal.py)
+If it still doesn't trigger, run `diag_journal.py`
 and say it — that prints every journal line with its Type, speaker and text, and
 says whether it would have matched.
 
@@ -601,7 +603,7 @@ skipped rather than failing silently mid-round:
 [Mine]       Fill it in at the top of this script, or set "enabled": False.
 ```
 
-Run [`Scripts/diag_vendors.py`](Scripts/diag_vendors.py) beside an NPC to get its
+Run `diag_vendors.py` beside an NPC to get its
 real name and context entries verbatim.
 
 ### Runebook pages
@@ -632,7 +634,7 @@ Two details the parser depends on:
   it's unknown whether page 2 restarts at button `10` or continues at `19` —
   pairing by display order is correct either way, and the tests assert both.
 
-If the runebook changes, re-run [`Scripts/diag_ar_gump.py`](Scripts/diag_ar_gump.py).
+If the runebook changes, re-run `diag_ar_gump.py`.
 Its click-probe stays off by default — blind-clicking runebook buttons can recall
 you or spend a charge. Both diagnostics write a full dump to `%TEMP%` and print
 the path.
@@ -699,11 +701,6 @@ from the implementation.
 - `test_resource_order_runner.py` — 41 checks on the filler: hue-keyed stock,
   the per-metal reserve, row/button pairing including the amt-0 row that opens
   every page, deed tooltip parsing, and the config values that go live.
-- `test_resource_orders.py` — checks on the resource-order groundwork: deed
-  tooltip de-concatenation and field parsing, the ingot census (split stacks
-  summed before the reserve, custom graphics, tooltip-as-name fallback), the
-  fill budget, and gump row/button pairing by Y coordinate including a row that
-  renders fewer cells than its neighbours.
 - `test_extract_re_api.py` — 9 checks on the API extractor in `tools/`, one per
   C# declaration shape that an earlier version of the parser silently dropped
   (nested class with the brace on the next line, `public static int Hits { get`,

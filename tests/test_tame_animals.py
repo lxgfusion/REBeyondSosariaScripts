@@ -21,7 +21,7 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPT = os.path.join(HERE, os.pardir, "Scripts", "tame_animals.py")
+SCRIPT = os.path.join(HERE, os.pardir, "Scripts", "TameAndFill.py")
 
 FAILURES = []
 

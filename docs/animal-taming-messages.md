@@ -38,7 +38,7 @@ Practical consequence: **stay adjacent for the whole attempt.** The 7-tile figur
 is the hard cutoff, not a safe working distance — the same tick also runs the
 line-of-sight check (1049654), which a wandering creature breaks long before it
 gets 7 tiles away. Trailing at 3-4 tiles loses attempts to trees, walls and
-corners. `tame_animals.py` holds `STAY_DIST = 1` and re-closes every 150 ms.
+corners. `TameAndFill.py` holds `STAY_DIST = 1` and re-closes every 150 ms.
 
 ## Species reference
 

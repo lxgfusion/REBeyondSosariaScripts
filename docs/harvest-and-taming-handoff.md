@@ -18,11 +18,16 @@ the unfixed copy for days.
 
 | Install | Deployed scripts |
 |---|---|
-| `E:\uoclients\RazorEnhanced\Scripts\` | `TameAndFill.py` (= repo `tame_animals.py`), `resource_order_runner.py`, `buy_vendor_key.py`, most `diag_*.py` |
+| `E:\uoclients\RazorEnhanced\Scripts\` | `TameAndFill.py`, `resource_order_runner.py`, `buy_vendor_key.py`, most `diag_*.py` |
 | `E:\uoclients\UOAlive_Package\razor\Scripts\` | `harvest_runner.py`, `diag_ar_gump.py`, `diag_vendors.py` |
 | `E:\uoclients\UOAlive_Package\razor\Scripts\Mystic Gatherer\` | `harvest_runner.py`, `diag_bods.py` |
 
 Repo is `G:\programming projects\Razor Enhanced Scripts\`.
+
+**The `diag_*.py` diagnostics are no longer in the repo** (removed
+2026-08-06 to keep it to the scripts people actually run). They still exist
+in the live Razor folders above, and every version of them is recoverable
+from git history — `git log --diff-filter=D --name-only` finds them.
 
 **Always check drift before claiming a fix is live:**
 
@@ -38,7 +43,7 @@ Deployed copies use **CRLF**; the repo uses LF, so always pass
 
 | Repo file | Deployed | Drift |
 |---|---|---|
-| `tame_animals.py` | `RazorEnhanced\TameAndFill.py` | **in sync** (synced 2026-08-06, `.bak-before-zombie-fix` kept) |
+| `TameAndFill.py` | `RazorEnhanced\TameAndFill.py` | **in sync** (synced 2026-08-06, `.bak-before-zombie-fix` kept) |
 | `resource_order_runner.py` | `RazorEnhanced\` | in sync |
 | `diag_bods.py` | `Mystic Gatherer\` | in sync |
 | `harvest_runner.py` | `Mystic Gatherer\` | **repo is now AHEAD — live lacks the §2c/§2d fixes.** Also `WOOD_STORAGE_SERIAL`, which is per character and correct (§2e) |
@@ -245,7 +250,7 @@ spot with no trip home.
 
 ---
 
-## 4. `tame_animals.py` (deployed as `TameAndFill.py`)
+## 4. `TameAndFill.py` (deployed as `TameAndFill.py`)
 
 Reads taming order deeds in the pack, hunts **only** those species, tames them,
 puts each in its deed.
@@ -301,7 +306,7 @@ The same dumps caught `Vela the sorceress -> IGNORED: matched 'orc'`, because
 "s-orc-eress". Fixed in `diag_tame_candidates.py` by anchoring only the START of
 the word (`\borc` still blocks "orcish" and "orcs").
 
-**`tame_animals.py` / `TameAndFill.py` still carry the substring version.** Left
+**`TameAndFill.py` / `TameAndFill.py` still carry the substring version.** Left
 alone deliberately: the guard only ever runs on creatures already matching a
 catalogue body, and no catalogue species name contains a NEVER word mid-word —
 verified by script over all 112 — so the practical impact today is zero. Worth
@@ -331,9 +336,12 @@ python tests/sim_harvest_runner.py       #  65 checks, -v for full log
 ```
 
 All suites green at handoff, including the other tasks'
-(`test_resource_order_runner.py` 436, `test_resource_orders.py` 84,
-`test_buy_vendor_key.py` 54, `test_chest_contents.py` 35,
-`test_order_names.py` 26, `test_extract_re_api.py` 9).
+(`test_resource_order_runner.py` 436, `test_buy_vendor_key.py` 54,
+`test_covfarm.py` 59, `test_petcommandcenter2.py` 62,
+`test_extract_re_api.py` 9).
+
+The suites for the `diag_*` scripts went with those scripts when the repo
+was pruned on 2026-08-06.
 
 Tests `exec` the **real script** with stub Razor globals, so there is no copied
 logic to drift. `sim_harvest_runner.py` is a full-loop simulation — fake paged

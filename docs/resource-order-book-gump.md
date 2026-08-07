@@ -174,7 +174,7 @@ bracket has to be matched directly.
 
 **There is no `Resource Type:` and no `Filled:`.** Those labels belong to
 *taming* orders (`Level: 2Creature Type: KirinFilled: 24/60`), which
-`tame_animals.py` handles. `harvest_runner.py`'s
+`TameAndFill.py` handles. `harvest_runner.py`'s
 `BOD_EXCLUDE_TEXT = ["creature type", "resource type"]` implies otherwise and is
 misleading — the first parser here was written from it and read nothing at all,
 reporting "no order deeds in the pack" with one sitting in the pack.

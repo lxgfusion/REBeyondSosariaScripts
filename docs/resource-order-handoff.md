@@ -147,9 +147,11 @@ takes the diluted branch and allows **20** pages, not 4. Copper's filtered
 result is 31 + 101 = **132 rows ≈ 9 pages**. The cap is not the binding
 constraint, and raising `MAX_PAGES_WHEN_DILUTED` changes nothing for Copper.
 
-The page counter is trustworthy here: the captured Valorite page in
-`tests/test_resource_orders.py` shows `Displayed: 230` against `(1/16)`, so the
-footer reflects the *filtered* result and the `current >= total` break works.
+The page counter is trustworthy here: a captured Valorite page showed
+`Displayed: 230` against `(1/16)`, so the footer reflects the *filtered*
+result and the `current >= total` break works. (That capture lived in
+`tests/test_resource_orders.py`, removed on 2026-08-06 with the `diag_*`
+scripts it covered — it is still in git history.)
 
 ### What the collision table actually says
 
@@ -173,7 +175,7 @@ other target is dense enough to put its own rows on page 1.
 
 ### The diagnostic, and what it returned
 
-`Scripts/diag_copper_pages.py` (deployed 2026-07-30) walks the filtered result
+`diag_copper_pages.py` (deployed 2026-07-30) walks the filtered result
 the way the runner does and names the cause. Read-only: it presses book button
 1, list button 12 (filter) and 5 (Next) and nothing else, enforced by a
 `PRESSABLE` allowlist — button 2 on that gump is **Purge** and 3 is **Fill from
@@ -265,7 +267,7 @@ to miss a stack, and they need different fixes:
    so a chest search never finds it.
 4. **Stale snapshot.** `Contains` is taken when the container is opened.
 
-`Scripts/diag_copper_stock.py` (deployed 2026-07-30) tells them apart. It walks
+`diag_copper_stock.py` (deployed 2026-07-30) tells them apart. It walks
 both chests to depth 3, does a world search for every `0x1BF2` stack in range,
 and prints one table:
 
