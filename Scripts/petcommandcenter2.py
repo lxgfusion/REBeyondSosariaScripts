@@ -38,6 +38,7 @@ Notes
 """
 
 import math
+import re
 
 
 SCRIPT_VERSION = "2.0.0"
@@ -85,14 +86,38 @@ ONLY_MY_OWN_SPEECH = True
 # =============================================================================
 #
 #   label     Anything you like. It is what shows in the log, so make it
-#             recognisable - it is what you see when a statue is missing.
-#   id        The statue's Item ID.
-#   hue       The statue's hue, or None for "any hue". Use None if you are not
+#             recognisable - it is what you see when a pet is missing.
+#   id        The item's Item ID.
+#   hue       The item's hue, or None for "any hue". Use None if you are not
 #             sure: it still matches, it is just less specific. Only set a hue
-#             when you carry two different statues that share an ID.
+#             when you carry two different items that share an ID.
+#   name      OPTIONAL. Only release items whose tooltip contains this text,
+#             matched case-insensitively. SEE THE NOTE ON SHRUNKEN PETS BELOW.
+#   count     OPTIONAL. Release at most this many. Default: release EVERY
+#             matching item, which is what you normally want.
 #   enabled   False parks an entry without deleting it.
 #
 # Add as many as you like - there is no five-pet limit.
+#
+# ---------------------------------------------------------------------------
+# SHRUNKEN PETS ARE ALL THE SAME ITEM
+# ---------------------------------------------------------------------------
+# A pet statue has its own ID and hue, so one entry finds one statue. A
+# SHRUNKEN pet does not: every shrunken pet on this shard is ItemID 0x2107,
+# hue 0x0000, named "a shrunken pet". Ten of them are ten identical items.
+#
+# So for shrunken pets you do NOT write one entry per pet. Write ONE entry and
+# it releases all of them:
+#
+#     {"enabled": True, "label": "All shrunken pets", "id": 0x2107},
+#
+# If you only want SOME of them out, tell them apart by the pet's own name,
+# which is in the tooltip ("Name: Mike Hawk Breed: TownInvader"):
+#
+#     {"enabled": True, "label": "Mike Hawk", "id": 0x2107,
+#      "name": "Mike Hawk"},
+#
+# SETUP_MODE writes the right form for you automatically.
 
 PET_STATUES = [
     {"enabled": True, "label": "Pet 1", "id": 0x25AD, "hue": 0x0AB0},
@@ -100,6 +125,9 @@ PET_STATUES = [
     {"enabled": True, "label": "Pet 3", "id": 0x25A5, "hue": 0x0481},
     {"enabled": True, "label": "Pet 4", "id": 0x429E, "hue": 0x0480},
     {"enabled": True, "label": "Pet 5", "id": 0x25B7, "hue": 0x0AB0},
+
+    # Every shrunken pet in the pack, however many there are.
+    {"enabled": True, "label": "Shrunken pets", "id": 0x2107},
 ]
 
 
@@ -120,6 +148,21 @@ SHRINK_RANGE = 15            # tiles
 # somebody else's pet standing between you and yours.
 SHRINK_ONLY_THESE_NAMES = []
 
+# Include pets that use a HUMAN body. Leave True.
+#
+# Bioengineered / humanoid pets have a human MobileID (0x0190, 0x0191), so
+# filtering humans out drops them before anything else is even checked - that
+# is how a bonded pet standing right next to you gets skipped in silence. Real
+# players and NPCs are still excluded, because the bonded/tamed test below has
+# to pass as well.
+SHRINK_INCLUDE_HUMAN_BODIES = True
+
+# How a pet is recognised, beyond the numeric "bonded"/"tamed" properties.
+# Some pets report their status as a bare tooltip line with no number at all -
+# a Bioengineered pet just says "(bonded)" - and GetPropValue cannot see those,
+# so the tooltip is checked for these markers too.
+PET_TOOLTIP_MARKERS = ["(bonded)", "(tame)", "(tamed)"]
+
 
 # =============================================================================
 # 5. WHAT TO SAY  -  shard-specific commands. Set to "" to say nothing.
@@ -134,11 +177,17 @@ SAY_AFTER_DEPLOY = "all guard me"
 
 SPEECH_HUE = 33              # colour of the above, and of on-screen messages
 
+# Tooltip fields that hold the PET'S OWN name, most specific first. A shrunken
+# pet reads "Name: Mike Hawk Breed: TownInvader Gender: Male", so "name" pulls
+# out "Mike Hawk". Used for the log, and for the optional "name" filter.
+PET_NAME_FIELDS = ["pet name", "name"]
+
 
 # =============================================================================
 # 6. TIMING  -  raise these if your shard lags. All values are milliseconds.
 # =============================================================================
 
+PROPS_TIMEOUT = 1500         # how long to wait for an item's tooltip
 LISTEN_POLL_MS = 200         # how often to check for your phrase
 RELEASE_PAUSE_MS = 800       # after using a statue, before the next
 SHRINK_CURSOR_TIMEOUT = 3000 # how long to wait for the shrink target cursor
@@ -228,19 +277,40 @@ def valid_statues():
             continue
 
         hue = entry.get("hue")
-        key = (item_id, hue)
+        name = (entry.get("name") or "").strip()
+        count = entry.get("count")
+
+        # Two entries that are identical in every respect are redundant, NOT a
+        # second pet: one entry already releases every matching item. This is
+        # what shrunken pets look like - they all share id 0x2107 and hue
+        # 0x0000 - and an earlier version dropped them as "duplicates", which
+        # is exactly how a pet went missing. Distinguish them by "name".
+        key = (item_id, hue, name.lower())
         if key in seen:
-            log("%s is a duplicate of %s (same id and hue) - skipping it."
-                % (where, seen[key]), HUE_WARN)
+            log("%s is identical to %s, so it adds nothing - one entry already "
+                "releases every matching item." % (where, seen[key]), HUE_WARN)
+            if not name:
+                log("   To release only certain ones, give each a \"name\" "
+                    "from its tooltip.", HUE_INFO)
             continue
         seen[key] = where
 
-        out.append({"label": where, "id": item_id, "hue": hue})
+        out.append({"label": where, "id": item_id, "hue": hue,
+                    "name": name, "count": count})
     return out
 
 
 def describe_hue(hue):
     return "any hue" if hue is None else "hue 0x%04X" % hue
+
+
+def describe_entry(entry):
+    bits = ["id 0x%04X" % entry["id"], describe_hue(entry["hue"])]
+    if entry.get("name"):
+        bits.append("named %r" % entry["name"])
+    if entry.get("count"):
+        bits.append("max %d" % entry["count"])
+    return ", ".join(bits)
 
 
 def preflight():
@@ -259,8 +329,7 @@ def preflight():
 
     log("%d pet statue(s) configured:" % len(statues), HUE_GOOD)
     for entry in statues:
-        log("   %-16s id 0x%04X, %s"
-            % (entry["label"], entry["id"], describe_hue(entry["hue"])))
+        log("   %-18s %s" % (entry["label"], describe_entry(entry)))
 
     log("Shrink tool: id 0x%04X, %s   (up to %d pet(s) within %d tiles)"
         % (SHRINK_TOOL_ID, describe_hue(SHRINK_TOOL_HUE),
@@ -319,6 +388,104 @@ def find_in_pack(item_id, hue, retry=True):
     return found
 
 
+def find_all_in_pack(item_id, hue, retry=True):
+    """EVERY matching item in the backpack, not just the first.
+
+    Items.FindByID returns a single item. That is fine for statues, which each
+    have their own id and hue, but every shrunken pet is id 0x2107 hue 0x0000 -
+    so asking for one and stopping released one pet and quietly left the rest
+    in the pack.
+    """
+    backpack = Player.Backpack
+    if backpack is None:
+        return []
+
+    wanted_hue = -1 if hue is None else hue
+    found = None
+    try:
+        found = Items.FindAllByID(item_id, wanted_hue, backpack.Serial, 0)
+    except Exception as exc:
+        debug("FindAllByID(0x%04X) failed: %s" % (item_id, exc), HUE_WARN)
+
+    items = list(found or [])
+    if not items and retry:
+        refresh_pack()
+        return find_all_in_pack(item_id, hue, retry=False)
+
+    if not items:
+        # Last resort: some builds are fussy about FindAllByID's arguments, so
+        # fall back to the single-item call rather than reporting nothing.
+        single = find_in_pack(item_id, hue, retry=False)
+        if single is not None:
+            items = [single]
+    return items
+
+
+def split_runtogether(raw):
+    """Tooltip fields arrive concatenated: "Mike HawkBreed:" -> "Mike Hawk"."""
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", raw)
+
+
+def item_tooltip_raw(item):
+    """Name plus tooltip of an item, de-concatenated, ORIGINAL case.
+
+    Kept unlowercased so a pet's name comes back out as "Mike Hawk" rather than
+    "mike hawk" - it ends up in the config block SETUP_MODE writes, and in the
+    log, where the player's own capitalisation is what they expect to see.
+    """
+    try:
+        Items.WaitForProps(item, PROPS_TIMEOUT)
+    except Exception:
+        pass
+    parts = []
+    if item.Name:
+        parts.append(item.Name)
+    try:
+        parts.extend(Items.GetPropStringList(item))
+    except Exception:
+        pass
+    return split_runtogether(" ".join(parts))
+
+
+def item_tooltip(item):
+    """The same thing lowercased, for matching."""
+    return item_tooltip_raw(item).lower()
+
+
+def tooltip_field(text, label):
+    """Value of a "label: value" tooltip field, or "".
+
+    Fields run into each other, so the value ends where the next label starts:
+    "Name: Mike Hawk Breed: Town Invader" -> "Mike Hawk". The search is
+    case-insensitive but the value keeps the casing it had.
+    """
+    marker = label.lower() + ":"
+    idx = text.lower().find(marker)
+    if idx < 0:
+        return ""
+    rest = text[idx + len(marker):]
+    colon = rest.find(":")
+    if colon < 0:
+        return rest.strip()
+    words = rest[:colon].split()
+    if len(words) > 1:
+        words = words[:-1]        # the last word is the next field's label
+    return " ".join(words).strip()
+
+
+def pet_label(item):
+    """The pet's own name if the item carries one, else the item's name."""
+    try:
+        text = item_tooltip_raw(item)
+    except Exception:
+        return item.Name or "0x%X" % item.Serial
+    for field in PET_NAME_FIELDS:
+        value = tooltip_field(text, field)
+        if value:
+            return value
+    return item.Name or "0x%X" % item.Serial
+
+
 # =============================================================================
 # PET DISCOVERY
 # =============================================================================
@@ -342,23 +509,65 @@ def is_wanted_name(name):
     return False
 
 
+def mob_tooltip(mob):
+    """A mobile's tooltip, de-concatenated and lowercased."""
+    try:
+        Mobiles.WaitForProps(mob, PROPS_TIMEOUT)
+    except Exception:
+        pass
+    parts = []
+    if mob.Name:
+        parts.append(mob.Name)
+    try:
+        parts.extend(Mobiles.GetPropStringList(mob))
+    except Exception:
+        pass
+    return split_runtogether(" ".join(parts)).lower()
+
+
+def looks_like_pet(mob):
+    """Is this one of your pets?
+
+    The numeric properties are checked first because they are cheap. They are
+    not enough on their own: a Bioengineered pet reports its status as the bare
+    tooltip line "(bonded)", with no number for GetPropValue to return, so it
+    scored zero on both and was skipped.
+    """
+    try:
+        if Mobiles.GetPropValue(mob, "bonded"):
+            return True
+        if Mobiles.GetPropValue(mob, "tamed"):
+            return True
+    except Exception:
+        pass
+
+    text = mob_tooltip(mob)
+    if not text:
+        return False
+    for marker in PET_TOOLTIP_MARKERS:
+        marker = marker.strip().lower()
+        if marker and marker in text:
+            return True
+    return False
+
+
 def nearby_pets():
     """Tamed/bonded creatures in range, closest first."""
     found = []
     f = Mobiles.Filter()
     f.Enabled = True
     f.RangeMax = SHRINK_RANGE        # never leave this unset
-    f.IsHuman = False
     f.IsGhost = False
     f.CheckIgnoreObject = False
+    if not SHRINK_INCLUDE_HUMAN_BODIES:
+        # Only set this when asked. Leaving it False by default silently drops
+        # every humanoid pet, whatever its tooltip says.
+        f.IsHuman = False
 
     for mob in Mobiles.ApplyFilter(f) or []:
-        try:
-            bonded = Mobiles.GetPropValue(mob, "bonded")
-            tamed = Mobiles.GetPropValue(mob, "tamed")
-        except Exception:
-            continue
-        if not (bonded or tamed):
+        if mob.Serial == Player.Serial:
+            continue                 # never target yourself
+        if not looks_like_pet(mob):
             continue
         if not is_wanted_name(mob.Name):
             debug("Skipping %s - not in SHRINK_ONLY_THESE_NAMES."
@@ -403,22 +612,47 @@ def deploy(statues):
 
     released = 0
     missing = []
+    used_serials = {}
+
     for entry in statues:
-        statue = find_in_pack(entry["id"], entry["hue"])
-        if statue is None:
+        # Collect every match up front. The pack's Contains snapshot goes stale
+        # as items are consumed, so gather the serials first and then use them,
+        # rather than re-querying between releases.
+        matches = find_all_in_pack(entry["id"], entry["hue"])
+
+        wanted = []
+        for item in matches:
+            if item.Serial in used_serials:
+                continue                     # already released by an earlier entry
+            if entry.get("name"):
+                text = item_tooltip(item)
+                if entry["name"].lower() not in text:
+                    continue
+            wanted.append(item)
+
+        if entry.get("count"):
+            wanted = wanted[:entry["count"]]
+
+        if not wanted:
             missing.append(entry["label"])
             continue
 
-        say(SAY_BEFORE_EACH_RELEASE)
-        try:
-            Items.UseItem(statue.Serial)
-        except Exception as exc:
-            log("%s: could not use the statue (%s)." % (entry["label"], exc),
-                HUE_BAD)
-            continue
-        released += 1
-        debug("%s released." % entry["label"], HUE_GOOD)
-        Misc.Pause(RELEASE_PAUSE_MS)
+        debug("%s: %d item(s) match (%s)."
+              % (entry["label"], len(wanted), describe_entry(entry)))
+
+        for item in wanted:
+            label = pet_label(item)
+            used_serials[item.Serial] = True
+
+            say(SAY_BEFORE_EACH_RELEASE)
+            try:
+                Items.UseItem(item.Serial)
+            except Exception as exc:
+                log("%s: could not use it (%s)." % (label, exc), HUE_BAD)
+                continue
+            released += 1
+            debug("Released %s." % label, HUE_GOOD)
+            Misc.Pause(RELEASE_PAUSE_MS)
 
     if missing:
         log("Not in your pack: %s" % ", ".join(missing), HUE_WARN)
@@ -533,8 +767,9 @@ def run_setup():
                             % (len(entries) + 1))
         if item is None:
             break
-        label = item.Name or "Pet %d" % (len(entries) + 1)
-        entries.append((label, item.ItemID, item.Hue))
+        pet = pet_label(item)
+        label = pet or item.Name or "Pet %d" % (len(entries) + 1)
+        entries.append((label, item.ItemID, item.Hue, pet))
         log("   got %s - id 0x%04X, hue 0x%04X"
             % (label, item.ItemID, item.Hue), HUE_GOOD)
 
@@ -552,11 +787,37 @@ def run_setup():
                "SETUP_MODE = False", HUE_STEP)
     setup_line("=" * 60, HUE_STEP)
     setup_line("")
+    # Items sharing an id and hue are indistinguishable - every shrunken pet is
+    # 0x2107/0x0000. Emitting one entry per click would make all but the first
+    # redundant, so those get ONE entry qualified by the pet's own name, or a
+    # single catch-all if the tooltip carries no name to go on.
+    kinds = {}
+    for label, item_id, hue, pet in entries:
+        kinds.setdefault((item_id, hue), []).append((label, pet))
+
+    shared = [k for k, v in kinds.items() if len(v) > 1]
+    if shared:
+        setup_line("# Some of these share an item id and hue, so they can only")
+        setup_line("# be told apart by the pet's name from the tooltip.")
+
     setup_line("PET_STATUES = [")
-    for label, item_id, hue in entries:
+    for label, item_id, hue, pet in entries:
         safe = (label or "").replace('"', "'")
-        setup_line('    {"enabled": True, "label": "%s", '
-                   '"id": 0x%04X, "hue": 0x%04X},' % (safe, item_id, hue))
+        is_shared = len(kinds[(item_id, hue)]) > 1
+        if is_shared and pet:
+            setup_line('    {"enabled": True, "label": "%s", "id": 0x%04X, '
+                       '"hue": 0x%04X, "name": "%s"},'
+                       % (safe, item_id, hue, pet.replace('"', "'")))
+        elif is_shared:
+            # No name to filter on - one catch-all releases all of them.
+            if (item_id, hue) in shared:
+                setup_line('    {"enabled": True, "label": "All %s", '
+                           '"id": 0x%04X, "hue": 0x%04X},'
+                           % (safe, item_id, hue))
+                shared.remove((item_id, hue))
+        else:
+            setup_line('    {"enabled": True, "label": "%s", '
+                       '"id": 0x%04X, "hue": 0x%04X},' % (safe, item_id, hue))
     setup_line("]")
     setup_line("")
     if tool is not None:
