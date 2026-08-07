@@ -682,9 +682,9 @@ m["PathFinding"].player = grabber.player
 
 ok = m["loot_corpse"](corpse)
 check("loot reported success", ok, True)
-check("walked onto the corpse",
-      grabber.player.Position.X == 741 and grabber.player.Position.Y == 477,
-      True)
+check("walked to within LOOT_DISTANCE of the corpse",
+      max(abs(grabber.player.Position.X - 741),
+          abs(grabber.player.Position.Y - 477)) <= m["LOOT_DISTANCE"], True)
 check("said the grab command", SAID, ["[grab"])
 check("corpse is gone", m["Items"].FindBySerial(corpse.Serial), None)
 
@@ -711,16 +711,32 @@ check("does nothing when disabled", m3["loot_corpse"](corpse), False)
 check("says nothing", SAID, [])
 
 print()
-print("   -- already-empty corpse needs no grab at all --")
+print("   -- THE REPORTED BUG: the command must ALWAYS be said --")
 m4 = load()
 m4["PathFinding"].player = m4["Player"]
-del GROUND[:]
+del GROUND[:]                                    # serial lookup finds nothing
 ghost_corpse = Corpse(serial=0xBBBB, x=741, y=477)
 m4["Player"].Position = Point(741, 477)
 del SAID[:]
-check("gone before we got there counts as looted",
-      m4["loot_corpse"](ghost_corpse), True)
-check("no grab command wasted", SAID, [])
+ok = m4["loot_corpse"](ghost_corpse)
+check("still says the grab command, lookup miss or not", SAID, ["[grab"])
+check("and reports the corpse gone afterwards", ok, True)
+print("        (it used to check first and return without speaking - which")
+print("         is why [grab was never said)")
+
+print()
+print("   -- falling short of the corpse still says it --")
+m4b = load()
+del GROUND[:]
+far = Corpse(serial=0xCCCC, x=900, y=900)        # unreachable, no pathfinder
+GROUND.append(far)
+m4b["Player"].Position = Point(741, 477)
+m4b["LOOT_APPROACH_TIMEOUT"] = 1
+del SAID[:]; del MSGS[:]
+m4b["loot_corpse"](far)
+check("grab said from wherever we got to", "[grab" in SAID, True)
+check("and it says it fell short",
+      any("anyway" in x for x in MSGS), True)
 
 print()
 print("   -- returning to camp --")

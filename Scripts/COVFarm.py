@@ -222,9 +222,12 @@ LOOT_COMMAND = "[grab"
 # Colour of what the character says.
 SPEECH_HUE = 33
 
-# How close to stand before saying it. 1 = right on top of it. Raise it if the
-# grab command has a longer reach and you would rather not walk all the way.
-LOOT_DISTANCE = 1
+# How close to stand before saying it. The grab command reaches about 2.5
+# tiles on this shard, so 2 is plenty and saves walking onto the corpse tile -
+# which is often occupied and can leave the character shuffling.
+#
+# Falling short is not fatal: the command is said from wherever we got to.
+LOOT_DISTANCE = 2
 
 # The corpse vanishing is how we know the grab worked. If it is still there
 # after LOOT_RESULT_MS the command is said again, up to LOOT_RETRIES times.
@@ -628,12 +631,33 @@ def walk_to_point(x, y, tolerance, timeout_ms, label="destination"):
 # LOOTING
 # =============================================================================
 
-def loot_corpse(corpse):
-    """Walk onto the corpse and let the shard's grab command empty it.
+def corpse_still_there(serial):
+    """Is that corpse still on the ground?
 
-    The corpse vanishing is the success signal. If it does not vanish that is
-    reported but NOT treated as a failure worth stopping for - it usually just
-    means something in it was not on the player's grab list.
+    Asked through the same corpse scan that FOUND it, not through
+    Items.FindBySerial. A serial lookup on a ground item comes back empty often
+    enough that trusting it meant the script decided the corpse was already
+    looted and returned without ever saying the grab command.
+    """
+    for corpse in corpses_in_range():
+        if corpse.Serial == serial:
+            return True
+    try:
+        return Items.FindBySerial(serial) is not None
+    except Exception:
+        return False
+
+
+def loot_corpse(corpse):
+    """Get to the corpse and say the shard's grab command over it.
+
+    THE COMMAND IS ALWAYS SAID AT LEAST ONCE. An earlier version checked
+    whether the corpse was still there first and skipped the command when the
+    lookup came back empty - which is how it ended up never saying [grab at
+    all. A failed lookup is not proof the corpse is gone, the same trap as
+    treating a vanished mobile as a dead one.
+
+    The corpse disappearing afterwards is the success signal.
     """
     if not LOOT_CORPSE:
         return False
@@ -643,25 +667,24 @@ def loot_corpse(corpse):
     log("Looting the corpse at %d, %d." % (x, y), HUE_INFO)
 
     if not walk_to_point(x, y, LOOT_DISTANCE, LOOT_APPROACH_TIMEOUT, "corpse"):
-        log("Could not reach the corpse - leaving it.", HUE_WARN)
-        return False
+        # Not fatal. The grab command has reach, so say it anyway from
+        # wherever we got to rather than walking away from the loot.
+        log("Could not get within %d tiles of the corpse - trying the grab "
+            "from %d tiles anyway." % (LOOT_DISTANCE, distance_to_point(x, y)),
+            HUE_WARN)
 
     for attempt in range(1, LOOT_RETRIES + 1):
-        if Items.FindBySerial(serial) is None:
-            log("Corpse is gone - loot taken.", HUE_GOOD)
-            return True
-
         say(LOOT_COMMAND)
+        debug("Said %r (%d/%d)." % (LOOT_COMMAND, attempt, LOOT_RETRIES))
         Misc.Pause(LOOT_RESULT_MS)
 
-        if Items.FindBySerial(serial) is None:
+        if not corpse_still_there(serial):
             log("Corpse is gone - loot taken.", HUE_GOOD)
             return True
-        debug("Corpse still there after %r (%d/%d)."
-              % (LOOT_COMMAND, attempt, LOOT_RETRIES), HUE_WARN)
 
-    log("Corpse did not disappear. Whatever is left is not on your grab "
-        "list - carrying on.", HUE_WARN)
+    log("Said %r %d times and the corpse is still there. Whatever is left is "
+        "not on your grab list - carrying on."
+        % (LOOT_COMMAND, LOOT_RETRIES), HUE_WARN)
     return False
 
 
