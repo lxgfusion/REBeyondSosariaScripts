@@ -8,8 +8,15 @@ What it does
 ------------
 1. Sits and waits for the monster to spawn.
 2. Opens with WILDFIRE on it.
-3. Holds a set distance - 5 tiles by default - while spamming NETHER BLAST,
-   stepping back whenever the monster closes and following when it drifts off.
+3. Holds 4-5 tiles while spamming NETHER BLAST, stepping back whenever the
+   monster closes and following when it drifts off.
+
+   The standoff is enforced CONTINUOUSLY, not once per cast. Every wait in the
+   fight - the targeting cursor, the settle, the recovery between casts, even
+   waiting for mana - is broken into short slices with a distance correction
+   between each. A single cast blocks for several seconds, and the monster
+   walks for all of them, so checking only at the top of the loop lets it
+   reach melee range unanswered.
 4. Stops when the monster is dead, then goes back to waiting for the next one.
 
 Inspected target (Enhanced Mobile Inspector):
@@ -103,7 +110,7 @@ SPELL_OPENER = {
 
 SPELL_ATTACK = {
     "name":   "Nether Blast",
-    "school": "auto",
+    "school": "mastery",          # confirmed: it is in the Book of Masteries
     "target": "mobile",
     "mana":   30,
 }
@@ -115,19 +122,35 @@ OPENER_RECAST_MS = 0
 
 
 # =============================================================================
-# 3. POSITIONING
+# 3. POSITIONING  -  the band is held at ALL times, including mid-cast
 # =============================================================================
+#
+# Written as an explicit band rather than "5 tiles give or take", because
+# "within 5 tiles" has to mean never further than 5:
+#
+#   closer than DISTANCE_MIN  -> step AWAY   (it is getting into melee)
+#   further than DISTANCE_MAX -> step TOWARD (you are drifting out of range)
+#   in between                -> stand and cast
+#
+# Keep MIN below MAX by at least one tile. With MIN == MAX the character has
+# no band to sit in and jitters back and forth on the spot forever.
 
-# The distance to hold. The script steps away when the monster is closer than
-# this and follows when it is further.
-KEEP_DISTANCE = 5
+DISTANCE_MIN = 4                # never let it get closer than this
+DISTANCE_MAX = 5                # never drift further than this
 
-# How much drift to tolerate before correcting. Without this the character
-# jitters back and forth on the spot every single tick.
-DISTANCE_SLACK = 1              # so 4-6 tiles is "fine" at KEEP_DISTANCE 5
-
-# Never let it get further than this - beyond it the spell is out of range.
+# Absolute ceiling for casting at all. If something drags you past this the
+# script closes the gap before it tries to cast again.
 MAX_CAST_DISTANCE = 10
+
+# How often the distance is re-checked WHILE waiting - between casts, while
+# waiting for the targeting cursor, and while waiting for mana.
+#
+# This is the setting that makes the standoff hold. Checking distance once per
+# cast is not enough: a single cast blocks for the cursor wait plus the settle
+# plus the recovery pause, and the monster walks the whole time. Every one of
+# those waits is now broken into KITE_TICK_MS slices with a distance
+# correction between each, so nothing can close on you unanswered.
+KITE_TICK_MS = 150
 
 
 # =============================================================================
@@ -333,15 +356,74 @@ def hold_distance(mob):
     """One correction step. True if we are in the band and can cast."""
     gap = distance_to(mob)
 
-    if gap < KEEP_DISTANCE - DISTANCE_SLACK:
+    if gap < DISTANCE_MIN:
         step_away_from(mob)
         Misc.Pause(MOVE_PAUSE_MS)
         return False
-    if gap > KEEP_DISTANCE + DISTANCE_SLACK:
+    if gap > DISTANCE_MAX:
         step_toward(mob)
         Misc.Pause(MOVE_PAUSE_MS)
         return False
     return gap <= MAX_CAST_DISTANCE
+
+
+def enforce_distance(serial):
+    """Correct the standoff once, wherever we are called from.
+
+    This parks you at DISTANCE_MAX - the FAR edge of the band - rather than
+    anywhere inside it, and that matters against something that moves as fast
+    as you do. Reacting only once the floor is already breached means the
+    monster takes a tile, you take it back, it takes it again: the gap ends up
+    sitting a tile INSIDE the floor permanently. Holding the far edge instead
+    leaves a full tile of slack for it to eat before DISTANCE_MIN is touched.
+
+    Safe to call in the middle of anything - it only ever takes a single step,
+    and it settles once the gap is right rather than jittering. Returns False
+    when the monster is gone or we are dead.
+    """
+    if Player.IsGhost:
+        return False
+    mob = Mobiles.FindBySerial(serial)
+    if mob is None:
+        return False
+    gap = distance_to(mob)
+    if gap < DISTANCE_MAX:
+        step_away_from(mob)
+    elif gap > DISTANCE_MAX:
+        step_toward(mob)
+    return True
+
+
+def kite_pause(serial, milliseconds):
+    """Wait, but keep holding the standoff the whole time.
+
+    Every long pause in the fight goes through this. A plain Misc.Pause means
+    the monster is free to walk into melee range while the script sits there
+    doing nothing about it, which is exactly what "stay 5 tiles away at all
+    times" rules out.
+    """
+    deadline = time.time() + max(0, milliseconds) / 1000.0
+    while time.time() < deadline:
+        if not enforce_distance(serial):
+            return False
+        Misc.Pause(KITE_TICK_MS)
+    return True
+
+
+def wait_for_cursor(serial, timeout_ms):
+    """Wait for the targeting cursor WITHOUT standing still for it.
+
+    Target.WaitForTarget blocks, so asking it for the whole timeout in one go
+    would leave the standoff unmanaged for up to CAST_TIMEOUT_MS. Ask in short
+    slices instead and correct the distance between each one.
+    """
+    deadline = time.time() + max(0, timeout_ms) / 1000.0
+    while time.time() < deadline:
+        if Target.WaitForTarget(KITE_TICK_MS, False):
+            return True
+        if not enforce_distance(serial):
+            return False
+    return Target.HasTarget()
 
 
 def flee_from(mob):
@@ -487,7 +569,8 @@ def cast_at(spell, mob):
     if not start_cast(spell):
         return "fail"
 
-    if not Target.WaitForTarget(CAST_TIMEOUT_MS, False):
+    # Kites while it waits - the monster keeps walking during the cast.
+    if not wait_for_cursor(mob.Serial, CAST_TIMEOUT_MS):
         said = lines_match(new_lines(), MSG_NO_MANA)
         clear_cursor()                # or it survives into the next cast
         if said:
@@ -495,7 +578,7 @@ def cast_at(spell, mob):
         debug("%s: no target cursor appeared." % spell["name"], HUE_WARN)
         return "fail"
 
-    Misc.Pause(CAST_SETTLE_MS)
+    kite_pause(mob.Serial, CAST_SETTLE_MS)
 
     mode = (spell.get("target") or "mobile").strip().lower()
     fresh = Mobiles.FindBySerial(mob.Serial)
@@ -514,7 +597,8 @@ def cast_at(spell, mob):
         clear_cursor()
         return "fail"
 
-    Misc.Pause(AFTER_CAST_MS)
+    # Recovery between casts is the longest window of the lot, so it kites too.
+    kite_pause(mob.Serial, AFTER_CAST_MS)
 
     lines = new_lines()
     if lines_match(lines, MSG_OUT_OF_RANGE):
@@ -660,9 +744,14 @@ def preflight():
            SPELL_OPENER["target"],
            SPELL_ATTACK["name"], SPELL_ATTACK["school"],
            SPELL_ATTACK["target"]))
-    log("Holding %d tiles (%d-%d), casting out to %d."
-        % (KEEP_DISTANCE, KEEP_DISTANCE - DISTANCE_SLACK,
-           KEEP_DISTANCE + DISTANCE_SLACK, MAX_CAST_DISTANCE))
+    if DISTANCE_MIN >= DISTANCE_MAX:
+        log("DISTANCE_MIN (%d) must be BELOW DISTANCE_MAX (%d) - with no band "
+            "to sit in the character jitters on the spot."
+            % (DISTANCE_MIN, DISTANCE_MAX), HUE_BAD)
+        return False
+
+    log("Holding %d-%d tiles, re-checked every %dms including mid-cast."
+        % (DISTANCE_MIN, DISTANCE_MAX, KITE_TICK_MS))
     if FLEE_AT_HITS_PERCENT > 0:
         log("Will break off below %d%% health." % FLEE_AT_HITS_PERCENT)
     else:

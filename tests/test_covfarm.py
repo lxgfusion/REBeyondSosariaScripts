@@ -187,6 +187,9 @@ class StubSpells(object):
     def Cast(self, name, *a, **k):
         self._record("auto", name)
 
+    def CastMastery(self, name, *a, **k):
+        self._record("mastery", name)
+
     def CastMysticism(self, name, *a, **k):
         self._record("mysticism", name)
 
@@ -262,52 +265,154 @@ check("name that will not load is ignored", m["find_target"](), None)
 
 print()
 print("=" * 100)
-print("3. KITING - hold the band, step away when close, follow when far")
+print("3. THE BAND - DISTANCE_MIN 4 .. DISTANCE_MAX 5, never further than 5")
 print("=" * 100)
 m = load()
 mob = Mob(x=741, y=477)
 del MOBS[:]
 MOBS.append(mob)
 
-# KEEP_DISTANCE 5, slack 1 -> 4..6 is the band.
 m["Player"].Position = Point(741, 477)           # on top of it, gap 0
 del STEPS[:]
-ok = m["hold_distance"](mob)
-check("too close -> does not cast", ok, False)
+check("too close -> does not cast", m["hold_distance"](mob), False)
 check("too close -> a step was taken", len(STEPS), 1)
 
-m["Player"].Position = Point(746, 477)           # gap 5, dead centre
-del STEPS[:]
-ok = m["hold_distance"](mob)
-check("in the band -> casts", ok, True)
-check("in the band -> does NOT jitter", STEPS, [])
-
-m["Player"].Position = Point(745, 477)           # gap 4, edge of band
+m["Player"].Position = Point(745, 477)           # gap 4 = DISTANCE_MIN
 del STEPS[:]
 check("gap 4 is inside the band", m["hold_distance"](mob), True)
 check("gap 4 -> no step", STEPS, [])
 
-m["Player"].Position = Point(747, 477)           # gap 6, other edge
+m["Player"].Position = Point(746, 477)           # gap 5 = DISTANCE_MAX
 del STEPS[:]
-check("gap 6 is inside the band", m["hold_distance"](mob), True)
+check("gap 5 is inside the band", m["hold_distance"](mob), True)
+check("gap 5 -> no jitter", STEPS, [])
 
-m["Player"].Position = Point(760, 477)           # gap 19, far away
+m["Player"].Position = Point(747, 477)           # gap 6 - now TOO FAR
 del STEPS[:]
-ok = m["hold_distance"](mob)
-check("too far -> does not cast", ok, False)
-check("too far -> steps toward it", STEPS, ["West"])
+check("gap 6 is OUTSIDE the band (within 5 means within 5)",
+      m["hold_distance"](mob), False)
+check("gap 6 -> steps back toward it", STEPS, ["West"])
 
-# Kite until settled, proving it converges rather than oscillating.
-m["Player"].Position = Point(741, 477)
-for _ in range(30):
-    if m["hold_distance"](mob):
-        break
-gap = m["Player"].DistanceTo(mob)
-check("kiting converges into the band", 4 <= gap <= 6, True)
+m["Player"].Position = Point(760, 477)           # gap 19
+del STEPS[:]
+check("far away -> does not cast", m["hold_distance"](mob), False)
+check("far away -> steps toward it", STEPS, ["West"])
+
+for start, why in ((Point(741, 477), "from on top of it"),
+                   (Point(765, 477), "from far away")):
+    m["Player"].Position = start
+    for _ in range(40):
+        if m["hold_distance"](mob):
+            break
+    gap = m["Player"].DistanceTo(mob)
+    check("converges into 4-5 %s" % why, 4 <= gap <= 5, True)
 
 print()
 print("=" * 100)
-print("4. DIRECTIONS - X grows east, Y grows south")
+print("4. CONTINUOUS ENFORCEMENT - the standoff holds DURING a cast, not just")
+print("   at the top of the loop")
+print("=" * 100)
+
+
+class Chaser(object):
+    """Stub Misc whose Pause also walks the boss one tile toward the player."""
+
+    def __init__(self, mob, player):
+        self.mob = mob
+        self.player = player
+        self.ticks = 0
+
+    def Pause(self, ms):
+        self.ticks += 1
+        if self.mob.Position.X < self.player.Position.X:
+            self.mob.Position.X += 1
+        elif self.mob.Position.X > self.player.Position.X:
+            self.mob.Position.X -= 1
+
+    def SendMessage(self, msg, color=0, wait=False):
+        MSGS.append(msg)
+
+
+m = load()
+mob = Mob(x=741, y=477)
+del MOBS[:]
+MOBS.append(mob)
+m["Player"].Position = Point(746, 477)           # gap 5, in the band
+chaser = Chaser(mob, m["Player"])
+m["Misc"] = chaser
+
+del STEPS[:]
+m["kite_pause"](mob.Serial, 2000)
+gap = m["Player"].DistanceTo(mob)
+check("boss chased for the whole pause", chaser.ticks > 5, True)
+check("kite_pause answered it - still in the band", 4 <= gap <= 5, True)
+check("and it actually moved to do so", len(STEPS) > 0, True)
+
+print()
+print("   -- a plain wait would NOT have held (the bug being fixed) --")
+m2 = load()
+mob2 = Mob(x=741, y=477)
+del MOBS[:]
+MOBS.append(mob2)
+m2["Player"].Position = Point(746, 477)
+chaser2 = Chaser(mob2, m2["Player"])
+for _ in range(12):                              # same duration, no correction
+    chaser2.Pause(150)
+check("unmanaged wait lets it reach melee",
+      m2["Player"].DistanceTo(mob2) < 4, True)
+
+print()
+print("   -- safe when the monster dies mid-wait --")
+m3 = load()
+mob3 = Mob(x=741, y=477)
+del MOBS[:]
+MOBS.append(mob3)
+m3["Player"].Position = Point(746, 477)
+check("returns True while it lives", m3["enforce_distance"](mob3.Serial), True)
+check("parks at the FAR edge, leaving slack for a chaser",
+      m3["Player"].DistanceTo(mob3), 5)
+del MOBS[:]
+check("returns False once it is gone",
+      m3["enforce_distance"](mob3.Serial), False)
+check("kite_pause bails out too", m3["kite_pause"](mob3.Serial, 5000), False)
+
+print()
+print("   -- and when the player dies mid-wait --")
+m4 = load()
+mob4 = Mob(x=741, y=477)
+del MOBS[:]
+MOBS.append(mob4)
+m4["Player"].IsGhost = True
+check("stops enforcing when dead", m4["enforce_distance"](mob4.Serial), False)
+m4["Player"].IsGhost = False
+
+print()
+print("   -- the cursor wait kites instead of standing still --")
+m5 = load()
+mob5 = Mob(x=741, y=477)
+del MOBS[:]
+MOBS.append(mob5)
+m5["Player"].Position = Point(746, 477)
+m5["Misc"] = Chaser(mob5, m5["Player"])
+TARGET.has = False
+TARGET.opens = False                             # cursor never shows up
+m5["wait_for_cursor"](mob5.Serial, 1500)
+check("wait_for_cursor kept the band",
+      4 <= m5["Player"].DistanceTo(mob5) <= 5, True)
+TARGET.opens = True
+
+print()
+print("   -- a misconfigured band is refused at startup --")
+m6 = load()
+m6["DISTANCE_MIN"] = 5
+m6["DISTANCE_MAX"] = 5
+del MSGS[:]
+check("MIN == MAX is rejected", m6["preflight"](), False)
+check("and says why", any("jitters" in x for x in MSGS), True)
+
+print()
+print("=" * 100)
+print("5. DIRECTIONS - X grows east, Y grows south")
 print("=" * 100)
 m = load()
 check("east", m["direction_name"](1, 0), "East")
@@ -319,7 +424,7 @@ check("north-west is Up", m["direction_name"](-1, -1), "Up")
 
 print()
 print("=" * 100)
-print("5. CASTING")
+print("6. CASTING")
 print("=" * 100)
 m = load()
 mob = Mob(x=741, y=477, z=-17)
@@ -332,7 +437,8 @@ TARGET.has = False
 TARGET.opens = True
 res = m["cast_at"](m["SPELL_ATTACK"], mob)
 check("attack spell cast", res, "ok")
-check("cast by name", CASTS, [("auto", "Nether Blast")])
+check("attack cast from the Book of Masteries",
+      CASTS, [("mastery", "Nether Blast")])
 check("targeted the MOBILE by serial", TARGETED, [(0x0003FE1B,)])
 
 del CASTS[:]; del TARGETED[:]
@@ -365,15 +471,19 @@ TARGET.has = False
 
 
 def _range_cast(name, *a, **k):
-    CASTS.append(("auto", name))
+    # The attack spell is a MASTERY, so this is the call that must be
+    # intercepted - patching Spells.Cast would silently miss it.
+    CASTS.append(("mastery", name))
     JOURNAL.entries.append(Entry("That is too far away.", 100.0))
 
 
-SPELLS.Cast = _range_cast
+SPELLS.CastMastery = _range_cast
 del CASTS[:]
 res = m2["cast_at"](m2["SPELL_ATTACK"], mob)
 check("out-of-range reply is detected", res, "range")
-SPELLS.Cast = StubSpells.Cast.__get__(SPELLS, StubSpells)
+check("and it really did go through the mastery book",
+      CASTS, [("mastery", "Nether Blast")])
+SPELLS.CastMastery = StubSpells.CastMastery.__get__(SPELLS, StubSpells)
 
 print()
 print("   -- an unknown spell name is reported, not swallowed --")
@@ -388,7 +498,7 @@ SPELLS.fail = False
 
 print()
 print("=" * 100)
-print("6. SAFETY")
+print("7. SAFETY")
 print("=" * 100)
 m = load()
 m["Player"].Hits = 100
@@ -416,7 +526,7 @@ check("ran to FLEE_DISTANCE", m["Player"].DistanceTo(mob) >= 15, True)
 
 print()
 print("=" * 100)
-print("7. JOURNAL CURSOR - never wipes, never replays")
+print("8. JOURNAL CURSOR - never wipes, never replays")
 print("=" * 100)
 m = load()
 JOURNAL.entries = [Entry("old line", 10.0)]
