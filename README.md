@@ -10,6 +10,7 @@ at a RunUO/ServUO-derived freeshard.
 |---|---|
 | [`Scripts/tame_animals.py`](Scripts/tame_animals.py) | Reads the taming order deeds in your pack and hunts only those species. Walks to each one, tames it, and puts it in the deed for its species. |
 | [`Scripts/diag_deeds.py`](Scripts/diag_deeds.py) | Troubleshooting. Dumps every item you carry with the verdict the tamer would reach — whether it reads as a deed, and which species it names. |
+| [`Scripts/diag_tame_candidates.py`](Scripts/diag_tame_candidates.py) | Troubleshooting. **Run this when the tamer ignores a species.** Scans with *no* body filter and reproduces the tamer's decision for every creature in range, naming the reason. Catches the silent case where the shard's body value differs from the catalogue — the scan filter never returns those creatures, so nothing is logged at all. Also reports what Razor's ignore list is hiding. Read-only. |
 | [`Scripts/diag_deed_target.py`](Scripts/diag_deed_target.py) | Troubleshooting. Tries five deed double-click-and-target sequences against one already-tamed pet to find which your shard accepts. |
 | [`Scripts/harvest_runner.py`](Scripts/harvest_runner.py) | **Mining + lumberjacking on one script.** Account-runebook travel, per-job rune routes, smelting, drop-off runs, vendor rounds, meditation-backed mana, and the Greyskull call-out. |
 | [`Scripts/mining_runner.py`](Scripts/mining_runner.py) | Superseded by `harvest_runner.py`. Kept as a working fallback until the integrated script is confirmed in-game — delete it once it is. |
