@@ -17,12 +17,16 @@ What it does
    between each. A single cast blocks for several seconds, and the monster
    walks for all of them, so checking only at the top of the loop lets it
    reach melee range unanswered.
-4. Confirms the kill by finding its CORPSE, then goes back to waiting.
+4. Confirms the kill by finding its CORPSE.
 
    Death is never inferred from the monster disappearing. It disappears from
    Razor's mobile list whenever it leaves range or line of sight, so treating
    that as a kill ended fights with the boss still alive. Only a corpse that
    was not already on the ground counts.
+5. Walks onto the corpse and says the shard's grab command ([grab) to take the
+   loot you have configured in game. The corpse vanishing is how it knows the
+   grab worked.
+6. Walks back to where you started it, and waits for the next spawn.
 
 Inspected target (Enhanced Mobile Inspector):
 
@@ -43,8 +47,9 @@ spell and "Nether Blast" is not one of the stock Mysticism names, so it is
 probably custom to this shard. If a cast does nothing, set that spell's
 "school" explicitly - the script prints what it tried and what the server said.
 
-Stand where you want to fight BEFORE starting. The script holds position while
-waiting and only moves once the monster is up.
+Stand where you want to fight BEFORE starting. That spot is recorded as the
+camp: the script holds it while waiting, and walks back to it after looting, so
+the camp does not creep away over a night of spawns.
 
 Safety
 ------
@@ -204,7 +209,47 @@ CORPSE_GRACE_MS = 8000
 
 
 # =============================================================================
-# 5. SAFETY
+# 5. LOOTING  -  walk to the corpse and let the shard's grab command empty it
+# =============================================================================
+
+LOOT_CORPSE = True
+
+# Said once standing over the corpse. This is a SHARD command, not a spell -
+# it picks up whatever you have configured in game. Change it if your shard
+# uses a different word.
+LOOT_COMMAND = "[grab"
+
+# Colour of what the character says.
+SPEECH_HUE = 33
+
+# How close to stand before saying it. 1 = right on top of it. Raise it if the
+# grab command has a longer reach and you would rather not walk all the way.
+LOOT_DISTANCE = 1
+
+# The corpse vanishing is how we know the grab worked. If it is still there
+# after LOOT_RESULT_MS the command is said again, up to LOOT_RETRIES times.
+#
+# A corpse that never disappears is NOT necessarily a failure - it just means
+# something in it was not on your grab list. The script says so and carries on
+# rather than standing there forever.
+LOOT_RETRIES = 3
+LOOT_RESULT_MS = 2500
+
+# Give up walking to the corpse after this long.
+LOOT_APPROACH_TIMEOUT = 15000
+
+# After looting, walk back to where the script was started.
+#
+# Worth leaving on. Kiting moves you around during the fight and the corpse is
+# somewhere else again, so without this the camp drifts a little further every
+# spawn until it is nowhere near where you meant to stand.
+RETURN_TO_CAMP = True
+CAMP_TOLERANCE = 2              # close enough to the start, do not fuss
+CAMP_RETURN_TIMEOUT = 20000
+
+
+# =============================================================================
+# 6. SAFETY
 # =============================================================================
 
 # Break off if your health drops below this percentage. 0 disables it.
@@ -224,7 +269,7 @@ MANA_WAIT_TIMEOUT_MS = 60000
 
 
 # =============================================================================
-# 6. TIMING  -  all values in milliseconds
+# 7. TIMING  -  all values in milliseconds
 # =============================================================================
 
 SPAWN_POLL_MS = 1500            # how often to look for the monster
@@ -234,6 +279,12 @@ CAST_TIMEOUT_MS = 5000          # how long to wait for the targeting cursor
 CAST_SETTLE_MS = 400            # after the cursor opens, before answering it
 AFTER_CAST_MS = 1500            # recovery between casts
 TARGET_PROPS_MS = 1000          # how long to wait for a creature's tooltip
+
+# Walking. Beyond PATHFIND_MIN_DIST tiles the pathfinder is used; inside it the
+# script single-steps, because PathFinding refuses a tile something is standing
+# on - and a corpse tile very often has something on it.
+PATHFIND_MIN_DIST = 8           # tiles
+STUCK_LIMIT = 8                 # identical positions before calling it stuck
 
 # Give up on a single fight after this long and go back to waiting.
 FIGHT_TIMEOUT_MS = 10 * 60 * 1000
@@ -268,6 +319,8 @@ MSG_FIZZLE = [
 ]
 
 _journal_cursor = 0.0
+_camp = None            # where the script was started
+_last_corpse = None     # the corpse that confirmed the kill
 
 SCHOOLS = {
     "magery":       "CastMagery",
@@ -294,6 +347,19 @@ def log(text, hue=HUE_INFO):
 def debug(text, hue=HUE_INFO):
     if DEBUG:
         log(text, hue)
+
+
+def say(text):
+    """Speak in game - used for the shard's loot command, not for spells."""
+    if not text:
+        return
+    try:
+        Player.ChatSay(SPEECH_HUE, text)
+    except TypeError:
+        # Older builds only accept ChatSay(msg).
+        Player.ChatSay(text)
+    except Exception as exc:
+        log("Could not say %r (%s)." % (text, exc), HUE_BAD)
 
 
 # =============================================================================
@@ -489,6 +555,132 @@ def flee_from(mob):
         step_away_from(fresh)
         Misc.Pause(MOVE_PAUSE_MS)
     return False
+
+
+def distance_to_point(x, y):
+    return max(abs(Player.Position.X - x), abs(Player.Position.Y - y))
+
+
+def step_toward_point(x, y):
+    dx = x - Player.Position.X
+    dy = y - Player.Position.Y
+    if dx == 0 and dy == 0:
+        return False
+    return step(direction_name(dx, dy))
+
+
+def pathfind_to(x, y):
+    try:
+        route = PathFinding.Route()
+        route.X = x
+        route.Y = y
+        route.MaxRetry = 2
+        route.StopIfStuck = True
+        route.IgnoreMobile = True
+        route.UseResync = True
+        route.DebugMessage = False
+        return PathFinding.Go(route)
+    except Exception as exc:
+        debug("Pathfinding failed: %s" % exc, HUE_WARN)
+        return False
+
+
+def walk_to_point(x, y, tolerance, timeout_ms, label="destination"):
+    """Walk to a tile. True if we got within `tolerance`.
+
+    Pathfinds while far away and single-steps once close, because PathFinding
+    refuses a tile that something is standing on - and a corpse tile very often
+    has something on it.
+    """
+    deadline = time.time() + timeout_ms / 1000.0
+    last = None
+    stuck = 0
+
+    while time.time() < deadline:
+        if Player.IsGhost:
+            return False
+        gap = distance_to_point(x, y)
+        if gap <= tolerance:
+            return True
+
+        if gap > PATHFIND_MIN_DIST:
+            pathfind_to(x, y)
+        else:
+            step_toward_point(x, y)
+
+        here = (Player.Position.X, Player.Position.Y)
+        if here == last:
+            stuck += 1
+            if stuck >= STUCK_LIMIT:
+                debug("Stuck walking to %s at %d tiles." % (label, gap),
+                      HUE_WARN)
+                return gap <= tolerance + 1
+        else:
+            stuck = 0
+            last = here
+        Misc.Pause(MOVE_PAUSE_MS)
+
+    debug("Timed out walking to %s." % label, HUE_WARN)
+    return distance_to_point(x, y) <= tolerance
+
+
+# =============================================================================
+# LOOTING
+# =============================================================================
+
+def loot_corpse(corpse):
+    """Walk onto the corpse and let the shard's grab command empty it.
+
+    The corpse vanishing is the success signal. If it does not vanish that is
+    reported but NOT treated as a failure worth stopping for - it usually just
+    means something in it was not on the player's grab list.
+    """
+    if not LOOT_CORPSE:
+        return False
+
+    serial = corpse.Serial
+    x, y = corpse.Position.X, corpse.Position.Y
+    log("Looting the corpse at %d, %d." % (x, y), HUE_INFO)
+
+    if not walk_to_point(x, y, LOOT_DISTANCE, LOOT_APPROACH_TIMEOUT, "corpse"):
+        log("Could not reach the corpse - leaving it.", HUE_WARN)
+        return False
+
+    for attempt in range(1, LOOT_RETRIES + 1):
+        if Items.FindBySerial(serial) is None:
+            log("Corpse is gone - loot taken.", HUE_GOOD)
+            return True
+
+        say(LOOT_COMMAND)
+        Misc.Pause(LOOT_RESULT_MS)
+
+        if Items.FindBySerial(serial) is None:
+            log("Corpse is gone - loot taken.", HUE_GOOD)
+            return True
+        debug("Corpse still there after %r (%d/%d)."
+              % (LOOT_COMMAND, attempt, LOOT_RETRIES), HUE_WARN)
+
+    log("Corpse did not disappear. Whatever is left is not on your grab "
+        "list - carrying on.", HUE_WARN)
+    return False
+
+
+def return_to_camp():
+    """Walk back to where the script was started.
+
+    Kiting moves us during the fight and the corpse is somewhere else again,
+    so without this the camp creeps away from the spot the player chose.
+    """
+    if not RETURN_TO_CAMP or _camp is None:
+        return True
+    x, y = _camp
+    if distance_to_point(x, y) <= CAMP_TOLERANCE:
+        return True
+    log("Returning to camp at %d, %d." % (x, y), HUE_INFO)
+    ok = walk_to_point(x, y, CAMP_TOLERANCE, CAMP_RETURN_TIMEOUT, "camp")
+    if not ok:
+        log("Could not get back to camp - carrying on from here.", HUE_WARN)
+    return ok
 
 
 # =============================================================================
@@ -787,6 +979,8 @@ def fight(mob):
         # A corpse is the ONLY thing that counts as a kill.
         corpse = find_new_corpse(known_corpses, body)
         if corpse is not None:
+            global _last_corpse
+            _last_corpse = corpse
             log("%s is dead - corpse confirmed (%s)."
                 % (TARGET_NAME, corpse.Name or "0x%X" % corpse.Serial),
                 HUE_GOOD)
@@ -905,6 +1099,12 @@ def main():
         return
 
     reset_journal()
+
+    global _camp
+    _camp = (Player.Position.X, Player.Position.Y)
+    if RETURN_TO_CAMP:
+        log("Camp is %d, %d - will come back here after each kill." % _camp)
+
     log("Waiting for %s to spawn..." % TARGET_NAME, HUE_INFO)
 
     waiting_logged = True
@@ -924,6 +1124,10 @@ def main():
 
         waiting_logged = False
         outcome = fight(mob)
+
+        if outcome == "killed" and _last_corpse is not None:
+            loot_corpse(_last_corpse)
+            return_to_camp()
 
         if outcome in ("dead",):
             return

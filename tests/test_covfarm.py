@@ -30,6 +30,7 @@ MSGS = []
 STEPS = []
 CASTS = []
 TARGETED = []
+SAID = []
 
 
 def check(label, got, want):
@@ -89,6 +90,9 @@ class StubPlayer(object):
         return max(abs(self.Position.X - mob.Position.X),
                    abs(self.Position.Y - mob.Position.Y))
 
+    def ChatSay(self, a, b=None):
+        SAID.append(b if b is not None else a)
+
     def Run(self, direction):
         STEPS.append(direction)
         # Actually move, so kiting converges instead of looping forever.
@@ -140,12 +144,13 @@ class Corpse(object):
     """From the real dump: a slasher of veils corpse, 0x2006, Amount 0x2E5."""
 
     def __init__(self, serial=0x40A7E26A, name="a slasher of veils corpse",
-                 item_id=0x2006, amount=0x02E5):
+                 item_id=0x2006, amount=0x02E5, x=741, y=477, z=-17):
         self.Serial = serial
         self.Name = name
         self.ItemID = item_id
         self.Amount = amount
         self.IsCorpse = True
+        self.Position = Point(x, y, z)
 
 
 GROUND = []
@@ -161,6 +166,12 @@ class StubItems(object):
     def ApplyFilter(self, f):
         assert f.RangeMax is not None, "RangeMax must always be set"
         return list(GROUND)
+
+    def FindBySerial(self, serial):
+        for it in GROUND:
+            if it.Serial == serial:
+                return it
+        return None
 
 
 class Entry(object):
@@ -224,6 +235,29 @@ class StubSpells(object):
         self._record("spellweaving", name)
 
 
+class StubPathFinding(object):
+    """Walks the player straight to the tile, as a working pathfinder would."""
+
+    class Route(object):
+        def __init__(self):
+            self.X = 0
+            self.Y = 0
+            self.MaxRetry = 0
+            self.StopIfStuck = False
+            self.IgnoreMobile = False
+            self.UseResync = False
+            self.DebugMessage = False
+
+    def __init__(self):
+        self.player = None
+
+    def Go(self, route):
+        if self.player is not None:
+            self.player.Position.X = route.X
+            self.player.Position.Y = route.Y
+        return True
+
+
 JOURNAL = StubJournal()
 TARGET = StubTarget()
 SPELLS = StubSpells()
@@ -235,7 +269,7 @@ def load():
     env = {"__name__": "covfarm_under_test", "Misc": StubMisc(),
            "Player": StubPlayer(), "Mobiles": StubMobiles(),
            "Journal": JOURNAL, "Target": TARGET, "Spells": SPELLS,
-           "Items": StubItems(), "Gumps": None, "PathFinding": None, "Timer": None}
+           "Items": StubItems(),  "Gumps": None, "PathFinding": StubPathFinding(), "Timer": None}
     exec(compile(src, SCRIPT, "exec"), env)
     return env
 
@@ -607,6 +641,118 @@ check("pre-existing lines are not replayed", m["new_lines"](), [])
 JOURNAL.entries.append(Entry("The spell fizzles.", 20.0))
 check("new line is read once", m["new_lines"](), ["the spell fizzles."])
 check("and not a second time", m["new_lines"](), [])
+
+
+print()
+print("=" * 100)
+print("9. LOOTING - walk to the corpse, say the grab command, confirm it went")
+print("=" * 100)
+
+m = load()
+m["PathFinding"].player = m["Player"]
+del GROUND[:]
+corpse = Corpse(x=741, y=477)
+GROUND.append(corpse)
+m["Player"].Position = Point(720, 460)           # well away from it
+
+
+class Grabber(object):
+    """Player whose grab command removes the corpse after `after` says."""
+
+    def __init__(self, player, after=1):
+        self.player = player
+        self.after = after
+        self.says = 0
+
+    def ChatSay(self, a, b=None):
+        text = b if b is not None else a
+        SAID.append(text)
+        self.says += 1
+        if self.says >= self.after and corpse in GROUND:
+            GROUND.remove(corpse)
+
+    def __getattr__(self, name):
+        return getattr(self.player, name)
+
+
+del SAID[:]
+grabber = Grabber(m["Player"])
+m["Player"] = grabber
+m["PathFinding"].player = grabber.player
+
+ok = m["loot_corpse"](corpse)
+check("loot reported success", ok, True)
+check("walked onto the corpse",
+      grabber.player.Position.X == 741 and grabber.player.Position.Y == 477,
+      True)
+check("said the grab command", SAID, ["[grab"])
+check("corpse is gone", m["Items"].FindBySerial(corpse.Serial), None)
+
+print()
+print("   -- a corpse that will not empty is reported, not hung on --")
+m2 = load()
+m2["PathFinding"].player = m2["Player"]
+del GROUND[:]
+stubborn = Corpse(serial=0xAAAA, x=741, y=477)
+GROUND.append(stubborn)
+m2["Player"].Position = Point(741, 477)
+del SAID[:]; del MSGS[:]
+ok = m2["loot_corpse"](stubborn)
+check("reports failure rather than looping forever", ok, False)
+check("tried exactly LOOT_RETRIES times", len(SAID), m2["LOOT_RETRIES"])
+check("explains why", any("not on your grab list" in x for x in MSGS), True)
+
+print()
+print("   -- LOOT_CORPSE off skips the whole thing --")
+m3 = load()
+m3["LOOT_CORPSE"] = False
+del SAID[:]
+check("does nothing when disabled", m3["loot_corpse"](corpse), False)
+check("says nothing", SAID, [])
+
+print()
+print("   -- already-empty corpse needs no grab at all --")
+m4 = load()
+m4["PathFinding"].player = m4["Player"]
+del GROUND[:]
+ghost_corpse = Corpse(serial=0xBBBB, x=741, y=477)
+m4["Player"].Position = Point(741, 477)
+del SAID[:]
+check("gone before we got there counts as looted",
+      m4["loot_corpse"](ghost_corpse), True)
+check("no grab command wasted", SAID, [])
+
+print()
+print("   -- returning to camp --")
+m5 = load()
+m5["PathFinding"].player = m5["Player"]
+m5["_camp"] = (700, 700)
+m5["Player"].Position = Point(741, 477)
+ok = m5["return_to_camp"]()
+check("walked back to camp", ok, True)
+check("within CAMP_TOLERANCE of the start",
+      m5["distance_to_point"](700, 700) <= m5["CAMP_TOLERANCE"], True)
+
+print()
+print("   -- already at camp: no pointless walking --")
+m6 = load()
+m6["PathFinding"].player = m6["Player"]
+m6["_camp"] = (741, 477)
+m6["Player"].Position = Point(742, 477)          # 1 tile, inside tolerance
+del MSGS[:]
+check("counts as home", m6["return_to_camp"](), True)
+check("did not announce a walk",
+      any("Returning to camp" in x for x in MSGS), False)
+
+print()
+print("   -- RETURN_TO_CAMP off leaves you where you are --")
+m7 = load()
+m7["RETURN_TO_CAMP"] = False
+m7["_camp"] = (700, 700)
+m7["Player"].Position = Point(741, 477)
+check("skipped", m7["return_to_camp"](), True)
+check("did not move", (m7["Player"].Position.X, m7["Player"].Position.Y),
+      (741, 477))
 
 print()
 print("=" * 100)
