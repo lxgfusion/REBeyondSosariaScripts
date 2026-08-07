@@ -41,12 +41,24 @@ Deployed copies use **CRLF**; the repo uses LF, so always pass
 | `tame_animals.py` | `RazorEnhanced\TameAndFill.py` | **in sync** (synced 2026-08-06, `.bak-before-zombie-fix` kept) |
 | `resource_order_runner.py` | `RazorEnhanced\` | in sync |
 | `diag_bods.py` | `Mystic Gatherer\` | in sync |
-| `harvest_runner.py` | `Mystic Gatherer\` | **24 lines — live is AHEAD, see §2** |
-| `harvest_runner.py` | `razor\Scripts\` | **22 lines — live is AHEAD, see §2** |
+| `harvest_runner.py` | `Mystic Gatherer\` | **repo is now AHEAD — live lacks the §2c/§2d fixes.** Also `WOOD_STORAGE_SERIAL`, which is per character and correct (§2e) |
+| `harvest_runner.py` | `razor\Scripts\` | **repo is now AHEAD — live lacks the §2c/§2d fixes** |
+
+As of 2026-08-06 the two deployed copies are identical to each other except for
+`WOOD_STORAGE_SERIAL`. The `Mystic Gatherer` copy no longer has Lumberjacking
+disabled — `CLAUDE.md` still says it does, which is now stale.
 
 ---
 
-## 2. UNMERGED live config — do this first
+## 2. Live config — MERGED 2026-08-06
+
+**Done.** The repo copy now carries everything below, with §2c and §2d fixed.
+The sections are kept because they record *why* the config looks as it does.
+
+**The deployed copies still carry the two bugs** — the merge went live → repo
+only, which is the direction `CLAUDE.md` mandates. Deploying repo → live is a
+separate, deliberate step and has not been taken. Until it is, the deployed
+carpenter rune is still dead and still duplicated.
 
 The user hand-edits the deployed `harvest_runner.py`. Both deployed copies carry
 config the repo does **not**, and one contains a bug. **Pull these into the repo
@@ -88,6 +100,18 @@ that location will do nothing. Fix to `["carpenter"]`.
 
 Either fix the lookup to be case-insensitive, or fix the config — but do one.
 
+**Fixed in the repo** — the `BOD_LOCATIONS` entry now reads `["carpenter"]`.
+Reproduced first, to be sure the diagnosis was right: with the live entry
+restored, `expand_bod_locations()` logs
+
+```
+BOD location Carpenter rune lists unknown profession 'Carpenter'.
+Known: blacksmith, carpenter, scribe, tailor, tinker
+```
+
+and yields **zero** entries for that rune. The lookup was left case-sensitive;
+only the config was changed, per the "do one" note above.
+
 ### 2d. Duplicate carpenter
 
 Carpenter now appears **twice**: once as a `VENDORS` entry (2a) and once as a
@@ -95,6 +119,37 @@ Carpenter now appears **twice**: once as a `VENDORS` entry (2a) and once as a
 into one stop by `vendor_stops()` so the travel is not doubled, but the NPC will
 be asked twice per round. Decide which one to keep — the `VENDORS` entry is the
 one with inspected data.
+
+**Resolved in the repo: the `VENDORS` entry won.** The `BOD_LOCATIONS`
+"Carpenter rune" entry is kept but `"enabled": False`, per the convention of
+parking config rather than deleting it, and its casing is already corrected so
+it works if flipped on.
+
+**The two bugs were interlocked, which matters.** The capital-C bug was *masking*
+the duplicate: because `"Carpenter"` resolved to nothing, the rune produced no
+vendor entry, so Mallory was only ever asked once. Fixing the casing **alone**
+would have activated the duplicate and started asking Mallory twice per round
+against a single 3-per-6-hours budget — turning a dead stop into a wasted one.
+They had to be fixed together.
+
+Verified after the merge, by running the real `all_vendors()` / `vendor_stops()`:
+no unknown-profession log, carpenter appears exactly once, and no stop asks one
+profession twice. Six stops, one travel each.
+
+### 2f. Open question on the carpenter — needs an in-game check
+
+The merged `VENDORS` entry keeps the live `"gump": None`, meaning the carpenter
+opens no window at all. That is **not verified**, and it is the asymmetric one:
+
+- If `None` is wrong, `answer_vendor_gump()` returns `True` without answering,
+  so the round is logged as **"collected"** when nothing was collected — and the
+  window is left open for the next vendor to trip over, since `gump_ids()`
+  returns `[]` so `clear_stale_gumps()` has nothing to close.
+- If a gump list is wrong, the script merely waits, logs loudly, and retries.
+
+So the failure mode of `None` is silent and the failure mode of a list is noisy.
+Confirm with the Enhanced Gump Inspector on Mallory: if a bulk order window does
+open, change it to `[(0x9BADE6EA, 1), (0xBE0DAD1E, 1)]`.
 
 ### 2e. `WOOD_STORAGE_SERIAL` differs per character
 
@@ -258,10 +313,14 @@ which is exactly what it is for.
 
 ## 6. Open items
 
-1. **Merge §2 before anything else.** Live config is ahead of the repo.
-2. **Fix `"who": ["Carpenter"]` → `["carpenter"]`** (§2c) — that location is
-   currently dead.
-3. **Resolve the duplicate carpenter** (§2d).
+1. ~~Merge §2~~ — **done 2026-08-06.**
+2. ~~Fix `"who": ["Carpenter"]`~~ — **done**, see §2c.
+3. ~~Resolve the duplicate carpenter~~ — **done**, see §2d.
+3a. **Deploy the merged repo copy back to the two live folders.** Not done —
+   live still has both bugs. Diff first (`--strip-trailing-cr`); the only
+   intended difference is `WOOD_STORAGE_SERIAL`, which is per character (§2e).
+3b. **Confirm whether the carpenter opens a gump** (§2f) — the one merged value
+   that is unverified, and the one whose wrong answer fails silently.
 4. **Auto-detect `WOOD_STORAGE_SERIAL`** by graphic, as the BOD book already
    does — removes the last per-character edit.
 5. **Unverified profession titles**: `tailor`, `tinker` are guesses;
