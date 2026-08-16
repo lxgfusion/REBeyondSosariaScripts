@@ -58,6 +58,46 @@ DIAGNOSTIC_DUMP = os.path.join(os.environ.get("TEMP", "."), "harvest_diag.txt")
 
 # #############################################################################
 # ##                                                                         ##
+# ##                         C O N F I G U R A T I O N                       ##
+# ##                                                                         ##
+# ##  EVERYTHING you need to set is between here and the HELPERS banner.     ##
+# ##  Nothing below HELPERS needs editing to run the script.                 ##
+# ##                                                                         ##
+# ##  Headings below, in the order they appear - search for the one you want:##
+# ##                                                                         ##
+# ##    JOBS ................ which jobs run, their runebook folders and     ##
+# ##                          how they rotate                                ##
+# ##    WOOD STORAGE ........ the key that swallows logs and boards          ##
+# ##    INGOT KEY ........... the same thing for ingots                      ##
+# ##    VENDORS ............. every NPC the script talks to                  ##
+# ##    GREYSKULL CALL-OUT .. the chat phrase that summons you               ##
+# ##    DROP-OFF ............ home chest, and how often to go                ##
+# ##    HOUSE DEPOSITS ...... order books emptied on every drop-off          ##
+# ##    BULK ORDER DEEDS .... the BOD book and what may go in it             ##
+# ##    MINING .............. shovel, tinker tools, forge, ore               ##
+# ##    LUMBERJACKING ....... axes                                           ##
+# ##    TRAVEL AND MANA ..... runebook buttons, recall, meditation           ##
+# ##    LOGGING AND PACING .. debug output and journal colours               ##
+# ##    SERVER MESSAGES ..... shard text the script reads. Change only if    ##
+# ##                          your shard words things differently            ##
+# ##                                                                         ##
+# ##  PER-CHARACTER SETTINGS - the ones that differ between copies of this   ##
+# ##  script, and the first things to check when a copy misbehaves:          ##
+# ##                                                                         ##
+# ##      WOOD_STORAGE_SERIAL     each character carries their own key       ##
+# ##      DROP_CHEST_SERIAL       whose house the drop-off is at             ##
+# ##      BOD_BOOK_SERIAL         or BOD_BOOK_BY_CHARACTER, keyed by name    ##
+# ##      the runebook folder and rune names in JOBS, DROP_FOLDER,           ##
+# ##      ARCANE_FOLDER and the VENDORS entries                              ##
+# ##                                                                         ##
+# ##  INGOT_KEY_SERIAL is deliberately 0 so that one copy works for every    ##
+# ##  character - it finds whichever ingot key is in that character's pack.  ##
+# ##                                                                         ##
+# #############################################################################
+
+
+# #############################################################################
+# ##                                                                         ##
 # ##   EDIT THIS FIRST - JOBS AND VENDORS                                    ##
 # ##                                                                         ##
 # #############################################################################
@@ -123,8 +163,8 @@ DROPOFF_BETWEEN_JOBS = True
 # Serial is used first; the id/hue below are the fallback if it is replaced.
 WOOD_STORAGE_WHERE = "pack"
 WOOD_STORAGE_SERIAL = 0x4290200A
-WOOD_STORAGE_ID = 0x1BD9
-WOOD_STORAGE_HUE = 0x0058
+WOOD_STORAGE_ID = 0x1BD9         # graphic, used when the serial is gone
+WOOD_STORAGE_HUE = 0x0058        # its colour; -1 accepts any
 WOOD_STORAGE_RANGE = 12          # tiles, only used when "world"
 
 # -----------------------------------------------------------------------------
@@ -152,7 +192,7 @@ INGOT_KEY_WHERE = "pack"
 INGOT_KEY_SERIAL = 0
 INGOT_KEY_ID = 0x1BE8
 INGOT_KEY_HUE = -1
-INGOT_KEY_RANGE = 12
+INGOT_KEY_RANGE = 12              # tiles, only used when "world"
 
 # Break off and move to the next rune if something hostile is close.
 #
@@ -455,9 +495,20 @@ BOD_TRUST_REPORTED_WAIT = True
 VENDOR_GUMP_TIMEOUT = 8000
 VENDOR_RETRIES = 2
 
+# Tiles to search for a vendor once the rune lands. Bounded on purpose: an
+# unset range means every mobile the client knows about, roughly 18-25 tiles.
 VENDOR_RANGE = 12
+
+# ms to wait for an NPC's right-click menu to arrive.
 CONTEXT_TIMEOUT = 10000
+
+# How often the vendor round comes due. The run breaks off whatever job it is
+# on, does the round, and resumes the same lap at the same waypoint.
 VENDOR_INTERVAL_MS = 30 * 60 * 1000
+
+# ms to wait for an item or mobile TOOLTIP. Vendor titles and the backpack's
+# Contents line both come from tooltips, and reading one before it has arrived
+# gives an empty string rather than an error.
 PROPS_TIMEOUT = 1500
 
 # Context entries that must never be selected by a loose substring match.
@@ -485,8 +536,11 @@ GREYSKULL_PHRASES = [
 GREYSKULL_ALLOWED_CALLERS = []
 GREYSKULL_REQUIRE_CHANNEL = ""       # e.g. "Public" to accept only <Public>
 GREYSKULL_IGNORE_SELF = False
+# How long to stand at the circle once it has been reached, before going back
+# to work.
 GREYSKULL_HOLD_MS = 20000
 
+# Where the call sends you: the runebook folder and the rune inside it.
 ARCANE_FOLDER = ['Arcane']
 ARCANE_POINT = 'Circle'
 
@@ -495,9 +549,16 @@ ARCANE_POINT = 'Circle'
 # CONFIG - DROP-OFF
 # =============================================================================
 
+# The chest everything not claimed by a key is swept into. One-way: whatever
+# lands here has to be fetched out by hand.
 DROP_CHEST_SERIAL = 0x400CEF90
+
+# Runebook folder and rune that get you home.
 DROP_FOLDER = ['Homes']
 DROP_POINT = 'HOME'
+
+# A drop-off comes due this often even if the pack never fills, so the order
+# books and the BOD book get emptied on a schedule rather than only when full.
 DROP_INTERVAL_MS = 60 * 60 * 1000
 
 # -----------------------------------------------------------------------------
@@ -558,6 +619,7 @@ BOD_BOOK_BY_CHARACTER = {
 BOD_BOOK_SERIAL = 0
 BOD_BOOK_ID = 0x2259
 
+# The graphic a bulk order deed uses. Anything else in the pack is ignored.
 BOD_DEED_IDS = [0x2258]
 
 # Tooltip text that must be present to file a deed. Empty = no requirement.
@@ -568,7 +630,12 @@ BOD_REQUIRE_TEXT = []
 # the log noise they cause - an empty list is safe, just noisier.
 BOD_EXCLUDE_TEXT = ["creature type", "resource type"]
 
+# ms between drags into the book. Dragging faster than the server accepts
+# silently loses deeds.
 BOD_MOVE_PAUSE = 900
+
+# Ceiling on deeds filed per drop-off, so a book that refuses every deed
+# cannot hold the run up indefinitely.
 BOD_MAX_PER_RUN = 30
 
 # The window the books open, closed after depositing. Both books share this id,
@@ -589,6 +656,8 @@ PURGE_ID = [0x1BF2, 0x1726, 0x1779, 0x0F0F, 0x0F10, 0x0F11, 0x0F12, 0x0F13,
             0x318F,     # bark fragment
             0x3191]     # luminescent fungi
 
+# Ingots left in the pack when the chest sweep runs, so there is always
+# something to hand for a tinker repair. Only applies to plain iron (hue 0).
 KEEP_INGOTS = 20
 
 # Graphics that BELONG to a key, and which key takes them.
@@ -667,10 +736,18 @@ MAX_CONTAINER_DEPTH = 6
 # CONFIG - MINING
 # =============================================================================
 
-SHOVEL_ID = 0x0F39
-TINKER_ID = 0x1EB8
+SHOVEL_ID = 0x0F39                # the digging tool
+TINKER_ID = 0x1EB8                # tinker's tools, used to make a new shovel
+
+# The window the tinker's tools open. Button 15 on it is the shovel.
 TINKER_GUMP = 0x38920abd
+
+# Portable forge. Ore is smelted against this, and with no forge in the pack
+# smelting is skipped entirely - so ore would be carried home uselessly.
 FORGE_ID = 0x0FB1
+
+# Every ore graphic, small piles through large. Ore is NOT in PURGE_ID: the
+# chest is for finished goods, so smelting is the only route out of the pack.
 ORE_ID = [0x19BA, 0x19B9, 0x19B8, 0x19B7]
 
 
@@ -724,21 +801,59 @@ AR_ROOT_BUTTON = 5
 AR_CONTROL_BUTTONS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 500, 503, 504]
 AR_ENTRY_BUTTON_MIN = 10
 AR_ENTRY_BUTTON_MAX = 499
+# A runebook entry that also has (button + this) present is a DESTINATION
+# rather than a folder - that second button is its "open a gate" twin. This is
+# how a rune is told apart from a folder without clicking either.
 AR_GATE_OFFSET = 30000
+
+# Ceiling on runebook pages walked while searching. A safety bound, not a
+# target - it stops a book that never reports a last page from spinning.
 AR_MAX_PAGES = 20
 
+# ---------------------------------------------------------------------------
+# MANA AND MEDITATION
+# ---------------------------------------------------------------------------
+
+# Do not attempt a recall below this much mana; meditate first.
 MIN_MANA_TO_TRAVEL = 20
-MANA_TARGET = 0                   # 0 = meditate to full
+
+# Mana to meditate up to. 0 means full.
+MANA_TARGET = 0
+
+# Give up on a meditation attempt after this long.
 MEDITATION_TIMEOUT = 90000
+
+# How often to re-read mana while meditating.
 MEDITATION_POLL = 500
+
+# Consecutive polls with NO mana gained before the attempt is abandoned and
+# restarted. Meditation breaks silently, so waiting out the full timeout on a
+# trance that already ended wastes a minute and a half.
 MEDITATION_STALL = 8
+
+# Pause before trying to meditate again after a failed attempt.
 MEDITATION_RETRY_MS = 1500
+
+# Stow what is in hand before meditating. Holding a weapon blocks it outright
+# on most shards.
 DISARM_FOR_MEDITATION = True
+
+# ms to let a hand slot settle after stowing or re-equipping.
 HAND_MOVE_PAUSE = 800
 
+# ---------------------------------------------------------------------------
+# LOGGING AND PACING
+# ---------------------------------------------------------------------------
+
+# Pause between harvest swings. Interruptible, so the Greyskull call and the
+# vendor timer are still noticed during it.
 HARVEST_PAUSE = 250
+
+# True prints the verbose debug() lines as well as the normal log() ones. Turn
+# it off for a quieter journal; anything that matters is logged either way.
 DEBUG = True
 
+# Journal text colours: ordinary, good news, warning, failure, section banner.
 HUE_INFO = 0x03B2
 HUE_GOOD = 0x0044
 HUE_WARN = 0x0035
@@ -748,6 +863,14 @@ HUE_STEP = 0x0480
 
 # =============================================================================
 # SERVER MESSAGES
+#
+# Text the SHARD sends, matched against the journal to work out what happened.
+# Touch these only if your shard words things differently: if a job seems to
+# ignore an outcome - never noticing a depleted vein, say - this is the first
+# place to look.
+#
+# Each is annotated with the ServUO source file and cliloc number it came from,
+# so it can be checked against the server rather than guessed at.
 # =============================================================================
 # Meditation - ServUO Scripts/Skills/Meditation.cs. The "Regenative"
 # misspelling is in the server source; do not correct it.
