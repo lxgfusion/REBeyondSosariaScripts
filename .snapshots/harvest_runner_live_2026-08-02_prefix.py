@@ -127,33 +127,6 @@ WOOD_STORAGE_ID = 0x1BD9
 WOOD_STORAGE_HUE = 0x0058
 WOOD_STORAGE_RANGE = 12          # tiles, only used when "world"
 
-# -----------------------------------------------------------------------------
-# INGOT KEY - the mining equivalent of the Wood Storage.
-#
-# Same idea and the same "Refill from stock" entry: carry it and the ingots go
-# into it on the spot, instead of being carted to the drop chest.
-#
-# Inspected 2026-08-11: "Ingot Keys", serial 0x405B2105, ItemID 0x1BE8,
-# hue 0x0014, Blessed, carried in the pack.
-#
-# PER CHARACTER, exactly like WOOD_STORAGE_SERIAL - each character has its own
-# key, so this serial is only right for the copy it ships in. The id/hue
-# fallback below is what keeps the other copies working when the serial is not
-# theirs; hue 0x0014 is this key's colour, set it to -1 if another character's
-# key is a different one.
-#
-# False sends ingots to the drop chest as before.
-INGOT_KEY_ENABLED = True
-INGOT_KEY_WHERE = "pack"
-# Serial left EMPTY on purpose. Each character carries their own key, so a
-# serial here would be right for exactly one copy and would resolve to somebody
-# else's key in the others. The graphic with hue -1 finds whichever key is in
-# THIS character's pack. Inspected example: 0x405B2105, hue 0x0014.
-INGOT_KEY_SERIAL = 0
-INGOT_KEY_ID = 0x1BE8
-INGOT_KEY_HUE = -1
-INGOT_KEY_RANGE = 12
-
 # Break off and move to the next rune if something hostile is close.
 #
 # HOSTILE_RANGE is not optional. Leaving it unbounded meant any wandering spawn
@@ -214,9 +187,6 @@ VENDORS = [
         "context": ["Talk"],
         "gump":    None,
     },
-    # The carpenter is served from HERE, not from the BOD tables below - see the
-    # disabled "Carpenter rune" entry in BOD_LOCATIONS for why. This is the copy
-    # with inspected data, so it is the one that survived de-duplication.
     {
         "enabled": True,
         "label":   "Carpenter",
@@ -224,16 +194,7 @@ VENDORS = [
         "point":   'carpenter',          # rune at 1479, 1790
         # Inspected: name "Mallory", tooltip "Carpenter" / "Quest Giver".
         "names":   ["Carpenter"],
-        # Only "Bulk Order Info" - no "Talk" fallback, unlike the smith and
-        # scribe. That is deliberate, from the inspector dump.
         "context": ["Bulk Order Info"],
-        # NOT YET VERIFIED IN GAME: this says the carpenter opens no gump at
-        # all, unlike the smith and scribe which both open one. If it turns out
-        # a bulk order window DOES open, this must become
-        #     [(0x9BADE6EA, 1), (0xBE0DAD1E, 1)]
-        # like BOD_PROFESSIONS["carpenter"] has - because with None the script
-        # reports "collected" without answering anything, and leaves the window
-        # open for the next vendor to trip over.
         "gump":    None,
     },
 ]
@@ -275,17 +236,13 @@ BOD_PROFESSIONS = {
         "gump":    [(0x9BADE6EA, 1), (0xBE0DAD1E, 1)],
     },
     "carpenter": {
-        # Inspected: "Mallory", tooltip "Carpenter" / "Quest Giver".
-        # NOT REACHED from here - the carpenter is served by the VENDORS entry,
-        # and the "Carpenter rune" location below is disabled. Left in place so
-        # a "*" rune can still pick a carpenter up. Note this keeps the gump
-        # list the VENDORS entry drops to None; see the note there.
+        # NOT INSPECTED YET.
         "names":   ["Carpenter"],
         "context": ["Bulk Order Info", "Bulk Order", "Talk"],
         "gump":    [(0x9BADE6EA, 1), (0xBE0DAD1E, 1)],
     },
     "tinker": {
-        # NOT INSPECTED YET - "Tinker" is a guess at the tooltip title.
+        # NOT INSPECTED YET. Disabled by not being listed at any location.
         "names":   ["Tinker"],
         "context": ["Bulk Order Info", "Bulk Order", "Talk"],
         "gump":    [(0x9BADE6EA, 1), (0xBE0DAD1E, 1)],
@@ -313,27 +270,20 @@ BOD_LOCATIONS = [
     {"enabled": True,  "label": "Tame+Inscribe",  "folder": ['BOD'],
      "point": 'tameinscribe', "who": ["scribe"]},               # 1479, 1790
 
-    {"enabled": True,  "label": "Tailor rune",    "folder": ['BOD'],
+    {"enabled": True, "label": "Tailor rune",    "folder": ['BOD'],
      "point": 'Tailor',       "who": ["tailor"]},               # 1470, 1688
-
-    {"enabled": True,  "label": "Tinker rune",    "folder": ['BOD'],
+    #                                            ^ enable once the tailor's
+    #                                              tooltip title is confirmed.
+    {"enabled": True, "label": "Tinker rune",    "folder": ['BOD'],
      "point": 'tinker',       "who": ["tinker"]},               # 1434, 1659
-    #                          ^ the tailor and tinker tooltip titles are still
-    #                            guesses (see BOD_PROFESSIONS). Both are live
-    #                            anyway: a wrong title just means "No NPC
-    #                            matching [...]" in the log plus a dump of who
-    #                            IS standing there, which is how to confirm it.
+    #                                            ^ enable once the tailor's
+    #                                              tooltip title is confirmed.
+     {"enabled": True, "label": "Carpenter rune",    "folder": ['BOD'],
+     "point": 'carpenter',       "who": ["Carpenter"]},               # 1434, 1659
+    #                                            ^ enable once the tailor's
+    #                                              tooltip title is confirmed.
 
-    # Carpenter is served by the "Carpenter" entry in VENDORS instead, which
-    # carries the inspected name/tooltip and its own context list. Kept here,
-    # disabled, so the rune is on record - do not enable both, or Mallory gets
-    # asked twice every round off one 3-per-6-hours budget.
-    #
-    # The casing below is already corrected: BOD_PROFESSIONS keys are lowercase,
-    # so the "Carpenter" this shipped with matched nothing and the stop was
-    # silently dead.
-    {"enabled": False, "label": "Carpenter rune", "folder": ['BOD'],
-     "point": 'carpenter',    "who": ["carpenter"]},            # 1479, 1790
+
 
     # To cover a whole town without cataloguing it, add the rune with "*":
     # {"enabled": True, "label": "Britain", "folder": ['BOD'],
@@ -591,22 +541,6 @@ PURGE_ID = [0x1BF2, 0x1726, 0x1779, 0x0F0F, 0x0F10, 0x0F11, 0x0F12, 0x0F13,
 
 KEEP_INGOTS = 20
 
-# Graphics that BELONG to a key, and which key takes them.
-#
-# The chest sweep is a one-way trip: anything it takes has to be fetched back
-# out by hand. So a resource listed here is only ever swept into the chest when
-# its key could NOT be found - if the key is in the pack, the resource stays
-# put and goes into the key on the next restock instead.
-#
-# Before this, PURGE_ID listed logs and boards unconditionally as "a sweep for
-# anything the Wood Storage did not take", so a restock that came up a little
-# short, or a storage that was momentarily not found, sent the lumber to the
-# chest anyway.
-KEY_BACKED_IDS = [
-    {"label": "Wood Storage", "ids": [0x1BD7, 0x1BDD]},   # boards, logs
-    {"label": "Ingot key",    "ids": [0x1BF2]},           # ingots
-]
-
 # Storage containers and keys that swallow harvested resources. Each is
 # single-clicked and answered with RESTOCK_CONTEXT.
 #
@@ -628,15 +562,7 @@ RESTOCK_KEYS = [
         "where": WOOD_STORAGE_WHERE, "range": WOOD_STORAGE_RANGE,
     },
     {"label": "Master key",  "id": 0x176B, "hue": 0x0481, "where": "pack"},
-    {
-        # Built from the INGOT_KEY_* settings at the top of the file, the same
-        # way the Wood Storage entry is.
-        "label": "Ingot key",
-        "enabled": INGOT_KEY_ENABLED,
-        "serial": INGOT_KEY_SERIAL,
-        "id": INGOT_KEY_ID, "hue": INGOT_KEY_HUE,
-        "where": INGOT_KEY_WHERE, "range": INGOT_KEY_RANGE,
-    },
+    {"label": "Ingot key",   "id": 0x1BE8, "hue": -1,     "where": "pack"},
     {"label": "Key (alt)",   "id": 0xA54A, "hue": -1,     "where": "pack"},
     # 0x2259 is the Bulk Order Book graphic. Carried books are handled by
     # BOD_BOOK_SERIAL below (deeds are dragged in); this entry is inherited from
@@ -1579,88 +1505,44 @@ def goCurrent(job):
 # PACK / WEIGHT
 # =============================================================================
 
-def pack_item_count():
-    """(items, max_items) from the backpack's "Contents" line, or (0, 0).
-
-    The properties are ASKED FOR first. Reading them cold returns an empty list
-    whenever the client has not fetched them yet, which is what made this
-    unreadable mid-run.
-    """
-    backpack = Player.Backpack
-    if backpack is None:
-        return 0, 0
-    for _ in range(3):
-        try:
-            Items.WaitForProps(backpack, PROPS_TIMEOUT)
-            props = Items.GetPropStringList(backpack)
-        except Exception:
-            props = []
-        for prop in props or []:
-            if "Contents" in prop:
-                nums = [int(x) for x in re.findall(r"\d+", prop)]
-                if len(nums) >= 2:
-                    return nums[0], nums[1]
-        Misc.Pause(200)
-    return 0, 0
-
-
 def pack_usage():
-    """(items, max_items, weight, max_weight). Weight is never unknown.
+    """(items, maxItems, weight, maxWeight) from the backpack tooltip, or None.
 
-    WEIGHT COMES FROM THE CHARACTER, not the backpack tooltip. Player.Weight /
-    Player.MaxWeight is the real carry limit - 104 of 530 on a 140-strength
-    character - whereas the backpack's own tooltip reports the CONTAINER's
-    capacity, which reads "0/60000 Stones" and says nothing about what the
-    character can lift.
-
-    The tooltip is still used, but only for the item count, and it no longer
-    decides anything on its own: a tooltip that has not loaded returns (0, 0)
-    and the item check is simply skipped rather than being read as "full".
+    Reads the "Contents" tooltip line by name - the lumberjack script's method.
+    Falls back to tooltip line 2, which is what the mining script assumed.
     """
-    items, max_items = pack_item_count()
     try:
-        weight = int(Player.Weight or 0)
-        max_weight = int(Player.MaxWeight or 0)
+        props = Items.GetPropStringList(Player.Backpack)
     except Exception:
-        weight, max_weight = 0, 0
-    return items, max_items, weight, max_weight
+        props = []
+    for prop in props or []:
+        if "Contents" in prop:
+            nums = [int(x) for x in re.findall(r"\d+", prop)]
+            if len(nums) >= 4:
+                return tuple(nums[:4])
+    try:
+        line = Items.GetPropStringByIndex(Player.Backpack.Serial, 2)
+        nums = [int(x) for x in re.findall(r"\d+", line)]
+        if len(nums) >= 4:
+            return tuple(nums[:4])
+    except Exception:
+        pass
+    return None
 
 
 def pack_has_room(threshold=None):
-    """True while there is room to keep harvesting.
-
-    An UNKNOWN measure never counts as full. Treating "I could not read it" as
-    "the pack is full" is what had every character declaring a full pack at
-    whatever waypoint it had reached and then recalling home forever, at a
-    fifth of its carry weight - and it said so through debug(), so with
-    debugging off there was nothing in the journal to explain it.
-
-    The authority on a genuinely full pack is the SERVER: the harvest task
-    reads its refusal out of the journal and returns "full". This is only for
-    deciding whether unloading achieved anything.
-    """
     if threshold is None:
         threshold = PACK_THRESHOLD
-    items, max_items, weight, max_weight = pack_usage()
-
-    if max_weight and weight > max_weight * threshold:
-        debug("pack full by WEIGHT: %d of %d (limit %d)"
-              % (weight, max_weight, int(max_weight * threshold)), HUE_WARN)
+    usage = pack_usage()
+    if usage is None:
+        debug("Could not read the backpack tooltip - treating it as full.",
+              HUE_WARN)
         return False
+    items, max_items, weight, max_weight = usage
     if max_items and items > max_items * threshold:
-        # Said at WARNING level, not debug. A pack that is full on item count
-        # while barely carrying any weight is the confusing case - it looks
-        # like nothing is wrong - and the keys cannot help with it, because
-        # what fills the count is gems, deeds and tools rather than resources.
-        log("pack full by ITEM COUNT: %d of %d items (limit %d). Weight is "
-            "only %d of %d, so the keys cannot fix this - it needs the chest."
-            % (items, max_items, int(max_items * threshold),
-               weight, max_weight), HUE_WARN)
         return False
-
-    if not max_weight and not max_items:
-        log("Could not read pack weight OR item count - carrying on rather "
-            "than recalling. If this repeats, say so.", HUE_WARN)
+    if max_weight and weight > max_weight * threshold:
+        return False
     return True
 
 
@@ -1829,8 +1711,6 @@ def find_axe():
 
 def find_restock(key):
     """Locate one storage entry. Serial first, then id/hue in pack or world."""
-    if not key.get("enabled", True):
-        return []
     serial = key.get("serial")
     if serial:
         item = Items.FindBySerial(serial)
@@ -1877,48 +1757,6 @@ def item_is_on_player(item):
             return False
         parent = holder.Container
     return False
-
-
-def keys_in_reach(wanted=None):
-    """Labels of the RESTOCK_KEYS entries whose item can actually be found.
-
-    This is what decides whether the chest is allowed to sweep a resource. A
-    key in the pack means that resource has somewhere better to go, and the
-    chest is a one-way trip - so "is the key here" has to be answered before
-    anything is moved, not inferred from whether the restock emptied the pack.
-
-    A restock can legitimately leave things behind: it stops as soon as the
-    pack has room, so the last key never runs if an earlier one freed enough.
-    """
-    found = set()
-    for key in RESTOCK_KEYS:
-        label = key.get("label")
-        if wanted is not None and label not in wanted:
-            continue
-        if label in found:
-            continue
-        for item in find_restock(key):
-            if key.get("where") == "world" or item_is_on_player(item):
-                found.add(label)
-            break
-    return found
-
-
-def chest_sweep_ids():
-    """PURGE_ID minus anything whose key is here to take it.
-
-    Returns (ids, blocked_labels) so the caller can say what it is holding
-    back and why - a resource quietly not going to the chest looks exactly
-    like a resource that was missed.
-    """
-    here = keys_in_reach(set(spec["label"] for spec in KEY_BACKED_IDS))
-    blocked = set()
-    kept = []
-    for spec in KEY_BACKED_IDS:
-        if spec["label"] in here:
-            blocked.update(spec["ids"])
-            kept.append(spec["label"])
-    return [i for i in PURGE_ID if i not in blocked], kept, here
 
 
 def refill_keys(on_player_only=False):
@@ -1969,62 +1807,15 @@ def smelt():
         if ore.ItemID == 0x19B7 and weight < 3:
             leftovers.setdefault(ore.Hue, []).append(ore.Serial)
         if weight >= 3:
-            # EVERY cursor goes through clear_cursor first. Target.WaitForTarget
-            # returns True for a cursor that is ALREADY open, so one left over
-            # from the previous ore is answered instead of this one - and the
-            # leaked cursor then eats the MINING TOOL's target, after which the
-            # character stands there swinging at nothing and nothing is logged.
-            #
-            # This was survivable while smelt() only ran when the keys had
-            # refused the load. It runs on every full pack now, so the leak
-            # went from rare to routine.
-            clear_cursor()
             Items.UseItem(ore)
-            if not Target.WaitForTarget(5000, True):
-                log("Smelt: no target cursor for ore 0x%X - skipped."
-                    % ore.Serial, HUE_WARN)
-                clear_cursor()
-                continue
+            Target.WaitForTarget(5000, True)
             Misc.Pause(250)
             Target.TargetExecute(forge)
             Misc.Pause(250)
-
-    # Never leave this function with a cursor open, whatever happened above.
-    clear_cursor()
-
     for hue in leftovers:
         if len(leftovers[hue]) > 1:
             Items.Move(leftovers[hue][0], Player.Backpack.Serial, -1)
             Misc.Pause(750)
-
-
-def unload_in_place(threshold=None):
-    """Empty the pack where you stand, if that is possible at all.
-
-    ORDER MATTERS, and getting it wrong caused two separate complaints.
-
-    1. SMELT FIRST. Ore is not what the keys take - the Ingot key wants
-       ingots - so offering a pack of ore to the keys gets it refused, and the
-       ore is then carted home to the chest while the key that would have
-       swallowed it sits unused in the pack.
-
-    2. THEN ASK AGAIN. Once the ore is ingots the pack is far lighter, so
-       whether a trip home is needed at all has to be re-checked. Calling
-       dropoff() unconditionally after a smelt is what sent the character home
-       with a nearly empty pack after every single smelt.
-
-    `threshold` is passed through to pack_has_room, so the stricter job
-    handover level can use the same sequence.
-
-    True if the pack has room and the caller can carry on where it stands.
-    """
-    smelt()
-    if pack_has_room(threshold):
-        return True
-
-    # Now there are ingots for the Ingot key to take.
-    refill_keys(on_player_only=True)
-    return pack_has_room(threshold)
 
 
 def house_deposit(spec):
@@ -2209,12 +2000,6 @@ def dropoff():
         log("Could not recall to the drop-off point.", HUE_BAD)
         return False
 
-    # SMELT FIRST. Ore is in neither PURGE_ID nor anything a key accepts, so
-    # ore that reaches home has nowhere to go at all: the Ingot key wants
-    # ingots and the chest sweep does not list ore. It then sits in the pack,
-    # the pack stays full, and the next lap recalls home again to do nothing.
-    smelt()
-
     # Specific consumers get first refusal, the chest sweeps what is left.
     # The Wood Storage is locked down here and is meant to take the wood, and
     # PURGE_ID also lists logs and boards - running the chest first would sweep
@@ -2225,20 +2010,7 @@ def dropoff():
     # genuine bulk order deed.
     file_bulk_orders()
 
-    # What the chest is allowed to take. Anything with a key here to hold it
-    # is left alone: the chest is one-way, and the key is where it belongs.
-    sweep_ids, kept_by_keys, keys_here = chest_sweep_ids()
-    for spec in KEY_BACKED_IDS:
-        if spec["label"] in kept_by_keys:
-            log("%s is here - its resources stay OUT of the chest."
-                % spec["label"], HUE_GOOD)
-        else:
-            log("%s not found - its resources will go to the chest instead."
-                % spec["label"], HUE_WARN)
-
-    if not sweep_ids:
-        log("Every purgeable resource has a key - nothing for the chest.")
-    for itm in Items.FindAllByID(sweep_ids, -1, Player.Backpack.Serial,
+    for itm in Items.FindAllByID(PURGE_ID, -1, Player.Backpack.Serial,
                                  False, False):
         if itm.ItemID == 0x1BF2 and itm.Hue == 0:
             move = max(0, itm.Amount - KEEP_INGOTS)
@@ -2957,15 +2729,15 @@ def run_job(job, resume=False):
         result = task()
 
         if result == "full":
-            # Smelt, then let anything carried take the load. Only if the pack
-            # is STILL full has a trip home earned itself.
-            if unload_in_place():
+            # Storage carried in the pack empties right here - no trip home.
+            if refill_keys(on_player_only=True):
                 continue
 
             index = _waypoint.get(name, 0)
             total = len(_routes.get(name) or [])
             log("%s: pack full at waypoint %d/%d - unloading and coming back."
                 % (name, index, total), HUE_INFO)
+            smelt()
             dropoff()
 
             if JOB_ROTATION == "dropoff":
@@ -3046,7 +2818,7 @@ def diag_swing(job, waypoint):
     if result == "full":
         log("   pack full - unloading so the trace keeps meaning something.",
             HUE_WARN)
-        if not unload_in_place():
+        if not refill_keys(on_player_only=True):
             dropoff()
             goJobDir(job)
             goCurrent(job)
@@ -3232,8 +3004,8 @@ if __name__ == "__main__":
             # dead weight the wood storage will not take.
             if DROPOFF_BETWEEN_JOBS and not pack_has_room(PACK_HANDOVER_LEVEL):
                 log("Unloading before switching jobs.", HUE_INFO)
-                if not unload_in_place(PACK_HANDOVER_LEVEL):
-                    dropoff()
+                smelt()
+                dropoff()
             job_index = (job_index + 1) % len(jobs)
             _lap_done[job["name"]] = False
 

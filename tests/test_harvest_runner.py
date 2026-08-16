@@ -213,6 +213,10 @@ class StubPlayer(object):
     Backpack = StubItem()
     Mana = 100
     ManaMax = 100
+    # The CHARACTER's carry limit, which is what pack_has_room weighs against.
+    # 140 strength gives 530 on this shard: 140 * 3.5 + 40.
+    Weight = 30
+    MaxWeight = 400
     IsGhost = False
     WarMode = False
     Name = "Minerbot"
@@ -371,6 +375,340 @@ DAVIN = StubMob("Davin the Resource Gatherer", [], serial=0x00002A74,
 SHERRI = StubMob("Sherri", ["Animal Trainer", "Quest Giver"], serial=0x000A1F45)
 EDIE = StubMob("Edie", ["Scribe"], serial=0x000A1F46)
 BYSTANDER = StubMob("Bob", ["a wandering healer"], serial=0x000A1F99)
+
+
+# ---------------------------------------------------------------------------
+# INGOT KEY, and keeping key-backed resources out of the one-way chest
+# ---------------------------------------------------------------------------
+
+def test_ingot_key_is_configured_like_the_wood_storage(m):
+    """The wood key is a top-level per-character setting. The ingot key has to
+    be the same, because each character carries its own."""
+    check("ingot key enabled", m["INGOT_KEY_ENABLED"], True)
+    check("inspected graphic", m["INGOT_KEY_ID"], 0x1BE8)
+
+    # PORTABLE ACROSS CHARACTERS. Each carries their own key, so a serial here
+    # would be right for exactly one copy of the script and would resolve to
+    # somebody else's key in the others. The graphic with hue -1 finds
+    # whichever key is in THIS character's pack.
+    check("no pinned serial", m["INGOT_KEY_SERIAL"], 0)
+    check("any hue", m["INGOT_KEY_HUE"], -1)
+
+    entry = [k for k in m["RESTOCK_KEYS"] if k.get("label") == "Ingot key"]
+    check("one Ingot key entry", len(entry), 1)
+    check("it uses the configured serial", entry[0]["serial"],
+          m["INGOT_KEY_SERIAL"])
+    check("and it is carried", entry[0]["where"], "pack")
+
+
+def test_a_disabled_key_is_never_found(m):
+    """Turning the option off must actually stop it being used."""
+    original = [k for k in m["RESTOCK_KEYS"]
+                if k.get("label") == "Ingot key"][0]
+    entry = dict(original)
+    entry["enabled"] = False
+    check("disabled finds nothing", m["find_restock"](entry), [])
+
+
+def test_logs_never_reach_the_chest_while_the_wood_key_is_carried(m):
+    """THE POINT OF THE CHANGE. PURGE_ID listed logs and boards
+    unconditionally, so a restock that came up short - or a storage that was
+    momentarily not found - sent the lumber to the chest, one way."""
+    check("logs are purgeable in principle", 0x1BDD in m["PURGE_ID"], True)
+    check("boards too", 0x1BD7 in m["PURGE_ID"], True)
+
+    saved = m["keys_in_reach"]
+    try:
+        m["keys_in_reach"] = lambda wanted=None: set(["Wood Storage"])
+        ids, kept, _here = m["chest_sweep_ids"]()
+        check("the wood key is held back", kept, ["Wood Storage"])
+        check("logs are NOT swept", 0x1BDD in ids, False)
+        check("boards are NOT swept", 0x1BD7 in ids, False)
+        check("but ingots still are, with no ingot key",
+              0x1BF2 in ids, True)
+        check("and the gems are untouched", 0x0F26 in ids, True)
+    finally:
+        m["keys_in_reach"] = saved
+
+
+def test_with_no_key_the_chest_still_sweeps_everything(m):
+    """"unless we do not use a key in their packs" - no key means the old
+    behaviour, or the resources would pile up in the pack forever."""
+    saved = m["keys_in_reach"]
+    try:
+        m["keys_in_reach"] = lambda wanted=None: set()
+        ids, kept, _here = m["chest_sweep_ids"]()
+        check("nothing held back", kept, [])
+        check("logs go to the chest", 0x1BDD in ids, True)
+        check("boards too", 0x1BD7 in ids, True)
+        check("ingots too", 0x1BF2 in ids, True)
+        check("the full list is swept", sorted(ids), sorted(m["PURGE_ID"]))
+    finally:
+        m["keys_in_reach"] = saved
+
+
+def test_both_keys_carried_leaves_the_chest_only_the_rest(m):
+    saved = m["keys_in_reach"]
+    try:
+        m["keys_in_reach"] = lambda wanted=None: set(["Wood Storage",
+                                                      "Ingot key"])
+        ids, kept, _here = m["chest_sweep_ids"]()
+        check("both held back", sorted(kept), ["Ingot key", "Wood Storage"])
+        for graphic in (0x1BDD, 0x1BD7, 0x1BF2):
+            check("0x%04X not swept" % graphic, graphic in ids, False)
+        check("gems still swept", 0x0F26 in ids, True)
+        check("granite still swept", 0x1779 in ids, True)
+    finally:
+        m["keys_in_reach"] = saved
+
+
+def test_every_key_backed_graphic_is_actually_in_purge_id(m):
+    """A graphic listed as key-backed but absent from PURGE_ID would be dead
+    config - it was never going to the chest anyway."""
+    for spec in m["KEY_BACKED_IDS"]:
+        for graphic in spec["ids"]:
+            check("0x%04X is in PURGE_ID" % graphic,
+                  graphic in m["PURGE_ID"], True)
+
+
+def test_key_backed_labels_match_real_restock_keys(m):
+    """A label typo would silently mean "that key is never here", so the
+    resource would go to the chest forever."""
+    labels = set(k.get("label") for k in m["RESTOCK_KEYS"])
+    for spec in m["KEY_BACKED_IDS"]:
+        check("%r is a real key" % spec["label"], spec["label"] in labels, True)
+
+
+def test_smelting_happens_before_anything_is_offered_to_a_key(m):
+    """CAUGHT IN GAME. The character mined ore, and the pack-full path offered
+    it to the keys BEFORE smelting. The Ingot key wants ingots, so it refused,
+    and the ore was carted home to the chest while the key that would have
+    swallowed it sat unused in the pack."""
+    import ast
+    with open(SCRIPT, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+
+    fn = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "unload_in_place":
+            fn = node
+    check("unload_in_place exists", fn is not None, True)
+    if fn is None:
+        return
+
+    smelts = [n.lineno for n in ast.walk(fn)
+              if isinstance(n, ast.Call)
+              and getattr(n.func, "id", None) == "smelt"]
+    refills = [n.lineno for n in ast.walk(fn)
+               if isinstance(n, ast.Call)
+               and getattr(n.func, "id", None) == "refill_keys"]
+    check("it smelts", len(smelts) > 0, True)
+    check("it offers the load to the keys", len(refills) > 0, True)
+    check("and it smelts FIRST", min(smelts) < min(refills), True)
+
+
+def test_no_trip_home_when_smelting_already_freed_the_pack(m):
+    """CAUGHT IN GAME: "he is returning home after each smelt when he has
+    plenty of weight available". dropoff() ran unconditionally after smelt(),
+    so the trip happened whether or not it was still needed."""
+    import ast
+    with open(SCRIPT, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+
+    fn = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "unload_in_place":
+            fn = node
+    if fn is None:
+        check("unload_in_place exists", False, True)
+        return
+
+    rooms = [n for n in ast.walk(fn)
+             if isinstance(n, ast.Call)
+             and getattr(n.func, "id", None) == "pack_has_room"]
+    check("it re-checks the pack after smelting", len(rooms) >= 2, True)
+
+    # And no caller may smelt-then-dropoff without asking in between.
+    bad = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        body = ast.dump(node)
+        if "unload_in_place" in body:
+            continue
+        smelt_lines = [n.lineno for n in ast.walk(node)
+                       if isinstance(n, ast.Call)
+                       and getattr(n.func, "id", None) == "smelt"]
+        drop_lines = [n.lineno for n in ast.walk(node)
+                      if isinstance(n, ast.Call)
+                      and getattr(n.func, "id", None) == "dropoff"]
+        for sl in smelt_lines:
+            for dl in drop_lines:
+                if 0 < dl - sl <= 1:      # dropoff on the very next line
+                    bad.append((node.name, sl, dl))
+    check("no smelt-then-dropoff without a re-check", bad, [])
+
+
+def test_unload_in_place_passes_the_threshold_through(m):
+    """The job handover uses a stricter level than the route does. If the
+    helper ignored it, the handover would pass with a pack the next job cannot
+    work in."""
+    import ast
+    with open(SCRIPT, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    fn = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "unload_in_place":
+            fn = node
+    check("it takes a threshold", [a.arg for a in fn.args.args], ["threshold"])
+    passes = [n for n in ast.walk(fn)
+              if isinstance(n, ast.Call)
+              and getattr(n.func, "id", None) == "pack_has_room"
+              and any(isinstance(a, ast.Name) and a.id == "threshold"
+                      for a in n.args)]
+    check("and passes it on", len(passes) >= 2, True)
+
+
+def test_smelt_never_leaks_a_target_cursor(m):
+    """CAUGHT IN GAME. The character stopped after a while with no error.
+
+    smelt() asked for a target per ore stack with no clear_cursor() first and
+    no cancel when the cursor never came. Target.WaitForTarget returns True for
+    a cursor that is ALREADY open, so a leftover one is answered instead - and
+    it then eats the MINING TOOL's target, after which the character stands
+    there swinging at nothing and nothing is logged.
+
+    Survivable while smelt() only ran when the keys had refused the load; the
+    smelt-before-keys fix made it run on every full pack, and rare became
+    routine.
+    """
+    import ast
+    with open(SCRIPT, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+
+    fn = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "smelt":
+            fn = node
+    check("smelt exists", fn is not None, True)
+    if fn is None:
+        return
+
+    clears = [n.lineno for n in ast.walk(fn)
+              if isinstance(n, ast.Call)
+              and getattr(n.func, "id", None) == "clear_cursor"]
+    uses = [n.lineno for n in ast.walk(fn)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute) and n.func.attr == "UseItem"]
+    check("it clears the cursor", len(clears) > 0, True)
+    check("it uses an item", len(uses) > 0, True)
+    check("and it clears BEFORE asking for a target",
+          min(clears) < min(uses), True)
+
+    # The timeout path must not fall through to TargetExecute.
+    waits = [n for n in ast.walk(fn)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "WaitForTarget"]
+    check("the wait result is tested, not discarded",
+          any(isinstance(getattr(w, "parent_if", None), ast.If) for w in waits)
+          or "if not Target.WaitForTarget" in open(SCRIPT, encoding="utf-8").read(),
+          True)
+
+    # And nothing leaves the function with one open.
+    check("it clears again after the loop", len(clears) >= 2, True)
+
+
+def test_every_targeting_helper_goes_through_clear_cursor(m):
+    """The rule this project already learned: route cursor setup through one
+    helper that cancels and asserts the cursor is gone. A raw
+    UseItem + WaitForTarget pair with no clear in the same function is the
+    shape that leaks."""
+    import ast
+    with open(SCRIPT, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if node.name == "clear_cursor":
+            continue
+        waits = [n for n in ast.walk(node)
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "WaitForTarget"]
+        if not waits:
+            continue
+        clears = [n for n in ast.walk(node)
+                  if isinstance(n, ast.Call)
+                  and getattr(n.func, "id", None) == "clear_cursor"]
+        if not clears:
+            offenders.append(node.name)
+    check("no function waits on a cursor without clearing one", offenders, [])
+
+
+def test_dropoff_smelts_before_the_keys_get_first_refusal(m):
+    """CAUGHT IN GAME: "pack is full after recalling home".
+
+    Ore is in NEITHER PURGE_ID nor anything a key accepts, so ore that reached
+    home had nowhere to go at all - the Ingot key wants ingots, and the chest
+    sweep does not list ore. It sat in the pack, the pack stayed full, and the
+    next lap recalled home again to do nothing.
+    """
+    import ast
+    with open(SCRIPT, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    fn = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "dropoff":
+            fn = node
+    check("dropoff exists", fn is not None, True)
+    if fn is None:
+        return
+    smelts = [n.lineno for n in ast.walk(fn)
+              if isinstance(n, ast.Call)
+              and getattr(n.func, "id", None) == "smelt"]
+    refills = [n.lineno for n in ast.walk(fn)
+               if isinstance(n, ast.Call)
+               and getattr(n.func, "id", None) == "refill_keys"]
+    check("dropoff smelts", len(smelts) > 0, True)
+    check("and it smelts BEFORE the keys are offered anything",
+          min(smelts) < min(refills), True)
+
+
+def test_ore_is_not_silently_strandable(m):
+    """Ore must be reachable by SOMETHING at home. It is not in PURGE_ID by
+    design - the chest is for finished goods - so smelting is the only route,
+    and that is why dropoff has to do it."""
+    for graphic in m["ORE_ID"]:
+        check("ore 0x%04X is not chest-swept" % graphic,
+              graphic in m["PURGE_ID"], False)
+    check("but ingots are", 0x1BF2 in m["PURGE_ID"], True)
+
+
+def test_a_full_pack_says_which_measure_tripped(m):
+    """"pack full" with 81 of 495 stones carried is baffling without the
+    numbers. Item count is the case the keys cannot help with, so it is said
+    at warning level rather than debug."""
+    ITEMS.reset()
+    player = m["Player"]
+    saved = (player.Weight, player.MaxWeight)
+    messages = []
+    original_log = m["log"]
+    try:
+        m["log"] = lambda text, hue=None: messages.append(str(text))
+        ITEMS.contents = "Contents: 120/125 items, 0/60000 stones"
+        player.Weight, player.MaxWeight = 81, 495
+        check("full by item count", m["pack_has_room"](), False)
+        check("and it said so, with numbers",
+              any("ITEM COUNT" in t and "120" in t for t in messages), True)
+        check("and named the weight to show it is not the cause",
+              any("81" in t and "495" in t for t in messages), True)
+    finally:
+        m["log"] = original_log
+        player.Weight, player.MaxWeight = saved
+        ITEMS.reset()
 
 
 def load_script():
@@ -1209,16 +1547,92 @@ def test_refill_keys_uses_storage(m):
 
 
 def test_pack_usage_parsing(m):
+    """Item count comes from the tooltip; WEIGHT comes from the character.
+
+    The backpack tooltip reports the CONTAINER's capacity ("0/60000 Stones"),
+    which says nothing about what the character can lift. Player.Weight /
+    Player.MaxWeight is the real limit.
+    """
     ITEMS.reset()
-    ITEMS.contents = "Contents: 5/125 items, 30/400 stones"
-    check("pack usage parsed", m["pack_usage"](), (5, 125, 30, 400))
-    check("pack has room", m["pack_has_room"](), True)
+    player = m["Player"]
+    saved = (player.Weight, player.MaxWeight)
+    try:
+        ITEMS.contents = "Contents: 5/125 items, 0/60000 stones"
+        player.Weight, player.MaxWeight = 30, 400
+        check("items from the tooltip, weight from the character",
+              m["pack_usage"](), (5, 125, 30, 400))
+        check("pack has room", m["pack_has_room"](), True)
 
-    ITEMS.contents = "Contents: 120/125 items, 30/400 stones"
-    check("full by item count", m["pack_has_room"](), False)
+        ITEMS.contents = "Contents: 120/125 items, 0/60000 stones"
+        check("full by item count", m["pack_has_room"](), False)
 
-    ITEMS.contents = "Contents: 5/125 items, 390/400 stones"
-    check("full by weight", m["pack_has_room"](), False)
+        ITEMS.contents = "Contents: 5/125 items, 0/60000 stones"
+        player.Weight, player.MaxWeight = 390, 400
+        check("full by the CHARACTER's weight", m["pack_has_room"](), False)
+
+        # The reported case: 104 of 530 carried, and the container tooltip
+        # claiming 60000 stones. Nowhere near full.
+        player.Weight, player.MaxWeight = 104, 530
+        check("104 of 530 is NOT full", m["pack_has_room"](), True)
+    finally:
+        player.Weight, player.MaxWeight = saved
+        ITEMS.reset()
+
+
+def test_an_unreadable_tooltip_does_not_mean_full(m):
+    """CAUGHT IN GAME. Every character declared a full pack at whatever
+    waypoint it had reached and then recalled home forever, at a fifth of its
+    carry weight.
+
+    pack_usage read the tooltip WITHOUT asking for the properties first, so it
+    came back empty mid-run, and pack_has_room turned that into "full" - via
+    debug(), so with debugging off nothing in the journal explained it.
+
+    An unknown measure must never count as full. The authority on a genuinely
+    full pack is the server's own refusal, which the harvest task reads out of
+    the journal.
+    """
+    ITEMS.reset()
+    player = m["Player"]
+    saved = (player.Weight, player.MaxWeight)
+    try:
+        ITEMS.contents = ""                    # tooltip not loaded
+        player.Weight, player.MaxWeight = 104, 530
+        items, max_items, weight, max_weight = m["pack_usage"]()
+        check("item count unknown", (items, max_items), (0, 0))
+        check("but weight still known", (weight, max_weight), (104, 530))
+        check("and the pack is NOT called full", m["pack_has_room"](), True)
+
+        # Nothing readable at all: keep working rather than recall forever.
+        player.Weight, player.MaxWeight = 0, 0
+        check("nothing readable still is not full",
+              m["pack_has_room"](), True)
+    finally:
+        player.Weight, player.MaxWeight = saved
+        ITEMS.reset()
+
+
+def test_pack_properties_are_requested_before_being_read(m):
+    """Reading properties cold returns an empty list whenever the client has
+    not fetched them - which is the whole cause above."""
+    import ast
+    with open(SCRIPT, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    fn = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "pack_item_count":
+            fn = node
+    check("pack_item_count exists", fn is not None, True)
+    if fn is None:
+        return
+    waits = [n.lineno for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "WaitForProps"]
+    reads = [n.lineno for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "GetPropStringList"]
+    check("it asks for the properties", len(waits) > 0, True)
+    check("before reading them", min(waits) < min(reads), True)
     ITEMS.reset()
 
 
@@ -1554,6 +1968,23 @@ def test_vendor_defaults(m):
 def main():
     module = load_script()
     test_page_info(module)
+    test_dropoff_smelts_before_the_keys_get_first_refusal(module)
+    test_ore_is_not_silently_strandable(module)
+    test_a_full_pack_says_which_measure_tripped(module)
+    test_an_unreadable_tooltip_does_not_mean_full(module)
+    test_pack_properties_are_requested_before_being_read(module)
+    test_smelt_never_leaks_a_target_cursor(module)
+    test_every_targeting_helper_goes_through_clear_cursor(module)
+    test_smelting_happens_before_anything_is_offered_to_a_key(module)
+    test_no_trip_home_when_smelting_already_freed_the_pack(module)
+    test_unload_in_place_passes_the_threshold_through(module)
+    test_ingot_key_is_configured_like_the_wood_storage(module)
+    test_a_disabled_key_is_never_found(module)
+    test_logs_never_reach_the_chest_while_the_wood_key_is_carried(module)
+    test_with_no_key_the_chest_still_sweeps_everything(module)
+    test_both_keys_carried_leaves_the_chest_only_the_rest(module)
+    test_every_key_backed_graphic_is_actually_in_purge_id(module)
+    test_key_backed_labels_match_real_restock_keys(module)
     test_mining_page_parse(module)
     test_root_page_parse(module)
     test_root_page2_both_numbering(module)
