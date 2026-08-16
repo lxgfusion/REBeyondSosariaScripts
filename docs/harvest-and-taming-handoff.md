@@ -18,7 +18,7 @@ the unfixed copy for days.
 
 | Install | Deployed scripts |
 |---|---|
-| `E:\uoclients\RazorEnhanced\Scripts\` | `TameAndFill.py`, `resource_order_runner.py`, `buy_vendor_key.py`, most `diag_*.py` |
+| `E:\uoclients\RazorEnhanced\Scripts\` | `TameAndFill.py`, `resource_order_runner.py`, `COVFarm.py`, most `diag_*.py` |
 | `E:\uoclients\UOAlive_Package\razor\Scripts\` | `harvest_runner.py`, `diag_ar_gump.py`, `diag_vendors.py` |
 | `E:\uoclients\UOAlive_Package\razor\Scripts\Mystic Gatherer\` | `harvest_runner.py`, `diag_bods.py` |
 
@@ -336,9 +336,8 @@ python tests/sim_harvest_runner.py       #  65 checks, -v for full log
 ```
 
 All suites green at handoff, including the other tasks'
-(`test_resource_order_runner.py` 436, `test_buy_vendor_key.py` 54,
-`test_covfarm.py` 59, `test_petcommandcenter2.py` 62,
-`test_extract_re_api.py` 9).
+(`test_resource_order_runner.py`, `test_covfarm.py`,
+`test_petcommandcenter2.py`, `test_extract_re_api.py`).
 
 The suites for the `diag_*` scripts went with those scripts when the repo
 was pruned on 2026-08-06.
@@ -372,8 +371,7 @@ which is exactly what it is for.
    and others were never checked for the stray `0x3`. Worth a grep.
 8. **`mining_runner.py` is the superseded fallback.** Delete once
    `harvest_runner.py` is trusted; it still has the old, buggy vendor matching.
-9. `Scripts/harvest_runner - Copy.py` is stray — confirm and delete.
-10. **Optional**: cross-check the 112-species catalogue against
+9. **Optional**: cross-check the 112-species catalogue against
     <https://uo.com/wiki/ultima-online-wiki/skills/animal-taming/tameable-creatures/>
     (user supplied). ServUO source is authoritative for a freeshard, but the
     wiki may catch a divergence.
