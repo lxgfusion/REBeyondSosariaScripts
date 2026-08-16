@@ -1768,6 +1768,82 @@ def test_ingots_still_identify_after_the_board_change(m):
         check("ingot 0x%04X -> %s" % (hue, want), m["resource_of"](ingot), want)
 
 
+def test_green_scales_are_identified_by_hue(m):
+    """CAUGHT IN GAME. All seven scale entries shipped as
+    {"id": 0, "hue": -1, "by": "name"}, needing a stack literally named "green
+    scales" - but every colour is a stack called "<amount> dragon scales", and
+    unlike the ingots the tooltip does not even name the colour."""
+    green = _FakeBoard(0x1, m["SCALE_IDS"][0], 0x0851, 710)
+    check("0x0851 -> Green Scales", m["resource_of"](green), "Green Scales")
+
+
+def test_an_unlisted_scale_hue_is_not_guessed(m):
+    """Pouring red scales into a green order cannot be undone."""
+    known = set(int(h) for h in m["SCALE_HUES"].values())
+    stray = 0x0455
+    while stray in known:
+        stray += 1
+    check("unlisted hue is unidentified",
+          m["resource_of"](_FakeBoard(0x2, m["SCALE_IDS"][0], stray, 1125)),
+          None)
+
+
+def test_delicate_scales_still_match_by_name(m):
+    """That stack really IS named "delicate scales" and has its own graphic
+    (0x573A), so it must keep working through the plain name path - it is
+    deliberately absent from SCALE_HUES."""
+    check("not in the hue table", "Delicate Scales" in m["SCALE_HUES"], False)
+    item = _FakeBoard(0x3, 0x573A, 0x0000, 3)
+    item.Name = "3 delicate scales"
+    check("still identified", m["resource_of"](item), "Delicate Scales")
+
+
+def test_unknown_scale_hues_are_reported(m):
+    """Same self-filling report the boards got: an unidentified colour has no
+    stock as far as the budget is concerned, which looks exactly like an empty
+    chest."""
+    known = set(int(h) for h in m["SCALE_HUES"].values())
+    stray = 0x066D
+    while stray in known:
+        stray += 1
+    chest = _FakeChest([
+        _FakeBoard(0x1, m["SCALE_IDS"][0], stray, 3453),
+        _FakeBoard(0x2, m["SCALE_IDS"][0], 0x0851, 710),   # known: Green
+        _FakeBoard(0x3, 0x1BF2, 0x0000, 59997),            # ingots, not scales
+    ])
+    family = [f for f in m["HUE_FAMILIES"] if f["label"] == "scale"][0]
+    unknown = m["unknown_family_stacks"]([chest], family)
+    check("one unknown scale hue", sorted(unknown), [stray])
+    check("amount summed", unknown[stray]["amount"], 3453)
+    check("the known green hue is not flagged", 0x0851 in unknown, False)
+    check("ingots ignored", 0x1BF2 in unknown, False)
+
+
+def test_boards_still_work_through_the_shared_family_table(m):
+    """Boards and scales are now driven from one table. The board hues that
+    were confirmed in game must survive that."""
+    labels = [f["label"] for f in m["HUE_FAMILIES"]]
+    check("both families present", sorted(labels), ["board", "scale"])
+    for hue, want, _amount in LIVE_BOARD_HUES:
+        board = _FakeBoard(0x1, m["BOARD_IDS"][0], hue, 500)
+        check("0x%04X still -> %s" % (hue, want),
+              m["resource_of"](board), want)
+
+
+def test_every_hue_family_name_exists_in_resources(m):
+    names = set(r["name"] for r in m["RESOURCES"])
+    for family in m["HUE_FAMILIES"]:
+        for name in family["hues"]:
+            check("%r is a real resource" % name, name in names, True)
+
+
+def test_no_hue_is_shared_within_a_family(m):
+    """Two resources on one hue means one gets filled with the other."""
+    for family in m["HUE_FAMILIES"]:
+        hues = [int(h) for h in family["hues"].values()]
+        check("%s hues are unique" % family["label"], len(hues), len(set(hues)))
+
+
 def test_boards_are_keyed_by_hue_not_by_name(m):
     """A board stack is called "<amount> boards" and says nothing about the
     wood - the same trap as ingots, which are all "<amount> ingots".
@@ -1840,6 +1916,363 @@ def test_board_hues_are_unique(m):
     """Two woods on one hue means one of them gets filled with the other."""
     hues = [int(h) for h in m["BOARD_HUES"].values()]
     check("no hue serves two woods", len(hues), len(set(hues)))
+
+
+
+
+
+# A real page, with the Completed column carrying a mix of Yes and No. Built
+# from the verbatim Valorite capture, whose first row renders THREE cells
+# because its Amt To Gather is 0.
+COMPLETED_PAGE = [
+    "Resource Orders", "Contents: 8658/100000", "Displayed: 4",
+    "Name", "Amt To Gather", "Value Per",
+    "Valorite Granite", "0", "No",
+    "Iron Ingots", "155", "155", "400", "Yes",
+    "Oak Boards", "500", "12", "25", "No",
+    "Copper Ingots", "1038", "1038", "25", "Yes",
+    "Previous Page", "Next Page", "(1/1)", "Add", "Purge",
+]
+
+
+def test_the_completed_column_is_read_per_row(m):
+    rows = m["parse_rows_detailed"](COMPLETED_PAGE)
+    check("four rows", len(rows), 4)
+    check("names", [r["name"] for r in rows],
+          ["Valorite Granite", "Iron Ingots", "Oak Boards", "Copper Ingots"])
+    check("completed flags", [r["completed"] for r in rows],
+          [False, True, False, True])
+    check("amounts still read", [r["amount"] for r in rows],
+          [0, 155, 500, 1038])
+
+
+def test_the_short_first_row_does_not_shift_the_flags(m):
+    """The row whose Amt To Gather is 0 renders three cells where the others
+    render five. Counting positions instead of reading the last cell would put
+    every later row's flag on the wrong order - and this presses buttons."""
+    rows = m["parse_rows_detailed"](COMPLETED_PAGE)
+    check("the 3-cell row is not completed", rows[0]["completed"], False)
+    check("and the row after it is", rows[1]["completed"], True)
+    check("its name is right", rows[1]["name"], "Iron Ingots")
+
+
+def test_row_count_matches_the_buttons_it_will_be_zipped_with(m):
+    """Rows are zipped with the page's row buttons, so a miscount presses the
+    wrong order. Four rows must parse as four."""
+    rows = m["parse_rows_detailed"](COMPLETED_PAGE)
+    check("no footer label became a row",
+          [r for r in rows if r["name"] in ("Add", "Purge", "Next Page")], [])
+    check("no flag became a row",
+          [r for r in rows if r["name"].lower() in ("yes", "no")], [])
+
+
+def test_a_page_with_nothing_finished_yields_nothing(m):
+    page = [
+        "Name", "Amt To Gather", "Value Per",
+        "Oak Boards", "500", "12", "25", "No",
+        "Ash Boards", "300", "0", "25", "No",
+        "Previous Page",
+    ]
+    rows = m["parse_rows_detailed"](page)
+    check("two rows", len(rows), 2)
+    check("none completed", [r["completed"] for r in rows], [False, False])
+
+
+def test_the_completed_filter_targets_column_five(m):
+    """Column 5 is Completed: entry id 4, submit button 52. Getting this wrong
+    would filter the Name column with "Yes" and return nothing, which reads as
+    "no finished orders" rather than as a mistake."""
+    check("entry 4", m["ORDERS_COMPLETED_ENTRY"], 4)
+    check("submit 52", m["ORDERS_COMPLETED_SUBMIT"], 52)
+    check("not the Name box",
+          m["ORDERS_COMPLETED_ENTRY"] == m["ORDERS_SEARCH_ENTRY"], False)
+    check("not the Name submit",
+          m["ORDERS_COMPLETED_SUBMIT"] == m["ORDERS_FILTER_SUBMIT"], False)
+
+
+def test_orders_action_puts_the_text_in_the_box_it_was_given(m):
+    """The five boxes are submitted together. Text in the wrong one filters the
+    wrong column, and leaving an old value in another stacks two filters."""
+    sent = {}
+
+    class FakeGumps(object):
+        def SendAdvancedAction(self, gid, button, switches, ids, values):
+            sent["ids"], sent["values"] = list(ids), list(values)
+
+        def SendAction(self, gid, button):
+            sent["plain"] = button
+
+        def WaitForGump(self, gid, ms):
+            return True
+
+        def HasGump(self, gid=None):
+            return True
+
+    saved = m["Gumps"]
+    try:
+        m["Gumps"] = FakeGumps()
+        m["orders_action"](m["ORDERS_COMPLETED_SUBMIT"], "Yes",
+                           m["ORDERS_COMPLETED_ENTRY"])
+        check("all five boxes submitted", len(sent["values"]), 5)
+        check("Yes went in box 4",
+              sent["values"][sent["ids"].index(4)], "Yes")
+        check("every other box is empty",
+              [v for i, v in zip(sent["ids"], sent["values"]) if i != 4],
+              ["", "", "", ""])
+
+        sent.clear()
+        m["orders_action"](m["ORDERS_FILTER_SUBMIT"], "Copper Ingots")
+        check("the name still defaults to box 0",
+              sent["values"][sent["ids"].index(0)], "Copper Ingots")
+    finally:
+        m["Gumps"] = saved
+
+
+def test_pulled_orders_count_towards_the_lap_being_productive(m):
+    """This is what makes "15 at a time until no more" work across laps.
+
+    The run stops after `sweep` consecutive laps that hand nothing in. A lap
+    that only PULLS finished orders and fills nothing has to still count, or
+    the run would stop with a backlog still sitting in the book.
+
+    So the pulled deeds must be folded into `completed` BEFORE the "nothing
+    filled" early return, not after it.
+    """
+    import ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    lap = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "run_lap":
+            lap = node
+    check("run_lap exists", lap is not None, True)
+    if lap is None:
+        return
+
+    pull_line = None
+    merge_line = None
+    for node in ast.walk(lap):
+        if isinstance(node, ast.Call) and                 getattr(node.func, "id", None) == "pull_completed_orders":
+            pull_line = node.lineno
+        if isinstance(node, ast.Assign):
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if "completed" in targets:
+                names = [n.id for n in ast.walk(node.value)
+                         if isinstance(n, ast.Name)]
+                if "pulled" in names:
+                    merge_line = node.lineno
+
+    check("run_lap pulls finished orders", pull_line is not None, True)
+    check("and folds them into `completed`", merge_line is not None, True)
+
+    # The early return that ends the lap when nothing was filled.
+    early = []
+    for node in ast.walk(lap):
+        if isinstance(node, ast.If):
+            src = ast.dump(node.test)
+            if "completed" in src and any(isinstance(n, ast.Return)
+                                          for n in ast.walk(node)):
+                early.append(node.lineno)
+    if merge_line is not None and early:
+        check("the merge happens before the nothing-filled exit",
+              merge_line < max(early), True)
+
+
+def test_the_pull_runs_until_the_book_is_clear(m):
+    """"15 at a time until no more show Yes". The backlog is cleared in
+    batches: a lap that pulls its 15 still hands them in, which counts as a
+    productive lap, so the run continues and the next lap takes the next 15."""
+    check("a batch per lap", m["COMPLETED_MAX_PULL"], 15)
+    check("bounded", m["COMPLETED_MAX_PULL"] >= 1, True)
+    check("a page cap too", m["COMPLETED_MAX_PAGES"] >= 1, True)
+
+
+def test_priority_resources_lead_every_lap(m):
+    """CAUGHT IN GAME. RESOURCES is sorted by how many orders the BOOK held
+    when it was harvested, which says nothing about what is in the chest. Iron
+    Ingots sat at #78 of 79 because the book wanted one that day, so with 15
+    withdrawals a lap the lap ended tens of resources before its turn - every
+    lap, while 60,000 iron sat in the chest."""
+    work = m["worked_resources"]()
+    priority, rest = m["split_priorities"](work)
+
+    check("the configured names are found", [r["name"] for r in priority],
+          list(m["PRIORITY_RESOURCES"]))
+    check("nothing is lost", len(priority) + len(rest), len(work))
+    check("and nothing is in both",
+          set(r["name"] for r in priority) & set(r["name"] for r in rest),
+          set())
+
+    # They must lead whatever the rotation is doing, or the whole point is lost.
+    leads = True
+    for offset in range(0, len(work) + 1):
+        order = priority + m["rotated"](rest, offset)
+        if [r["name"] for r in order[:len(priority)]] !=                 [r["name"] for r in priority]:
+            leads = False
+            break
+    check("priorities lead at every offset", leads, True)
+
+
+def test_iron_and_regular_boards_are_no_longer_last(m):
+    """The two the chest actually holds most of. Iron was dead last."""
+    work = m["worked_resources"]()
+    names = [r["name"] for r in work]
+    check("Iron Ingots was near the end of RESOURCES",
+          names.index("Iron Ingots") > len(names) - 5, True)
+
+    priority, rest = m["split_priorities"](work)
+    order = priority + m["rotated"](rest, 0)
+    positions = [r["name"] for r in order]
+    check("Iron Ingots is now worked first", positions[0], "Iron Ingots")
+    check("Regular Boards second", positions[1], "Regular Boards")
+
+
+def test_the_rotation_still_reaches_everything_else(m):
+    """Pinning two resources must not starve the other 77. The offset has to
+    advance by the ROTATED part only - counting the priorities would push it
+    along by two every lap and skip two resources each time."""
+    work = m["worked_resources"]()
+    priority, rest = m["split_priorities"](work)
+
+    seen = set()
+    offset = 0
+    per_lap = m["MAX_ORDERS_PER_RUN"]
+    for _lap in range(60):
+        order = priority + m["rotated"](rest, offset)
+        examined = [r["name"] for r in order[:per_lap]]
+        seen.update(examined)
+        stepped = len([n for n in examined
+                       if n not in set(r["name"] for r in priority)])
+        offset += stepped
+
+    missed = [r["name"] for r in rest if r["name"] not in seen]
+    check("every non-priority resource gets a turn within 60 laps", missed, [])
+
+
+def test_a_misspelled_priority_is_reported_not_swallowed(m):
+    """A typo here would look exactly like the resource still being ignored -
+    which is the complaint this feature exists to answer."""
+    saved = list(m["PRIORITY_RESOURCES"])
+    try:
+        m["PRIORITY_RESOURCES"][:] = ["Iorn Ingots"]
+        priority, rest = m["split_priorities"](m["worked_resources"]())
+        check("the bad name is not used", priority, [])
+        check("and nothing is dropped from the rest",
+              len(rest), len(m["worked_resources"]()))
+    finally:
+        m["PRIORITY_RESOURCES"][:] = saved
+
+
+def test_priority_names_all_exist(m):
+    """As shipped, every configured name must resolve - or it silently does
+    nothing."""
+    names = set(r["name"] for r in m["RESOURCES"])
+    for name in m["PRIORITY_RESOURCES"]:
+        check("%r is a real resource" % name, name in names, True)
+
+
+def test_a_replacement_order_is_collected_after_every_handin(m):
+    """Handing a filled order in CLEARS THE COOLDOWN on taking a new one, so
+    the moment after each hand-in is the one moment a replacement is free.
+    That is why it is per hand-in and not once per trip."""
+    import ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+
+    hand_in = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "hand_in":
+            hand_in = node
+    check("hand_in exists", hand_in is not None, True)
+    if hand_in is None:
+        return
+
+    calls = [n for n in ast.walk(hand_in)
+             if isinstance(n, ast.Call)
+             and getattr(n.func, "id", None) == "collect_replacement"]
+    # Once in the main pass, once in the sweep that follows it - a deed handed
+    # in by the sweep earns a replacement just the same.
+    check("collected after a hand-in, in both passes", len(calls), 2)
+
+    for call in calls:
+        gives = [n for n in ast.walk(hand_in)
+                 if isinstance(n, ast.Call)
+                 and getattr(n.func, "id", None) == "give_deed"
+                 and n.lineno < call.lineno]
+        check("it follows a give_deed", len(gives) > 0, True)
+
+
+def test_the_replacement_is_capped(m):
+    """A menu that answers without ever producing a deed must not spin."""
+    check("there is a cap", m["NEW_ORDER_MAX_PER_TRIP"] >= 1, True)
+    check("and it is not unbounded", m["NEW_ORDER_MAX_PER_TRIP"] <= 200, True)
+
+    collected = [m["NEW_ORDER_MAX_PER_TRIP"]]
+    check("at the cap it refuses to ask",
+          m["collect_replacement"](None, None, collected), False)
+    check("and the counter did not move",
+          collected[0], m["NEW_ORDER_MAX_PER_TRIP"])
+
+
+def test_the_talk_entry_is_not_something_that_spends_gold(m):
+    """An NPC menu carries Buy, Sell, Bribe and Train beside the real entry.
+    A configured label that CONTEXT_NEVER would refuse is a dead config."""
+    for label in m["NEW_ORDER_CONTEXT"]:
+        check("%r is not blocked" % label,
+              m["pick_context"]([label], m["NEW_ORDER_CONTEXT"]), label)
+    check("Talk is what is configured", m["NEW_ORDER_CONTEXT"], ["Talk"])
+
+
+def test_context_never_still_refuses_the_dangerous_entries(m):
+    """The guarded substring path must not pick something that spends gold,
+    even while looking for Talk."""
+    menu = ["Buy", "Sell", "Bribe", "Open Bankbox", "Train Mining"]
+    check("nothing on that menu is chosen",
+          m["pick_context"](menu, ["Talk"]), None)
+
+
+def test_new_orders_are_parked_out_of_the_top_level_pack(m):
+    """An unfilled deed loose in the pack is indistinguishable from one the run
+    failed to fill, so it would be reported as a leftover every lap and
+    re-examined by the filler. The bag keeps them apart."""
+    check("a bag is configured", m["ORDER_BAG_SERIAL"] > 0, True)
+    check("it is not the trash bag",
+          m["ORDER_BAG_SERIAL"] == m["TRASH_BAG_SERIAL"], False)
+    check("nor a chest the runner censuses",
+          m["ORDER_BAG_SERIAL"] in [c["serial"] for c in m["CHESTS"]], False)
+
+
+def test_fill_from_backpack_is_button_five(m):
+    """From the mapped book gump: button 5 is "Fill from backpack". Button 3
+    withdraws and button 8 renames, so this must not drift."""
+    check("Fill from backpack", m["BOOK_FILL_BUTTON"], 5)
+    check("and it is not the orders button",
+          m["BOOK_FILL_BUTTON"] == m["BOOK_ORDERS_BUTTON"], False)
+
+
+def test_the_new_orders_are_deposited_before_the_census(m):
+    """They have to be in the book before the lap counts what it can fill, or
+    they are carried round for another whole circuit."""
+    import ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    lap = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "run_lap":
+            lap = node
+    check("run_lap exists", lap is not None, True)
+    if lap is None:
+        return
+    deposit = [n.lineno for n in ast.walk(lap)
+               if isinstance(n, ast.Call)
+               and getattr(n.func, "id", None) == "deposit_new_orders"]
+    fill = [n.lineno for n in ast.walk(lap)
+            if isinstance(n, ast.Call)
+            and getattr(n.func, "id", None) == "fill_orders"]
+    check("run_lap deposits them", len(deposit) > 0, True)
+    check("run_lap fills", len(fill) > 0, True)
+    if deposit and fill:
+        check("deposit comes first", min(deposit) < min(fill), True)
 
 
 def test_the_scan_rewinds_to_page_one_after_filtering(m):

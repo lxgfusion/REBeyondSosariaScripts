@@ -89,7 +89,7 @@ import time
 # line in the journal says which copy is actually loaded - two separate
 # debugging rounds were spent on a bug that was already fixed on disk but not
 # in the Scripts folder.
-SCRIPT_VERSION = "2026-08-13.32"
+SCRIPT_VERSION = "2026-08-11.30"
 
 
 # =============================================================================
@@ -412,14 +412,6 @@ COMPLETED_FILTER_TEXT = "Yes"
 # Ceiling per lap. Each pull re-filters from page 1, because withdrawing one
 # changes the list under you - the same reason an order is never chosen from a
 # remembered page.
-# How many finished orders to take PER LAP. The backlog is cleared 15 at a
-# time, not in one trip: each one is carried to the hand-in and earns a
-# replacement there, so a single pull of a hundred would mean a hundred deeds
-# in the pack and a hundred Talk round-trips in one stop.
-#
-# The run keeps going as long as a lap hands something in, so a lap that pulls
-# its 15 counts as productive and the next lap takes the next 15 - repeating
-# until no order shows Yes any more.
 COMPLETED_MAX_PULL = 15
 
 # Pages of the filtered result to look through per pull.
@@ -635,61 +627,15 @@ BOARD_HUES = {
     "Darkwood Boards":  0x078C,      # 80
 }
 
-# =============================================================================
-# CONFIG - DRAGON SCALES
-#
-# The same trap as the boards, and for the same reason: every colour of scale
-# is a stack called "<amount> dragon scales". The colour is in the HUE only -
-# unlike the ingots, the tooltip does not even name it.
-#
-# So the seven scale entries in RESOURCES, all shipped as
-# {"id": 0, "hue": -1, "by": "name"}, could never match anything: nothing is
-# ever literally named "green scales".
-# =============================================================================
-
-SCALE_IDS = [0x26B4]
-
-# hue -> the name the BOOK uses. Only Green is confirmed.
-#
-# Green Scales is from the Item Inspector, 2026-08-13: ItemID 0x26B4,
-# hue 0x0851, in the peerless chest. The rest are NOT guessed - run once and
-# the stock report prints every scale hue it does not recognise, with the line
-# to paste. You can read the colours off the stacks in game.
-#
-# Hues seen in the chest dump of 2026-08-03 that still need a colour against
-# them: 0x0455, 0x066D, 0x08A8, 0x08FD - plus 0x08AF ("Medusa scales") and
-# 0x08B0 ("sea serpent scales"), which are their own creatures rather than
-# dragon colours.
-#
-# Delicate Scales is NOT here on purpose: that stack really is named "delicate
-# scales" (ItemID 0x573A), so the plain name match already works for it.
-SCALE_HUES = {
-    "Green Scales":  0x0851,     # confirmed in game
-    # "Yellow Scales": 0x0000,
-    # "Blue Scales":   0x0000,
-    # "Red Scales":    0x0000,
-    # "White Scales":  0x0000,
-    # "Black Scales":  0x0000,
-}
-
-# Every family of "one graphic, the hue is the resource". Boards and scales
-# behave identically, so they are driven from one table rather than two copies
-# of the same loop - the ingots are already handled entry by entry.
-HUE_FAMILIES = [
-    {"label": "board", "ids": BOARD_IDS, "hues": BOARD_HUES},
-    {"label": "scale", "ids": SCALE_IDS, "hues": SCALE_HUES},
-]
-
-# Give those entries a graphic to match on. An entry with no hue yet keeps its
-# "by": "name" match, which is harmless - it simply will not match a stack
-# called "<amount> boards" or "<amount> dragon scales".
-for _family in HUE_FAMILIES:
-    for _entry in RESOURCES:
-        _hue = _family["hues"].get(_entry["name"])
-        if _hue is not None:
-            _entry["id"] = _family["ids"][0]
-            _entry["hue"] = _hue
-            _entry.pop("by", None)
+# Give the board entries a graphic to match on. An entry with no hue yet keeps
+# its "by": "name" match, which is harmless - it simply will not match a stack
+# called "<amount> boards", which is the state everything is in today.
+for _entry in RESOURCES:
+    _hue = BOARD_HUES.get(_entry["name"])
+    if _hue is not None:
+        _entry["id"] = BOARD_IDS[0]
+        _entry["hue"] = _hue
+        _entry.pop("by", None)
 
 
 # Which of the above to work, in order. Empty = every entry in RESOURCES.
@@ -1303,61 +1249,6 @@ def only_live(stacks):
     return out
 
 
-def unknown_family_stacks(chests, family):
-    """Stacks of one hue-family whose hue is not listed: {hue: {amount, stacks}}.
-
-    This is what makes the tables fillable without guessing. A stack is called
-    "<amount> boards" or "<amount> dragon scales" and says nothing about which
-    one it is, so an unlisted hue is invisible to resource_of and that resource
-    silently has no stock at all.
-    """
-    known = set(int(h) for h in family["hues"].values())
-    ids = set(int(i) for i in family["ids"])
-    out = {}
-    for chest in as_list(chests):
-        for item in list(getattr(chest, "Contains", None) or []):
-            try:
-                if int(item.ItemID) not in ids:
-                    continue
-                hue = int(item.Hue)
-            except Exception:
-                continue
-            if hue in known:
-                continue
-            record = out.setdefault(hue, {"amount": 0, "stacks": 0})
-            record["amount"] += int(getattr(item, "Amount", 0) or 0)
-            record["stacks"] += 1
-    return out
-
-
-def report_unknown_families(chests):
-    """Name every hue the runner cannot identify, with the line to paste.
-
-    Printed as part of the stock report rather than buried: a resource with no
-    hue listed has NO stock as far as the budget is concerned, so its orders
-    are passed over exactly as if the chest were empty. That is
-    indistinguishable from "the book has no orders for it" unless it is said
-    out loud.
-    """
-    for family in HUE_FAMILIES:
-        unknown = unknown_family_stacks(chests, family)
-        if not unknown:
-            continue
-        label = family["label"]
-        log("%d %s hue(s) in the chest are not listed, so the runner cannot "
-            "tell which one they are and will not spend them:"
-            % (len(unknown), label), HUE_WARN)
-        for hue, record in sorted(unknown.items(),
-                                  key=lambda kv: -kv[1]["amount"]):
-            log("    hue 0x%04X  %d %s(s) in %d stack(s)"
-                % (hue, record["amount"], label, record["stacks"]), HUE_WARN)
-        log("  Match each hue to what it looks like in game, then paste into "
-            "%s_HUES at the top of this script:" % label.upper(), HUE_WARN)
-        for hue in sorted(unknown):
-            log('      "<name>": 0x%04X,' % hue, HUE_WARN)
-        log("  Use the BOOK's name on the left.", HUE_WARN)
-
-
 def unknown_board_stacks(chests):
     """Board stacks whose hue is not in BOARD_HUES: {hue: {amount, stacks}}.
 
@@ -1411,16 +1302,11 @@ def report_unknown_boards(chests):
 
 
 def validate_board_hues():
-    """Refuse a hue table that cannot work, loudly, at startup."""
+    """Refuse a BOARD_HUES that cannot work, loudly, at startup."""
     ok = True
     by_name = dict((r["name"].strip().lower(), r) for r in RESOURCES)
 
-    pairs = []
-    for family in HUE_FAMILIES:
-        for name, hue in family["hues"].items():
-            pairs.append((name, hue))
-
-    for name, hue in pairs:
+    for name, hue in BOARD_HUES.items():
         if name.strip().lower() not in by_name:
             log("BOARD_HUES names %r, which is not in RESOURCES - it will "
                 "never match an order. Check the spelling against the book."
@@ -1428,7 +1314,7 @@ def validate_board_hues():
             ok = False
 
     seen = {}
-    for name, hue in pairs:
+    for name, hue in BOARD_HUES.items():
         if int(hue) in seen:
             log("BOARD_HUES gives hue 0x%04X to both %r and %r - one of them "
                 "would be filled with the other's wood."
@@ -1436,15 +1322,13 @@ def validate_board_hues():
             ok = False
         seen[int(hue)] = name
 
-    for family in HUE_FAMILIES:
-        count = len(family["hues"])
-        if count:
-            log("%ss: %d identified by hue" % (family["label"], count),
-                HUE_GOOD if ok else HUE_BAD)
-        else:
-            log("%ss: no hues listed yet, so none can be identified. Put a "
-                "stack of each in the chest and the stock report below prints "
-                "the table to paste in." % family["label"], HUE_WARN)
+    if BOARD_HUES:
+        log("boards: %d wood(s) identified by hue" % len(BOARD_HUES),
+            HUE_GOOD if ok else HUE_BAD)
+    else:
+        log("boards: BOARD_HUES is empty, so no wood can be identified yet. "
+            "Put a stack of each in the chest and the stock report below will "
+            "print the table to paste in.", HUE_WARN)
     return ok
 
 
@@ -2092,18 +1976,13 @@ def pull_completed_orders():
     unfiltered = parse_header(gump_lines(ORDERS_GUMP)).get("displayed")
 
     pulled = []
-    hit_ceiling = True
     for _ in range(COMPLETED_MAX_PULL):
         deed, outcome = pull_one_completed()
         if deed is not None:
             pulled.append(deed)
-            if len(pulled) % 5 == 0:
-                log("  %d finished order(s) so far..." % len(pulled))
             continue
         if outcome == "stop":
-            hit_ceiling = False
             break
-        hit_ceiling = False
         # "none" - but on the FIRST pass check the filter actually did
         # something, rather than believing an empty result from a filter the
         # book ignored.
@@ -2111,24 +1990,17 @@ def pull_completed_orders():
             after = parse_header(gump_lines(ORDERS_GUMP)).get("displayed")
             if (unfiltered is not None and after is not None
                     and after >= unfiltered and after > 0):
-                log("The Completed filter (%r in filter box %d, the last "
-                    "column) did not narrow the "
+                log("The Completed filter (%r in column 5) did not narrow the "
                     "list - %s rows before, %s after. Nothing was pulled. If "
                     "that column reads something other than %r, set "
                     "COMPLETED_FILTER_TEXT."
-                    % (COMPLETED_FILTER_TEXT, ORDERS_COMPLETED_ENTRY,
-                       unfiltered, after, COMPLETED_FILTER_TEXT), HUE_WARN)
+                    % (COMPLETED_FILTER_TEXT, unfiltered, after,
+                       COMPLETED_FILTER_TEXT), HUE_WARN)
         break
 
-    if hit_ceiling:
-        log("took this lap's %d finished order(s) - more are still showing "
-            "%r, and the next lap takes the next batch."
-            % (COMPLETED_MAX_PULL, COMPLETED_FILTER_TEXT), HUE_GOOD)
-    elif pulled:
-        log("%d finished order(s) taken - none left showing %r."
-            % (len(pulled), COMPLETED_FILTER_TEXT), HUE_GOOD)
     if pulled:
-        log("they go to the hand-in with the rest.")
+        log("%d finished order(s) taken out of the book - they go to the "
+            "hand-in with the rest." % len(pulled), HUE_GOOD)
     return pulled
 
 
@@ -3552,7 +3424,7 @@ def fill_orders(chests, offset=0):
     # Boards the runner can SEE but cannot name. Reported here, beside the
     # stock it did recognise, because an unidentified wood looks exactly like
     # an empty chest from every other angle.
-    report_unknown_families(chests)
+    report_unknown_boards(chests)
 
     if not any(budget.get(r["name"], 0) > 0 for r in worked_resources()):
         log("Nothing above the reserves. Nothing to fill.", HUE_WARN)
@@ -3604,18 +3476,6 @@ def fill_orders(chests, offset=0):
             if outcome == "stop":
                 return completed, True, offset      # the helper has said why
             if outcome == "none":
-                # A PRIORITY resource coming back empty is worth saying out
-                # loud with its numbers. It is pinned precisely because there
-                # is deep stock of it, so "nothing to do" is surprising and
-                # needs to distinguish "the book has no orders" from "the
-                # orders are all too big for the budget".
-                if resource in priority_names:
-                    entry = stock.get(resource, {"amount": 0, "stacks": []})
-                    log("PRIORITY %s took nothing: %d on hand, %d spendable, "
-                        "in %d stack(s)."
-                        % (resource, entry["amount"],
-                           budget.get(resource, 0), len(entry["stacks"])),
-                        HUE_WARN)
                 exhausted.add(resource)
                 continue
             took_any = True

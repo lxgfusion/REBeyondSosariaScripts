@@ -89,7 +89,7 @@ import time
 # line in the journal says which copy is actually loaded - two separate
 # debugging rounds were spent on a bug that was already fixed on disk but not
 # in the Scripts folder.
-SCRIPT_VERSION = "2026-08-13.32"
+SCRIPT_VERSION = "2026-08-11.29"
 
 
 # =============================================================================
@@ -371,59 +371,12 @@ ORDER_BAG_SERIAL = 0x42385515
 ORDER_BAG_ID = 0x0E76
 ORDER_BAG_HUE = 0x04F2
 
-# Before the first lap, hand in any FILLED deed already sitting in the pack -
-# and take the replacement each one earns, the same as during a run.
-#
-# A run that was stopped part way, or one that ended holding deeds it could not
-# hand in, leaves them there. They are worth gold and they earn a free order,
-# so the run starts by cashing them rather than carrying them round all night.
-#
-# Only FILLED deeds go. A part-filled one is left alone: handing it in spends
-# it for nothing.
-STARTUP_HANDIN = True
-
 ORDERS_GUMP = 0xB2F21F1A
 ORDERS_NEXT_BUTTON = 5          # "Next Page"
 ORDERS_PREV_BUTTON = 4          # absent on page 1, where a static image sits
 ORDERS_TEXT_IDS = [0, 1, 2, 3, 4]
 ORDERS_SEARCH_ENTRY = 0         # the Name column's filter box
 ORDERS_FILTER_SUBMIT = 12       # its submit button
-
-# Column 5 is "Completed", with its own filter box and submit button. Used to
-# find orders the book already counts as finished.
-ORDERS_COMPLETED_ENTRY = 4
-ORDERS_COMPLETED_SUBMIT = 52
-
-# =============================================================================
-# CONFIG - PULLING FINISHED ORDERS OUT OF THE BOOK
-#
-# An order can complete inside the book, and it then sits there earning
-# nothing. Each lap starts by taking those out and carrying them to the same
-# hand-in the filled deeds go to - no extra trip, and each one earns a
-# replacement order like any other hand-in.
-# =============================================================================
-
-PULL_COMPLETED = True
-
-# What the Completed column reads for a finished order. Matched by the book's
-# own filter, which is a substring match like the Name one.
-COMPLETED_FILTER_TEXT = "Yes"
-
-# Ceiling per lap. Each pull re-filters from page 1, because withdrawing one
-# changes the list under you - the same reason an order is never chosen from a
-# remembered page.
-# How many finished orders to take PER LAP. The backlog is cleared 15 at a
-# time, not in one trip: each one is carried to the hand-in and earns a
-# replacement there, so a single pull of a hundred would mean a hundred deeds
-# in the pack and a hundred Talk round-trips in one stop.
-#
-# The run keeps going as long as a lap hands something in, so a lap that pulls
-# its 15 counts as productive and the next lap takes the next 15 - repeating
-# until no order shows Yes any more.
-COMPLETED_MAX_PULL = 15
-
-# Pages of the filtered result to look through per pull.
-COMPLETED_MAX_PAGES = 40
 
 # Row buttons run continuously across pages, 15 to a page:
 #     first row button of page N = ROW_BUTTON_BASE + (N - 1) * ROWS_PER_PAGE
@@ -635,61 +588,15 @@ BOARD_HUES = {
     "Darkwood Boards":  0x078C,      # 80
 }
 
-# =============================================================================
-# CONFIG - DRAGON SCALES
-#
-# The same trap as the boards, and for the same reason: every colour of scale
-# is a stack called "<amount> dragon scales". The colour is in the HUE only -
-# unlike the ingots, the tooltip does not even name it.
-#
-# So the seven scale entries in RESOURCES, all shipped as
-# {"id": 0, "hue": -1, "by": "name"}, could never match anything: nothing is
-# ever literally named "green scales".
-# =============================================================================
-
-SCALE_IDS = [0x26B4]
-
-# hue -> the name the BOOK uses. Only Green is confirmed.
-#
-# Green Scales is from the Item Inspector, 2026-08-13: ItemID 0x26B4,
-# hue 0x0851, in the peerless chest. The rest are NOT guessed - run once and
-# the stock report prints every scale hue it does not recognise, with the line
-# to paste. You can read the colours off the stacks in game.
-#
-# Hues seen in the chest dump of 2026-08-03 that still need a colour against
-# them: 0x0455, 0x066D, 0x08A8, 0x08FD - plus 0x08AF ("Medusa scales") and
-# 0x08B0 ("sea serpent scales"), which are their own creatures rather than
-# dragon colours.
-#
-# Delicate Scales is NOT here on purpose: that stack really is named "delicate
-# scales" (ItemID 0x573A), so the plain name match already works for it.
-SCALE_HUES = {
-    "Green Scales":  0x0851,     # confirmed in game
-    # "Yellow Scales": 0x0000,
-    # "Blue Scales":   0x0000,
-    # "Red Scales":    0x0000,
-    # "White Scales":  0x0000,
-    # "Black Scales":  0x0000,
-}
-
-# Every family of "one graphic, the hue is the resource". Boards and scales
-# behave identically, so they are driven from one table rather than two copies
-# of the same loop - the ingots are already handled entry by entry.
-HUE_FAMILIES = [
-    {"label": "board", "ids": BOARD_IDS, "hues": BOARD_HUES},
-    {"label": "scale", "ids": SCALE_IDS, "hues": SCALE_HUES},
-]
-
-# Give those entries a graphic to match on. An entry with no hue yet keeps its
-# "by": "name" match, which is harmless - it simply will not match a stack
-# called "<amount> boards" or "<amount> dragon scales".
-for _family in HUE_FAMILIES:
-    for _entry in RESOURCES:
-        _hue = _family["hues"].get(_entry["name"])
-        if _hue is not None:
-            _entry["id"] = _family["ids"][0]
-            _entry["hue"] = _hue
-            _entry.pop("by", None)
+# Give the board entries a graphic to match on. An entry with no hue yet keeps
+# its "by": "name" match, which is harmless - it simply will not match a stack
+# called "<amount> boards", which is the state everything is in today.
+for _entry in RESOURCES:
+    _hue = BOARD_HUES.get(_entry["name"])
+    if _hue is not None:
+        _entry["id"] = BOARD_IDS[0]
+        _entry["hue"] = _hue
+        _entry.pop("by", None)
 
 
 # Which of the above to work, in order. Empty = every entry in RESOURCES.
@@ -1303,61 +1210,6 @@ def only_live(stacks):
     return out
 
 
-def unknown_family_stacks(chests, family):
-    """Stacks of one hue-family whose hue is not listed: {hue: {amount, stacks}}.
-
-    This is what makes the tables fillable without guessing. A stack is called
-    "<amount> boards" or "<amount> dragon scales" and says nothing about which
-    one it is, so an unlisted hue is invisible to resource_of and that resource
-    silently has no stock at all.
-    """
-    known = set(int(h) for h in family["hues"].values())
-    ids = set(int(i) for i in family["ids"])
-    out = {}
-    for chest in as_list(chests):
-        for item in list(getattr(chest, "Contains", None) or []):
-            try:
-                if int(item.ItemID) not in ids:
-                    continue
-                hue = int(item.Hue)
-            except Exception:
-                continue
-            if hue in known:
-                continue
-            record = out.setdefault(hue, {"amount": 0, "stacks": 0})
-            record["amount"] += int(getattr(item, "Amount", 0) or 0)
-            record["stacks"] += 1
-    return out
-
-
-def report_unknown_families(chests):
-    """Name every hue the runner cannot identify, with the line to paste.
-
-    Printed as part of the stock report rather than buried: a resource with no
-    hue listed has NO stock as far as the budget is concerned, so its orders
-    are passed over exactly as if the chest were empty. That is
-    indistinguishable from "the book has no orders for it" unless it is said
-    out loud.
-    """
-    for family in HUE_FAMILIES:
-        unknown = unknown_family_stacks(chests, family)
-        if not unknown:
-            continue
-        label = family["label"]
-        log("%d %s hue(s) in the chest are not listed, so the runner cannot "
-            "tell which one they are and will not spend them:"
-            % (len(unknown), label), HUE_WARN)
-        for hue, record in sorted(unknown.items(),
-                                  key=lambda kv: -kv[1]["amount"]):
-            log("    hue 0x%04X  %d %s(s) in %d stack(s)"
-                % (hue, record["amount"], label, record["stacks"]), HUE_WARN)
-        log("  Match each hue to what it looks like in game, then paste into "
-            "%s_HUES at the top of this script:" % label.upper(), HUE_WARN)
-        for hue in sorted(unknown):
-            log('      "<name>": 0x%04X,' % hue, HUE_WARN)
-        log("  Use the BOOK's name on the left.", HUE_WARN)
-
-
 def unknown_board_stacks(chests):
     """Board stacks whose hue is not in BOARD_HUES: {hue: {amount, stacks}}.
 
@@ -1411,16 +1263,11 @@ def report_unknown_boards(chests):
 
 
 def validate_board_hues():
-    """Refuse a hue table that cannot work, loudly, at startup."""
+    """Refuse a BOARD_HUES that cannot work, loudly, at startup."""
     ok = True
     by_name = dict((r["name"].strip().lower(), r) for r in RESOURCES)
 
-    pairs = []
-    for family in HUE_FAMILIES:
-        for name, hue in family["hues"].items():
-            pairs.append((name, hue))
-
-    for name, hue in pairs:
+    for name, hue in BOARD_HUES.items():
         if name.strip().lower() not in by_name:
             log("BOARD_HUES names %r, which is not in RESOURCES - it will "
                 "never match an order. Check the spelling against the book."
@@ -1428,7 +1275,7 @@ def validate_board_hues():
             ok = False
 
     seen = {}
-    for name, hue in pairs:
+    for name, hue in BOARD_HUES.items():
         if int(hue) in seen:
             log("BOARD_HUES gives hue 0x%04X to both %r and %r - one of them "
                 "would be filled with the other's wood."
@@ -1436,15 +1283,13 @@ def validate_board_hues():
             ok = False
         seen[int(hue)] = name
 
-    for family in HUE_FAMILIES:
-        count = len(family["hues"])
-        if count:
-            log("%ss: %d identified by hue" % (family["label"], count),
-                HUE_GOOD if ok else HUE_BAD)
-        else:
-            log("%ss: no hues listed yet, so none can be identified. Put a "
-                "stack of each in the chest and the stock report below prints "
-                "the table to paste in." % family["label"], HUE_WARN)
+    if BOARD_HUES:
+        log("boards: %d wood(s) identified by hue" % len(BOARD_HUES),
+            HUE_GOOD if ok else HUE_BAD)
+    else:
+        log("boards: BOARD_HUES is empty, so no wood can be identified yet. "
+            "Put a stack of each in the chest and the stock report below will "
+            "print the table to paste in.", HUE_WARN)
     return ok
 
 
@@ -1872,24 +1717,17 @@ def open_book():
     return True
 
 
-def orders_action(button, filter_text=None, entry=None):
+def orders_action(button, filter_text=None):
     """Press a button on the order list, restating the filter.
 
     A plain SendAction submits the gump's text entries EMPTY, which wipes the
-    filter and silently throws you back to the unfiltered list.
-
-    `entry` picks WHICH of the five column boxes the text belongs in - the Name
-    box by default, or the Completed box when pulling finished orders. Every
-    other box is submitted empty, which is what keeps two filters from stacking
-    up by accident.
+    Name filter and silently throws you back to the unfiltered list.
     """
-    if entry is None:
-        entry = ORDERS_SEARCH_ENTRY
     if filter_text is None:
         Gumps.SendAction(ORDERS_GUMP, button)
     else:
         ids = list(ORDERS_TEXT_IDS)
-        values = [filter_text if i == entry else "" for i in ids]
+        values = [filter_text if i == ORDERS_SEARCH_ENTRY else "" for i in ids]
         try:
             Gumps.SendAdvancedAction(ORDERS_GUMP, button, [], ids, values)
         except Exception as err:
@@ -1916,7 +1754,7 @@ def colliding_names(resource):
             and target in r["name"].strip().lower()]
 
 
-def rewind_to_first_page(filter_text, entry=None):
+def rewind_to_first_page(filter_text):
     """Put the filtered list back on page 1. False means it could not be done.
 
     A NEW FILTER DOES NOT RESET THE PAGE. Confirmed in game 2026-07-30 by
@@ -1947,7 +1785,7 @@ def rewind_to_first_page(filter_text, entry=None):
     for _ in range(MAX_REWIND_PRESSES):
         if current <= 1:
             return True
-        if not orders_action(ORDERS_PREV_BUTTON, filter_text, entry):
+        if not orders_action(ORDERS_PREV_BUTTON, filter_text):
             log("The list closed while rewinding to page 1.", HUE_WARN)
             return False
         before = current
@@ -1962,174 +1800,7 @@ def rewind_to_first_page(filter_text, entry=None):
         % current, HUE_WARN)
     if not open_book():
         return False
-    submit = ORDERS_FILTER_SUBMIT if entry in (None, ORDERS_SEARCH_ENTRY)         else ORDERS_COMPLETED_SUBMIT
-    return orders_action(submit, filter_text, entry)
-
-
-def parse_rows_detailed(strings):
-    """[{"name", "amount", "completed"}] per row, in display order.
-
-    parse_order_rows only needs the name and the amount, and it anchors on the
-    filter term to know where a row starts. Here there is no name to anchor on
-    - the filter is on the Completed column - so a row starts at any cell with
-    letters that is not a Yes/No flag, and everything after it belongs to that
-    row until the next one starts.
-
-    `completed` is the row's LAST cell when that cell is a flag. The row whose
-    Amt To Gather is 0 renders only three cells, so it is read the same way
-    rather than by counting positions.
-    """
-    lowered = [(s or "").strip().lower() for s in strings]
-    start = 0
-    for label in HEADER_LABELS:
-        if label in lowered:
-            start = max(start, lowered.index(label) + 1)
-    end = len(strings)
-    for footer in FOOTER_FIRST:
-        if footer in lowered:
-            end = min(end, lowered.index(footer))
-
-    rows = []
-    for value in strings[start:end]:
-        text = (value or "").strip()
-        if not text:
-            continue
-        low = text.lower()
-        numeric = bool(re.match(r"^-?[\d,]+$", text))
-        lettered = bool(re.search(r"[A-Za-z]", text))
-
-        if lettered and low not in ROW_FLAGS:
-            rows.append({"name": re.sub(r"\s+", " ", text), "amount": None,
-                         "completed": None, "cells": []})
-            continue
-        if not rows:
-            continue
-        rows[-1]["cells"].append(text)
-        if numeric and rows[-1]["amount"] is None:
-            rows[-1]["amount"] = int(text.replace(",", ""))
-        elif low in ("yes", "no"):
-            rows[-1]["completed"] = (low == "yes")
-    return rows
-
-
-def pull_one_completed():
-    """Take ONE finished order out of the book. The deed, or None.
-
-    Re-filters from page 1 every time. Withdrawing an order changes the list
-    under you, so a row button is only ever pressed on a page that was just
-    read - the same rule the filler follows.
-
-    Every withdrawal is CHECKED against the deed itself: the row said the order
-    was finished, and read_deed says whether it really was. If they disagree
-    the parse is wrong and this stops rather than emptying the book.
-    """
-    if not orders_action(ORDERS_COMPLETED_SUBMIT, COMPLETED_FILTER_TEXT,
-                         ORDERS_COMPLETED_ENTRY):
-        log("The list closed while filtering for finished orders.", HUE_BAD)
-        return None, "stop"
-
-    header = parse_header(gump_lines(ORDERS_GUMP))
-    displayed = header.get("displayed")
-    if displayed == 0:
-        return None, "none"
-
-    if not rewind_to_first_page(COMPLETED_FILTER_TEXT, ORDERS_COMPLETED_ENTRY):
-        return None, "stop"
-
-    for page in range(1, COMPLETED_MAX_PAGES + 1):
-        strings = gump_lines(ORDERS_GUMP)
-        rows = parse_rows_detailed(strings)
-        buttons = row_buttons(raw_layout(ORDERS_GUMP))
-
-        if len(rows) != len(buttons):
-            log("finished orders page %d: %d rows but %d buttons - skipping "
-                "rather than risk pressing the wrong one."
-                % (page, len(rows), len(buttons)), HUE_BAD)
-        else:
-            for row, button in zip(rows, buttons):
-                if row.get("completed") is not True:
-                    continue
-                log("taking finished order %s (row button %d)"
-                    % (row["name"], button))
-                deed = withdraw({"button": button, "name": row["name"],
-                                 "amount": row.get("amount") or 0,
-                                 "term": COMPLETED_FILTER_TEXT},
-                                COMPLETED_FILTER_TEXT)
-                if deed is None:
-                    return None, "stop"
-                if not deed_is_complete(deed):
-                    fields, filled, needed = read_deed(deed)
-                    log("That row read as finished but the deed says %s. The "
-                        "Completed column is not being read correctly - "
-                        "stopping before any more are taken. The deed is in "
-                        "your pack." % progress_text(filled, needed), HUE_BAD)
-                    return None, "stop"
-                return deed, "took"
-
-        current, total = page_counter(strings)
-        if total is None or current is None or current >= total:
-            break
-        if not orders_action(ORDERS_NEXT_BUTTON, COMPLETED_FILTER_TEXT,
-                             ORDERS_COMPLETED_ENTRY):
-            break
-    return None, "none"
-
-
-def pull_completed_orders():
-    """Take every finished order out of the book. The deeds, for the hand-in.
-
-    They are carried to the SAME hand-in the filled deeds go to, so this costs
-    no extra trip - and each one earns a replacement order there like any other
-    hand-in.
-    """
-    if not PULL_COMPLETED:
-        return []
-    if not has_gump(ORDERS_GUMP) and not open_book():
-        log("Could not open the order list - no finished orders pulled.",
-            HUE_WARN)
-        return []
-
-    unfiltered = parse_header(gump_lines(ORDERS_GUMP)).get("displayed")
-
-    pulled = []
-    hit_ceiling = True
-    for _ in range(COMPLETED_MAX_PULL):
-        deed, outcome = pull_one_completed()
-        if deed is not None:
-            pulled.append(deed)
-            if len(pulled) % 5 == 0:
-                log("  %d finished order(s) so far..." % len(pulled))
-            continue
-        if outcome == "stop":
-            hit_ceiling = False
-            break
-        hit_ceiling = False
-        # "none" - but on the FIRST pass check the filter actually did
-        # something, rather than believing an empty result from a filter the
-        # book ignored.
-        if not pulled:
-            after = parse_header(gump_lines(ORDERS_GUMP)).get("displayed")
-            if (unfiltered is not None and after is not None
-                    and after >= unfiltered and after > 0):
-                log("The Completed filter (%r in filter box %d, the last "
-                    "column) did not narrow the "
-                    "list - %s rows before, %s after. Nothing was pulled. If "
-                    "that column reads something other than %r, set "
-                    "COMPLETED_FILTER_TEXT."
-                    % (COMPLETED_FILTER_TEXT, ORDERS_COMPLETED_ENTRY,
-                       unfiltered, after, COMPLETED_FILTER_TEXT), HUE_WARN)
-        break
-
-    if hit_ceiling:
-        log("took this lap's %d finished order(s) - more are still showing "
-            "%r, and the next lap takes the next batch."
-            % (COMPLETED_MAX_PULL, COMPLETED_FILTER_TEXT), HUE_GOOD)
-    elif pulled:
-        log("%d finished order(s) taken - none left showing %r."
-            % (len(pulled), COMPLETED_FILTER_TEXT), HUE_GOOD)
-    if pulled:
-        log("they go to the hand-in with the rest.")
-    return pulled
+    return orders_action(ORDERS_FILTER_SUBMIT, filter_text)
 
 
 def find_first_order(resource, budget):
@@ -3181,43 +2852,6 @@ def give_deed(npc, deed):
     return False
 
 
-def startup_handin():
-    """Cash any filled deeds already in the pack, before the first lap.
-
-    Each one earns a replacement order the same way it would mid-run, so this
-    also seeds the order bag - and the first lap's "Fill from backpack" puts
-    those into the book before it censuses.
-
-    Returns how many were handed in.
-    """
-    if not STARTUP_HANDIN:
-        return 0
-
-    held = pack_deeds()
-    ready = [d for d in held if deed_is_complete(d)]
-    unfilled = [d for d in held if not deed_is_complete(d)]
-
-    if not ready:
-        log("no filled deeds in the pack - starting clean%s"
-            % (", %d unfilled one(s) left alone" % len(unfilled)
-               if unfilled else ""))
-        return 0
-
-    rule("startup: %d filled deed(s) already in the pack" % len(ready))
-    for deed in ready:
-        fields, filled, needed = read_deed(deed)
-        log("  0x%X %s %s" % (int(deed.Serial), fields.get("resource", "?"),
-                              progress_text(filled, needed)))
-    if unfilled:
-        log("%d part-filled deed(s) stay put - handing one in spends it for "
-            "nothing." % len(unfilled), HUE_WARN)
-
-    handed = hand_in(ready)
-    log("startup hand-in: %d of %d cashed" % (handed, len(ready)),
-        HUE_GOOD if handed == len(ready) else HUE_WARN)
-    return handed
-
-
 def collect_replacement(npc, order_bag, collected):
     """Take the free order a hand-in just unlocked, and park it in the bag.
 
@@ -3552,7 +3186,7 @@ def fill_orders(chests, offset=0):
     # Boards the runner can SEE but cannot name. Reported here, beside the
     # stock it did recognise, because an unidentified wood looks exactly like
     # an empty chest from every other angle.
-    report_unknown_families(chests)
+    report_unknown_boards(chests)
 
     if not any(budget.get(r["name"], 0) > 0 for r in worked_resources()):
         log("Nothing above the reserves. Nothing to fill.", HUE_WARN)
@@ -3604,18 +3238,6 @@ def fill_orders(chests, offset=0):
             if outcome == "stop":
                 return completed, True, offset      # the helper has said why
             if outcome == "none":
-                # A PRIORITY resource coming back empty is worth saying out
-                # loud with its numbers. It is pinned precisely because there
-                # is deep stock of it, so "nothing to do" is surprising and
-                # needs to distinguish "the book has no orders" from "the
-                # orders are all too big for the budget".
-                if resource in priority_names:
-                    entry = stock.get(resource, {"amount": 0, "stacks": []})
-                    log("PRIORITY %s took nothing: %d on hand, %d spendable, "
-                        "in %d stack(s)."
-                        % (resource, entry["amount"],
-                           budget.get(resource, 0), len(entry["stacks"])),
-                        HUE_WARN)
                 exhausted.add(resource)
                 continue
             took_any = True
@@ -3688,12 +3310,7 @@ def run_lap(lap, offset=0):
     if ORGANIZE_CHEST:
         organize_chests(chests)
 
-    # Finished orders sitting in the book, taken out BEFORE the filling so
-    # they ride to the same hand-in rather than earning a trip of their own.
-    pulled = pull_completed_orders()
-
     completed, stop, next_offset = fill_orders(chests, offset)
-    completed = list(completed) + pulled
 
     # The fill phase is finished with the book, the order list and both chest
     # windows whatever happened next - so close them on EVERY exit, not just
@@ -3704,8 +3321,7 @@ def run_lap(lap, offset=0):
     if stop:
         return 0, True, next_offset
 
-    rule("%d order(s) to hand in (%d filled, %d taken finished from the "
-         "book)" % (len(completed), len(completed) - len(pulled), len(pulled)))
+    rule("%d order(s) to hand in" % len(completed))
     if not completed:
         return 0, False, next_offset    # nothing filled - may end the run
 
@@ -3735,12 +3351,8 @@ def main():
         log("world-save pause on: %ds from the warning"
             % (WORLD_SAVE_PAUSE_MS / 1000))
 
-    # Before anything else: cash whatever a previous run left behind, and take
-    # the replacement orders they earn. Lap 1 deposits those into the book on
-    # arrival at Start Fill, so they are fillable straight away.
-    total = startup_handin()
-
     started = time.time()
+    total = 0
     laps = 0
     offset = 0
     barren = 0
