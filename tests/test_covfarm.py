@@ -1172,6 +1172,127 @@ check("walks back to 750, 475",
 
 print()
 print("=" * 100)
+print("CHEST_ACTION - trash, hand to the master key, or leave alone")
+print("=" * 100)
+
+
+class Ctx(object):
+    def __init__(self, entry):
+        self.Entry = entry
+
+
+def with_master_key(module, menu, key_id=None, key_hue=None):
+    """Put a master key in the pack and stub its context menu."""
+    key = PackItem(0x4F0F0001,
+                   module["MASTER_KEY_ID"] if key_id is None else key_id,
+                   module["MASTER_KEY_HUE"] if key_hue is None else key_hue,
+                   "a master key")
+    PACK.append(key)
+    replied = []
+    module["Misc"].WaitForContext = lambda i, d, sc=None: [Ctx(e) for e in menu]
+    module["Misc"].ContextReply = lambda i, label: replied.append(label)
+    return key, replied
+
+
+m40 = load()
+bag = fresh_pack(m40)
+PACK.append(chest(0x50000001))
+m40["CHEST_ACTION"] = "trash"
+check("trash mode bins it", m40["handle_chests"](), 1)
+check("it went to the bag", MOVES, [(0x50000001, m40["TRASH_BAG_SERIAL"])])
+
+print()
+print("   -- 'keep' touches nothing at all --")
+m41 = load()
+bag = fresh_pack(m41)
+PACK.append(chest(0x50000002))
+m41["CHEST_ACTION"] = "keep"
+check("nothing handled", m41["handle_chests"](), 0)
+check("nothing moved", MOVES, [])
+check("the chest is still in the pack",
+      0x50000002 in [i.Serial for i in PACK], True)
+
+print()
+print("   -- a misspelled mode destroys nothing --")
+m42 = load()
+bag = fresh_pack(m42)
+PACK.append(chest(0x50000003))
+m42["CHEST_ACTION"] = "trashh"
+check("unknown mode does nothing", m42["handle_chests"](), 0)
+check("nothing moved", MOVES, [])
+
+print()
+print("   -- 'key' hands them over, and nothing is deleted --")
+m43 = load()
+bag = fresh_pack(m43)
+PACK.append(chest(0x50000004))
+m43["CHEST_ACTION"] = "key"
+key, replied = with_master_key(m43, ["Open", "Add", "Fill from backpack"])
+# The key swallows them: emulate by emptying the chests from the pack.
+original_reply = m43["Misc"].ContextReply
+def swallow(item, label):
+    original_reply(item, label)
+    for it in list(PACK):
+        if it.Name == "a glimmering chest of belongings":
+            PACK.remove(it)
+m43["Misc"].ContextReply = swallow
+check("one chest handed over", m43["handle_chests"](), 1)
+check("the exact menu label was sent", replied, ["Fill from backpack"])
+check("nothing went to the trash bag", MOVES, [])
+
+print()
+print("   -- the fallback wording is accepted too --")
+m44 = load()
+bag = fresh_pack(m44)
+PACK.append(chest(0x50000005))
+m44["CHEST_ACTION"] = "key"
+key, replied = with_master_key(m44, ["Open", "Add", "Refill from stock"])
+orig = m44["Misc"].ContextReply
+def swallow2(item, label):
+    orig(item, label)
+    for it in list(PACK):
+        if it.Name == "a glimmering chest of belongings":
+            PACK.remove(it)
+m44["Misc"].ContextReply = swallow2
+check("handed over", m44["handle_chests"](), 1)
+check("sent the real label", replied, ["Refill from stock"])
+
+print()
+print("   -- an unrecognised menu presses NOTHING --")
+m45 = load()
+bag = fresh_pack(m45)
+PACK.append(chest(0x50000006))
+m45["CHEST_ACTION"] = "key"
+key, replied = with_master_key(m45, ["Open", "Add", "Empty the key"])
+check("nothing handed over", m45["handle_chests"](), 0)
+check("and nothing was pressed", replied, [])
+check("the chest is untouched",
+      0x50000006 in [i.Serial for i in PACK], True)
+
+print()
+print("   -- CONTEXT_NEVER blocks a destructive entry on the fallback --")
+m46 = load()
+check("'Empty contents' is refused",
+      m46["context_is_blocked"]("Empty contents"), True)
+check("'Destroy all' is refused", m46["context_is_blocked"]("Destroy all"), True)
+check("'Fill from backpack' is fine",
+      m46["context_is_blocked"]("Fill from backpack"), False)
+for label in m46["MASTER_KEY_CONTEXT"]:
+    check("configured %r is usable" % label,
+          m46["context_is_blocked"](label), False)
+
+print()
+print("   -- no master key: nothing is trashed as a consolation --")
+m47 = load()
+bag = fresh_pack(m47)
+PACK.append(chest(0x50000007))
+m47["CHEST_ACTION"] = "key"
+m47["Misc"].WaitForContext = lambda i, d, sc=None: []
+check("nothing handled", m47["handle_chests"](), 0)
+check("and NOT quietly binned instead", MOVES, [])
+
+print()
+print("=" * 100)
 if FAILURES:
     print("%d FAILURE(S): %s" % (len(FAILURES), ", ".join(FAILURES)))
     sys.exit(1)

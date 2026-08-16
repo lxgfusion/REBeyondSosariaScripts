@@ -26,9 +26,14 @@ What it does
 5. Walks onto the corpse and says the shard's grab command ([grab) to take the
    loot you have configured in game. The corpse vanishing is how it knows the
    grab worked.
-6. Bins the reward chests. The shard drops "a glimmering chest of belongings"
-   (levels 1-5) straight into your pack on the kill, so after every kill the
-   pack is swept and any of them are moved to the trash bag.
+6. Deals with the reward chests. The shard drops "a glimmering chest of
+   belongings" (levels 1-5) straight into your pack on the kill, so after every
+   kill the pack is swept.
+
+   WHAT HAPPENS TO THEM IS YOUR CHOICE, set by CHEST_ACTION in section 6:
+   "trash" moves them to the trash bag, which DELETES them; "key" hands them
+   to your master key, which destroys nothing; "keep" leaves them alone. The
+   choice is printed at startup so it is never a surprise.
 
    It goes by NAME, whatever the level: anything called "a glimmering chest of
    belongings" in the backpack is binned. Neither graphic nor hue is pinned,
@@ -92,12 +97,38 @@ import re
 import time
 
 
-SCRIPT_VERSION = "1.5.0"
+SCRIPT_VERSION = "1.6.0"
 
 
 # #############################################################################
-# ##                            C O N F I G                                  ##
+# ##                                                                         ##
+# ##                         C O N F I G U R A T I O N                       ##
+# ##                                                                         ##
+# ##  EVERYTHING you need to set is in this block. Nothing below it needs    ##
+# ##  editing to run the script.                                            ##
+# ##                                                                         ##
+# ##    1. THE MONSTER ......... what to hunt and how far to look            ##
+# ##    2. THE SPELLS .......... opener, attack, and which school they are   ##
+# ##    3. POSITIONING ......... the range band held during the fight        ##
+# ##    4. DEATH CONFIRMATION .. how a kill is proven                        ##
+# ##    5. LOOTING ............. the grab command, and the camp to return to ##
+# ##    6. CHESTS .............. what happens to the reward chests           ##
+# ##    7. SAFETY .............. when to break off or stop                   ##
+# ##    8. TIMING .............. every wait, in milliseconds                 ##
+# ##                                                                         ##
+# ##  THE TWO MOST LIKELY TO NEED CHANGING:                                  ##
+# ##                                                                         ##
+# ##    SPELL_ATTACK / SPELL_OPENER - "Nether Blast" is not a stock spell    ##
+# ##      name, so if nothing casts, set "school" explicitly. The script     ##
+# ##      prints what it tried and what the server said.                     ##
+# ##                                                                         ##
+# ##    CHEST_ACTION - "trash" DELETES the reward chests, "key" hands them   ##
+# ##      to your master key, "keep" leaves them alone. It is printed at     ##
+# ##      startup so you always know which one is in force.                  ##
+# ##                                                                         ##
 # #############################################################################
+
+
 
 # =============================================================================
 # 1. THE MONSTER
@@ -286,7 +317,7 @@ CAMP_RETURN_TIMEOUT = 20000
 
 
 # =============================================================================
-# 6. TRASHING  -  bin the chests the kill drops into your pack
+# 6. CHESTS  -  what happens to the ones the kill drops in your pack
 #
 # The shard puts these in the backpack ON THE KILL - they are not picked up by
 # the grab command - so the sweep runs after every kill, corpse or no corpse.
@@ -296,7 +327,60 @@ CAMP_RETURN_TIMEOUT = 20000
 # must match on BOTH its graphic and its name before anything is touched.
 # =============================================================================
 
-TRASH_ENABLED = True
+# WHAT TO DO WITH A CHEST WHEN ONE LANDS IN YOUR PACK. Your choice:
+#
+#   "trash"  move it to the trash bag, which deletes it after 30 seconds.
+#            This is what the script did before the option existed.
+#   "key"    hand it to the MASTER KEY instead, which swallows it into
+#            storage. Nothing is destroyed. See MASTER_KEY_* below.
+#   "keep"   do nothing at all. The chests pile up in your pack, and looting
+#            stops once it is full - fine for a short session where you want
+#            to open them yourself.
+#
+# Anything else is treated as "keep" and said so at startup, rather than being
+# guessed at - the wrong guess here deletes things.
+CHEST_ACTION = "trash"
+
+# Derived. Kept as its own name because a lot of code below asks the simple
+# question "is the script handling chests at all?".
+TRASH_ENABLED = CHEST_ACTION in ("trash", "key")
+
+# ---------------------------------------------------------------------------
+# THE MASTER KEY  -  only used when CHEST_ACTION is "key"
+#
+# The same key harvest_runner.py restocks into: a carried item whose right-click
+# menu has an entry that takes things out of your pack. On the keys inspected
+# so far that menu reads  Open | Add | Refill from stock.
+#
+# Serial is 0 on purpose. Each character carries their own key, so a serial
+# here would be right for exactly one person; the graphic and hue find whoever
+# is holding one. Fill the serial in only if you have several and want a
+# specific one.
+MASTER_KEY_SERIAL = 0
+MASTER_KEY_ID = 0x176B
+MASTER_KEY_HUE = 0x0481
+
+# Menu entries meaning "take what is in my pack", tried in this order. An
+# EXACT match is taken first and always honoured; only then is a substring
+# tried, and that one refuses anything on CONTEXT_NEVER.
+#
+# If none of these is on the menu the script presses NOTHING and prints what
+# the menu actually offered, so you can add the right wording here. It will
+# not press a likely-looking entry on a guess.
+MASTER_KEY_CONTEXT = [
+    "Fill from backpack",
+    "Refill from stock",
+]
+
+# Never chosen by the substring fallback, whatever else matches. A key's menu
+# can carry entries that empty or destroy its contents right beside the one you
+# want.
+CONTEXT_NEVER = [
+    "empty", "destroy", "delete", "discard", "drop", "release", "purge",
+    "sell", "bribe", "open bankbox", "train ",
+]
+
+CONTEXT_TIMEOUT_MS = 3000
 
 # The trash bag, from the Enhanced Item Inspector on 2026-08-11:
 #
@@ -1038,6 +1122,151 @@ def trash_entry_for(item, bag_serial):
     return None
 
 
+def context_labels(item):
+    """The item's right-click menu as a list of labels, or []."""
+    try:
+        entries = Misc.WaitForContext(item, CONTEXT_TIMEOUT_MS, False)
+    except TypeError:
+        entries = Misc.WaitForContext(item, CONTEXT_TIMEOUT_MS)
+    except Exception as err:
+        log("could not read the context menu: %s" % err, HUE_WARN)
+        return []
+    out = []
+    for entry in list(entries or []):
+        text = str(getattr(entry, "Entry", entry) or "").strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def context_is_blocked(label):
+    low = (label or "").lower()
+    for banned in CONTEXT_NEVER:
+        if banned.strip().lower() in low:
+            return True
+    return False
+
+
+def pick_context(labels, wanted):
+    """Choose a menu label. EXACT match first, guarded substring second.
+
+    An exact hit is always honoured - it was configured deliberately. The
+    substring fallback exists because shards reword entries, but it refuses
+    anything on CONTEXT_NEVER: a key's menu can carry something that empties
+    or destroys its contents right beside the entry you want.
+    """
+    for want in wanted:
+        target = (want or "").strip().lower()
+        for label in labels:
+            if (label or "").strip().lower() == target:
+                return label
+    for want in wanted:
+        target = (want or "").strip().lower()
+        if not target:
+            continue
+        for label in labels:
+            if target in (label or "").lower():
+                if context_is_blocked(label):
+                    log("  refusing %r - it matches CONTEXT_NEVER." % label,
+                        HUE_WARN)
+                    continue
+                return label
+    return None
+
+
+def find_master_key():
+    """The master key, by serial if one is set, else by graphic and hue."""
+    if MASTER_KEY_SERIAL:
+        key = Items.FindBySerial(MASTER_KEY_SERIAL)
+        if key is not None:
+            return key
+        log("master key serial 0x%X did not resolve - looking by graphic."
+            % MASTER_KEY_SERIAL, HUE_WARN)
+    for item in pack_items():
+        try:
+            if int(item.ItemID) != MASTER_KEY_ID:
+                continue
+            if MASTER_KEY_HUE >= 0 and int(item.Hue) != MASTER_KEY_HUE:
+                continue
+        except Exception:
+            continue
+        return item
+    return None
+
+
+def give_to_master_key(announce=True):
+    """Let the master key take the chests out of the pack. How many went.
+
+    Nothing is destroyed here - this is the alternative to the trash bag.
+
+    The count is taken before and after and diffed, because the menu entry can
+    be answered and do nothing at all; "the reply was sent" is not evidence
+    that anything moved.
+    """
+    key = find_master_key()
+    if key is None:
+        if announce:
+            log("Master key not found (id 0x%04X, hue 0x%04X) - nothing "
+                "handed over. Set MASTER_KEY_SERIAL if it is not in your pack."
+                % (MASTER_KEY_ID, MASTER_KEY_HUE), HUE_WARN)
+        return 0
+
+    before = len(find_chests())
+    if not before:
+        return 0
+
+    labels = context_labels(key)
+    if not labels:
+        log("The master key showed no context menu.", HUE_WARN)
+        return 0
+    log("  master key menu: %s" % " | ".join(labels))
+
+    choice = pick_context(labels, MASTER_KEY_CONTEXT)
+    if choice is None:
+        log("None of %s is on the master key's menu, so NOTHING was pressed. "
+            "Add the right wording to MASTER_KEY_CONTEXT - the menu offers: %s"
+            % (MASTER_KEY_CONTEXT, " | ".join(labels)), HUE_BAD)
+        return 0
+
+    log("  handing %d chest(s) to the master key with %r" % (before, choice))
+    Misc.ContextReply(key, choice)      # the real label, not the search string
+    Misc.Pause(TRASH_MOVE_PAUSE_MS)
+    refresh_backpack()
+
+    after = len(find_chests())
+    taken = max(0, before - after)
+    if taken:
+        log("  the master key took %d chest(s)." % taken, HUE_GOOD)
+    else:
+        log("  the master key took nothing - %d chest(s) still in the pack."
+            % after, HUE_WARN)
+    return taken
+
+
+def find_chests():
+    """Every chest in the pack that the configured entries match."""
+    bag = find_trash_bag()
+    bag_serial = int(bag.Serial) if bag is not None else 0
+    found = []
+    for item in pack_items():
+        if trash_entry_for(item, bag_serial) is not None:
+            found.append(item)
+    return found
+
+
+def handle_chests(announce=True):
+    """Deal with any chests in the pack, however CHEST_ACTION says to.
+
+    One entry point so the caller never has to know which mode is set.
+    """
+    if CHEST_ACTION == "trash":
+        return trash_junk(announce=announce)
+    if CHEST_ACTION == "key":
+        refresh_backpack()
+        return give_to_master_key(announce=announce)
+    return 0
+
+
 def trash_junk(announce=True):
     """Move the configured junk out of the pack and into the trash bag.
 
@@ -1173,7 +1402,7 @@ def maybe_trash():
     if now - _last_trash_sweep[0] < (TRASH_POLL_MS / 1000.0):
         return 0
     _last_trash_sweep[0] = now
-    return trash_junk(announce=False)
+    return handle_chests(announce=False)
 
 
 def return_to_camp():
@@ -1577,6 +1806,29 @@ def preflight():
         log("TARGET_NAME is empty - nothing to hunt.", HUE_BAD)
         return False
 
+    # Say what will happen to the chests, out loud, before anything dies. One
+    # of these options DELETES them, so it should never be a surprise.
+    if CHEST_ACTION == "trash":
+        bag = find_trash_bag()
+        log("Chests: TRASHED - moved to the trash bag, which deletes them "
+            "after 30 seconds.%s"
+            % ("" if bag is not None else "  WARNING: the bag was not found."),
+            HUE_WARN if bag is None else HUE_INFO)
+    elif CHEST_ACTION == "key":
+        key = find_master_key()
+        log("Chests: handed to the MASTER KEY - nothing is destroyed.%s"
+            % ("" if key is not None
+               else "  WARNING: no master key in your pack."),
+            HUE_WARN if key is None else HUE_INFO)
+    elif CHEST_ACTION == "keep":
+        log("Chests: LEFT ALONE. They will fill your pack and looting will "
+            "stop once it is full.", HUE_INFO)
+    else:
+        log("CHEST_ACTION is %r, which is not one of \"trash\", \"key\" or "
+            "\"keep\" - treating it as \"keep\" and touching nothing. Fix the "
+            "spelling to get the behaviour you wanted." % CHEST_ACTION,
+            HUE_BAD)
+
     log("Hunting: %r  bodies %s  notoriety %s"
         % (TARGET_NAME,
            ["0x%X" % b for b in TARGET_BODIES] or "(name only)",
@@ -1614,7 +1866,7 @@ def main():
     # Clear anything left over from a previous run before the first spawn, so
     # the pack starts empty rather than carrying the last session's chests.
     if TRASH_ENABLED:
-        binned = trash_junk()
+        binned = handle_chests()
         if not binned:
             log("nothing to bin at startup")
 
@@ -1663,7 +1915,7 @@ def main():
             # runs on every kill, including one where no corpse was found to
             # loot, and before walking back so the return is not made with a
             # pack full of them.
-            trash_junk()
+            handle_chests()
 
             # ALWAYS, not only when there was a corpse to loot. The camp is a
             # fixed spot now, and a kill that produced no corpse still leaves
