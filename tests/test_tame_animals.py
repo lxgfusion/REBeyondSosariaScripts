@@ -108,6 +108,142 @@ def load_script():
     return env
 
 
+def test_peace_messages_are_the_servuo_ones(m):
+    """Taken verbatim from ServUO Scripts/Skills/Peacemaking.cs. If a shard
+    reworded one the script would read every attempt as a failure, so they are
+    pinned rather than paraphrased."""
+    check("success", m["PEACE_SUCCESS"],
+          "You play hypnotic music, calming your target.")
+    check("failure", m["PEACE_FAILED"],
+          "You attempt to calm your target, but fail.")
+    check("hopeless", m["PEACE_HOPELESS"],
+          "You have no chance of calming that creature.")
+    check("already calm", m["PEACE_ALREADY"],
+          "That creature is already being calmed.")
+    check("bad musicianship", m["PEACE_PLAYED_POORLY"],
+          "You play poorly, and there is no effect.")
+    check("the instrument picker", m["PEACE_PICK_INSTRUMENT"],
+          "What instrument shall you play?")
+    check("all of them are watched for", len(m["PEACE_ALL"]), 6)
+
+
+def test_instrument_list_is_real_graphics(m):
+    """From ServUO Scripts/Items/Equipment/Instruments. A wrong graphic here
+    means find_instrument returns None and the script reports "no instrument"
+    while one is sitting in the pack."""
+    ids = m["INSTRUMENT_IDS"]
+    for name, graphic in (("drums", 0x0E9C), ("tambourine", 0x0E9D),
+                          ("harp", 0x0EB1), ("lap harp", 0x0EB2),
+                          ("lute", 0x0EB3), ("bamboo flute", 0x2805)):
+        check("%s listed" % name, graphic in ids, True)
+    check("no duplicates", len(ids), len(set(ids)))
+
+
+def test_find_instrument_only_looks_in_the_pack(m):
+    class It(object):
+        def __init__(self, item_id):
+            self.ItemID = item_id
+            self.Serial = 0x1234
+
+    class Pack(object):
+        def __init__(self, contents):
+            self.Serial = 0x41D40F58
+            self.Contains = contents
+
+    player = m["Player"]
+    saved = player.Backpack
+    try:
+        player.Backpack = None
+        check("no backpack at all -> none", m["find_instrument"](), None)
+
+        player.Backpack = Pack([])
+        check("empty pack -> none", m["find_instrument"](), None)
+
+        player.Backpack = Pack([It(0x0EED)])       # gold, not an instrument
+        check("no instrument -> none", m["find_instrument"](), None)
+
+        player.Backpack = Pack([It(0x0EED), It(0x0EB3)])   # a lute
+        found = m["find_instrument"]()
+        check("lute found", found is not None and found.ItemID, 0x0EB3)
+    finally:
+        player.Backpack = saved
+
+
+def test_should_peace_honours_the_mode(m):
+    class Mob(object):
+        def __init__(self, war):
+            self.WarMode = war
+
+    saved = (m["PEACE_ENABLED"], m["PEACE_WHEN"])
+    try:
+        m["PEACE_ENABLED"] = True
+
+        m["PEACE_WHEN"] = "always"
+        check("always: a calm animal", m["should_peace"](Mob(False)), True)
+        check("always: a fighting one", m["should_peace"](Mob(True)), True)
+
+        m["PEACE_WHEN"] = "fighting"
+        check("fighting: not engaged", m["should_peace"](Mob(False)), False)
+        check("fighting: engaged", m["should_peace"](Mob(True)), True)
+
+        m["PEACE_WHEN"] = "never"
+        check("never: not even a fighting one",
+              m["should_peace"](Mob(True)), False)
+
+        m["PEACE_ENABLED"] = False
+        m["PEACE_WHEN"] = "always"
+        check("disabled beats the mode", m["should_peace"](Mob(True)), False)
+    finally:
+        m["PEACE_ENABLED"], m["PEACE_WHEN"] = saved
+
+
+def test_peace_failure_never_blocks_taming(m):
+    """The point is to improve the odds on an aggressive, not to gate the run
+    behind a bard skill. calm_before_taming returns a plain False and the
+    caller tames anyway."""
+    import ast
+    with open(SCRIPT, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    fn = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "calm_before_taming":
+            fn = node
+    check("calm_before_taming exists", fn is not None, True)
+    if fn is None:
+        return
+    returns = [n for n in ast.walk(fn) if isinstance(n, ast.Return)]
+    check("it only ever returns a bool",
+          all(isinstance(r.value, ast.Constant)
+              and isinstance(r.value.value, bool) for r in returns), True)
+    raises = [n for n in ast.walk(fn) if isinstance(n, ast.Raise)]
+    check("and never raises", raises, [])
+
+
+def test_peace_clears_the_cursor_on_every_bail(m):
+    """A leaked target cursor silently eats the NEXT TargetExecute - which
+    here would be the taming attempt itself, so the tame would appear to run
+    and never reach the server."""
+    import ast
+    with open(SCRIPT, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    fn = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "peacemake":
+            fn = node
+    check("peacemake exists", fn is not None, True)
+    if fn is None:
+        return
+    clears = [n for n in ast.walk(fn)
+              if isinstance(n, ast.Call)
+              and getattr(n.func, "id", None) == "clear_cursor"]
+    waits = [n for n in ast.walk(fn)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "WaitForTarget"]
+    check("it clears the cursor", len(clears) >= 3, True)
+    check("it waits on a cursor", len(waits) >= 1, True)
+
+
 def check(label, got, want):
     ok = got == want
     if not ok:
@@ -356,6 +492,12 @@ def main():
     module["build_species"]()          # populates the name patterns
 
     test_species_matching(module)
+    test_peace_messages_are_the_servuo_ones(module)
+    test_instrument_list_is_real_graphics(module)
+    test_find_instrument_only_looks_in_the_pack(module)
+    test_should_peace_honours_the_mode(module)
+    test_peace_failure_never_blocks_taming(module)
+    test_peace_clears_the_cursor_on_every_bail(module)
     test_real_deed(module)
     test_concatenated_species(module)
     test_progress(module)

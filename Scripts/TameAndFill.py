@@ -175,6 +175,58 @@ HUE_BAD = 0x0021         # red
 
 
 # =============================================================================
+# CONFIG - PEACEMAKING
+# =============================================================================
+#
+# Aggressive animals fight back while you tame them. Peacemaking calms one for
+# 10-120 seconds (ServUO scales it by the creature's difficulty), which is
+# usually long enough to get the tame in.
+#
+# YOU NEED AN INSTRUMENT IN YOUR PACK. Without one the skill fails SILENTLY -
+# ServUO sends no message at all - so the script checks for one up front and
+# says so rather than letting you wonder why nothing happens.
+#
+# WHEN to play it:
+#   "always"    before every taming attempt. Simplest, and wasted on a
+#               chicken - a failed peace on a passive animal costs a few
+#               seconds and nothing else.
+#   "fighting"  only when the creature is actually in war mode, i.e. it has
+#               engaged something. Faster, but an aggressive that has not
+#               closed on you yet is not yet in war mode, so the first
+#               taming attempt may still be taken unprotected.
+#   "never"     off. Same behaviour as before this existed.
+PEACE_ENABLED = True
+PEACE_WHEN = "always"
+
+# Tries per creature before taming is attempted anyway. A failed peace is not
+# fatal - it just means the tame happens the hard way.
+PEACE_ATTEMPTS = 2
+
+# Re-play if a tame is still running after this long, since the calm wears off.
+# 0 disables re-playing.
+PEACE_REFRESH_MS = 45000
+
+PEACE_RESULT_MS = 3000            # how long to wait for the result message
+PEACE_RETRY_MS = 1200             # between attempts
+PEACE_SETTLE_MS = 600
+
+# Instrument graphics, from ServUO Scripts/Items/Equipment/Instruments. Any one
+# of these in the pack is enough. The server remembers which instrument you
+# used and only asks again if it leaves your backpack.
+INSTRUMENT_IDS = [
+    0x0E9C,     # drums
+    0x0E9D,     # tambourine
+    0x0EB1,     # harp
+    0x0EB2,     # lap harp
+    0x0EB3,     # lute
+    0x2805,     # bamboo flute
+    0x403B,     # aud char
+    0x4C3E,     # cello
+    0x4C5A,     # cowbell
+]
+
+
+# =============================================================================
 # ANIMAL CATALOGUE
 # =============================================================================
 # Name, body values, minimum taming skill. Extracted from ServUO
@@ -364,6 +416,28 @@ MSG_ABORT = [
     "You have too many followers to tame that creature.",  # 1049611
     "You are dead, and cannot continue taming.",           # 502796
 ]
+
+
+# ---------------------------------------------------------------------------
+# Peacemaking - ServUO Scripts/Skills/Peacemaking.cs, verbatim.
+#
+# Note there is NO message for "you have no instrument": the skill simply does
+# nothing. That silence is why find_instrument() is checked first.
+# ---------------------------------------------------------------------------
+
+PEACE_PROMPT = "Whom do you wish to calm?"
+PEACE_PICK_INSTRUMENT = "What instrument shall you play?"      # 500617
+
+PEACE_SUCCESS = "You play hypnotic music, calming your target."
+PEACE_ALREADY = "That creature is already being calmed."
+PEACE_HOPELESS = "You have no chance of calming that creature."
+PEACE_FAILED = "You attempt to calm your target, but fail."
+PEACE_PLAYED_POORLY = "You play poorly, and there is no effect."
+PEACE_NO_INSTRUMENT = ("The instrument you are trying to play is no longer in "
+                       "your backpack!")
+
+PEACE_ALL = [PEACE_SUCCESS, PEACE_ALREADY, PEACE_HOPELESS, PEACE_FAILED,
+             PEACE_PLAYED_POORLY, PEACE_NO_INSTRUMENT]
 
 
 # =============================================================================
@@ -938,6 +1012,143 @@ def approach(serial, goal=None, accept=None):
 
 
 # =============================================================================
+# PEACEMAKING
+# =============================================================================
+
+def find_instrument():
+    """An instrument in the pack, or None.
+
+    Checked BEFORE the skill is used, because a missing instrument makes
+    Peacemaking fail with no message whatsoever - the script would otherwise
+    play, wait, see nothing, and report a plain failure forever.
+    """
+    backpack = Player.Backpack
+    if backpack is None:
+        return None
+    for item in list(getattr(backpack, "Contains", None) or []):
+        try:
+            if int(item.ItemID) in INSTRUMENT_IDS:
+                return item
+        except Exception:
+            continue
+    return None
+
+
+def should_peace(mob):
+    """Whether to play at this creature before taming it."""
+    if not PEACE_ENABLED or PEACE_WHEN == "never":
+        return False
+    if PEACE_WHEN == "always":
+        return True
+    if PEACE_WHEN == "fighting":
+        try:
+            return bool(mob.WarMode)
+        except Exception:
+            return False
+    return False
+
+
+def peacemake(serial, label):
+    """Play Peacemaking at one creature. What happened, as a word.
+
+        "calmed"      it worked, or it was already calm
+        "hopeless"    it can never be calmed - do not try again
+        "failed"      the attempt failed; trying again may work
+        "noinstrument" nothing to play
+        "lost"        the creature is gone
+
+    Two target cursors are possible. The server remembers your instrument and
+    only asks "What instrument shall you play?" when it is not in your pack, so
+    that prompt is answered if it appears and ignored when it does not.
+    """
+    if find_instrument() is None:
+        return "noinstrument"
+
+    mob = Mobiles.FindBySerial(serial)
+    if mob is None:
+        return "lost"
+
+    Journal.Clear()
+    clear_cursor()
+    Player.UseSkill("Peacemaking")
+
+    if not Target.WaitForTarget(TARGET_CURSOR_TIMEOUT, True):
+        Misc.Pause(300)
+        clear_cursor()
+        return "failed"
+
+    # If this cursor is the instrument picker, answer it with the instrument
+    # and wait for the SECOND cursor - the one that asks who to calm.
+    if Journal.Search(PEACE_PICK_INSTRUMENT):
+        instrument = find_instrument()
+        if instrument is None:
+            clear_cursor()
+            return "noinstrument"
+        Target.TargetExecute(int(instrument.Serial))
+        Misc.Pause(PEACE_SETTLE_MS)
+        if not Target.WaitForTarget(TARGET_CURSOR_TIMEOUT, True):
+            clear_cursor()
+            return "failed"
+
+    Target.TargetExecute(serial)
+
+    deadline = time.time() + (PEACE_RESULT_MS / 1000.0)
+    while time.time() < deadline:
+        Misc.Pause(200)
+        if Journal.Search(PEACE_SUCCESS):
+            return "calmed"
+        if Journal.Search(PEACE_ALREADY):
+            return "calmed"
+        if Journal.Search(PEACE_HOPELESS):
+            return "hopeless"
+        if Journal.Search(PEACE_NO_INSTRUMENT):
+            return "noinstrument"
+        if Journal.Search(PEACE_FAILED) or Journal.Search(PEACE_PLAYED_POORLY):
+            return "failed"
+        if Mobiles.FindBySerial(serial) is None:
+            return "lost"
+
+    clear_cursor()
+    return "failed"
+
+
+def calm_before_taming(serial, label):
+    """Try to calm a creature before taming it. True if it is calm.
+
+    A failure is NOT fatal - taming goes ahead anyway, just the hard way. The
+    point is to improve the odds on an aggressive, not to gate the whole run
+    behind a bard skill.
+    """
+    mob = Mobiles.FindBySerial(serial)
+    if mob is None or not should_peace(mob):
+        return False
+
+    for attempt in range(1, max(1, PEACE_ATTEMPTS) + 1):
+        result = peacemake(serial, label)
+
+        if result == "calmed":
+            log("  %s is calm." % label, HUE_GOOD)
+            return True
+        if result == "hopeless":
+            log("  %s can never be calmed - taming it as it is." % label,
+                HUE_WARN)
+            return False
+        if result == "noinstrument":
+            log("  No instrument in your pack, so Peacemaking does nothing - "
+                "it fails silently without one. Carry a lute or drums, or set "
+                "PEACE_ENABLED = False.", HUE_BAD)
+            return False
+        if result == "lost":
+            return False
+
+        if attempt < PEACE_ATTEMPTS:
+            Misc.Pause(PEACE_RETRY_MS)
+
+    log("  Could not calm %s - taming it anyway." % label, HUE_WARN)
+    return False
+
+
+# =============================================================================
 # TAMING
 # =============================================================================
 
@@ -988,10 +1199,25 @@ def tame(serial, label):
     """
     attempts = 0
 
+    calmed_at = [0.0]
+
     while attempts < MAX_TAME_ATTEMPTS:
         mob = Mobiles.FindBySerial(serial)
         if mob is None:
             return "lost"
+
+        # Calm it before the first attempt, and again once the calm has had
+        # time to wear off - ServUO gives 10-120 seconds depending on how hard
+        # the creature is, so a long tame outlives it.
+        stale = (PEACE_REFRESH_MS > 0 and calmed_at[0] > 0 and
+                 (time.time() - calmed_at[0]) * 1000 >= PEACE_REFRESH_MS)
+        if calmed_at[0] == 0.0 or stale:
+            if calm_before_taming(serial, label):
+                calmed_at[0] = time.time()
+            else:
+                # Do not re-play at something that cannot be calmed, or with no
+                # instrument - it would retry every single attempt.
+                calmed_at[0] = time.time() if PEACE_ENABLED else 0.0
 
         if Player.DistanceTo(mob) > STAY_DIST:
             # Aim for adjacent, settle for TAME_START_DIST if terrain will not
@@ -1163,6 +1389,24 @@ def preflight():
     if Player.Backpack is None:
         log("No backpack found.", HUE_BAD)
         return False
+
+    # Say whether Peacemaking is going to work BEFORE the first creature, not
+    # after twenty silent failures. Without an instrument the skill does
+    # nothing at all and sends no message.
+    if PEACE_ENABLED and PEACE_WHEN != "never":
+        instrument = find_instrument()
+        if instrument is None:
+            log("Peacemaking is ON but there is NO INSTRUMENT in your pack. "
+                "The skill fails silently without one - carry a lute, drums "
+                "or a harp, or set PEACE_ENABLED = False.", HUE_BAD)
+        else:
+            log("Peacemaking: on (%s), playing 0x%04X"
+                % (PEACE_WHEN, int(instrument.ItemID)), HUE_GOOD)
+        if Player.GetSkillValue("Musicianship") <= 0:
+            log("  You have no Musicianship, so every attempt will fail.",
+                HUE_WARN)
+    else:
+        log("Peacemaking: off")
 
     if Player.WarMode:
         log("Dropping war mode.", HUE_WARN)
