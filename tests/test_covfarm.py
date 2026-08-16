@@ -31,6 +31,7 @@ STEPS = []
 CASTS = []
 TARGETED = []
 SAID = []
+MOVES = []
 
 
 def check(label, got, want):
@@ -74,6 +75,33 @@ class StubMisc(object):
         pass
 
 
+PACK = []
+
+
+class Bag(object):
+    """A container in the backpack. `Contains` is the only window into one."""
+    def __init__(self, serial, item_id, hue, name="bag"):
+        self.Serial, self.ItemID, self.Hue, self.Name = serial, item_id, hue, name
+        self.Contains = []
+        self.Container = 0x41D40F58
+
+
+class PackItem(object):
+    def __init__(self, serial, item_id, hue, name, props=None):
+        self.Serial, self.ItemID, self.Hue, self.Name = serial, item_id, hue, name
+        self.Container = 0x41D40F58          # the backpack, as on this shard
+        self.Props = props or []
+        self.Contains = []
+
+
+class Backpack(object):
+    Serial = 0x41D40F58
+
+    @property
+    def Contains(self):
+        return list(PACK)
+
+
 class StubPlayer(object):
     Name = "Testchar"
     Serial = 0x0001A2B3
@@ -82,6 +110,8 @@ class StubPlayer(object):
     HitsMax = 100
     Mana = 100
     ManaMax = 100
+
+    Backpack = Backpack()
 
     def __init__(self):
         self.Position = Point(741, 477, -17)
@@ -171,7 +201,30 @@ class StubItems(object):
         for it in GROUND:
             if it.Serial == serial:
                 return it
+        for it in PACK:
+            if it.Serial == serial:
+                return it
+        for it in PACK:
+            for sub in getattr(it, "Contains", []):
+                if sub.Serial == serial:
+                    return sub
         return None
+
+    def WaitForContents(self, bag, delay):
+        return True
+
+    def WaitForProps(self, item, delay):
+        return True
+
+    def GetPropStringList(self, item):
+        return list(getattr(item, "Props", []) or [])
+
+    def Move(self, source, dest, amount):
+        MOVES.append((source.Serial, dest.Serial))
+        if source in PACK:
+            PACK.remove(source)
+        dest.Contains.append(source)
+        source.Container = dest.Serial
 
 
 class Entry(object):
@@ -769,6 +822,353 @@ m7["Player"].Position = Point(741, 477)
 check("skipped", m7["return_to_camp"](), True)
 check("did not move", (m7["Player"].Position.X, m7["Player"].Position.Y),
       (741, 477))
+
+
+
+print()
+print("=" * 100)
+print("TRASHING - the reward chests go to the bag, and NOTHING else does")
+print("=" * 100)
+
+
+def fresh_pack(module):
+    del PACK[:]
+    del MOVES[:]
+    bag = Bag(module["TRASH_BAG_SERIAL"], module["TRASH_BAG_ID"],
+              module["TRASH_BAG_HUE"], "Trash Bag (Deletes Items In 30 Seconds)")
+    PACK.append(bag)
+    return bag
+
+
+# The three reward-chest variants seen in game, all Level 1. Three different
+# graphics AND three different hues - which is why the sweep no longer pins the
+# graphic. The first version listed 0x09AB only: that one was binned and these
+# other two were left sitting in the pack.
+CHEST_VARIANTS = [
+    (0x09AB, 0x047E),
+    (0x0E7C, 0x089F),
+    (0x0E40, 0x0979),
+]
+
+
+def chest(serial, hue=0x047E, level=1, item_id=0x09AB, with_level=True):
+    """A lootable reward chest, as the Item Inspector showed it."""
+    props = ["A Glimmering Chest Of Belongings", "Weight: 18 Stones",
+             "Contents: 5/125 Items, 17 Stones"]
+    if with_level:
+        props.append("Level %d" % level)
+    return PackItem(serial, item_id, hue, "a glimmering chest of belongings",
+                    props)
+
+
+m8 = load()
+bag = fresh_pack(m8)
+PACK.append(chest(0x40988235))
+check("the bag is found", m8["find_trash_bag"]().Serial,
+      m8["TRASH_BAG_SERIAL"])
+check("one chest binned", m8["trash_junk"](), 1)
+check("it went to the bag", MOVES, [(0x40988235, m8["TRASH_BAG_SERIAL"])])
+check("and it is in the bag now", [i.Serial for i in bag.Contains],
+      [0x40988235])
+
+print()
+print("   -- levels 1 to 5 all go, whatever hue they carry --")
+m9 = load()
+bag = fresh_pack(m9)
+for i, lvl in enumerate([1, 2, 3, 4, 5]):
+    # Deliberately different hues AND graphics: only Level 1 was ever
+    # inspected, so keying on either would silently skip the rest.
+    PACK.append(chest(0x40990000 + i, hue=0x047E + i * 0x10, level=lvl,
+                      item_id=0x0E70 + i))
+check("all five binned", m9["trash_junk"](), 5)
+check("five moves", len(MOVES), 5)
+check("pack has only the bag left", [i.Serial for i in PACK],
+      [m9["TRASH_BAG_SERIAL"]])
+
+print()
+print("   -- THE DANGEROUS ONE: the order runner's storage chests --")
+print("      same name, one shares the hue, different graphic (0x0E41)")
+m10 = load()
+bag = fresh_pack(m10)
+storage_a = PackItem(0x400CEF90, 0x0E41, 0x089F,
+                     "a glimmering chest of belongings")
+storage_b = PackItem(0x400463FB, 0x0E41, 0x047E,
+                     "a glimmering chest of belongings")
+PACK.extend([storage_a, storage_b])
+check("neither storage chest is binned", m10["trash_junk"](), 0)
+check("nothing moved at all", MOVES, [])
+check("both still in the pack",
+      sorted(i.Serial for i in PACK if i.ItemID == 0x0E41),
+      sorted([0x400463FB, 0x400CEF90]))
+
+print()
+print("   -- THE REPORTED MISS: all three real variants must go --")
+m18 = load()
+bag = fresh_pack(m18)
+for i, (gid, hue) in enumerate(CHEST_VARIANTS):
+    PACK.append(chest(0x45550000 + i, hue=hue, item_id=gid))
+check("all three binned", m18["trash_junk"](), 3)
+check("none left in the pack",
+      [i.Serial for i in PACK], [m18["TRASH_BAG_SERIAL"]])
+
+print()
+print("   -- 0x0E41 IS ALSO A REWARD CHEST, and must be binned --")
+print("      it was on TRASH_NEVER_IDS to protect the storage chests, which")
+print("      blocked a real drop: serial 0x4031D6E1, hue 0x08A5, Level 1")
+m19 = load()
+bag = fresh_pack(m19)
+PACK.append(chest(0x4031D6E1, hue=0x08A5, item_id=0x0E41))
+check("no graphic is excluded any more", m19["TRASH_NEVER_IDS"], [])
+check("the 0x0E41 reward chest is binned", m19["trash_junk"](), 1)
+check("it went to the bag", MOVES, [(0x4031D6E1, m19["TRASH_BAG_SERIAL"])])
+
+print()
+print("   -- and the storage chests are STILL safe, by serial --")
+print("      which is now the only lock besides being backpack-only")
+m19b = load()
+bag = fresh_pack(m19b)
+for serial in m19b["TRASH_NEVER_SERIALS"]:
+    PACK.append(PackItem(serial, 0x0E41, 0x089F,
+                         "a glimmering chest of belongings",
+                         ["A Glimmering Chest Of Belongings", "Level 1"]))
+check("both storage chests refused", m19b["trash_junk"](), 0)
+check("nothing moved", MOVES, [])
+check("both still in the pack",
+      sorted(i.Serial for i in PACK if i.ItemID == 0x0E41),
+      sorted(m19b["TRASH_NEVER_SERIALS"]))
+
+print()
+print("   -- THE NAME ALONE DECIDES: no 'Level N' needed --")
+m20 = load()
+bag = fresh_pack(m20)
+PACK.append(chest(0x47770001, with_level=False))
+check("binned on the name alone", m20["trash_junk"](), 1)
+check("it went to the bag", MOVES, [(0x47770001, m20["TRASH_BAG_SERIAL"])])
+
+print()
+print("   -- Level 5, a fourth hue, still just goes --")
+m21 = load()
+bag = fresh_pack(m21)
+# Inspected 2026-08-11: 0x0E40 hue 0x04F2, Level 5, Contents 16/125.
+PACK.append(chest(0x4030A3C2, hue=0x04F2, level=5, item_id=0x0E40))
+check("binned", m21["trash_junk"](), 1)
+check("it went to the bag", MOVES, [(0x4030A3C2, m21["TRASH_BAG_SERIAL"])])
+
+print()
+print("   -- require_level True still gates, for whoever turns it back on --")
+m22 = load()
+bag = fresh_pack(m22)
+del MSGS[:]
+for e in m22["TRASH_ITEMS"]:
+    e["require_level"] = True
+PACK.append(chest(0x48880001, with_level=False))
+PACK.append(chest(0x48880002, hue=0x089F, item_id=0x0E7C))
+check("the levelless one is held back", m22["trash_junk"](), 1)
+check("and it was the one WITH a level",
+      MOVES, [(0x48880002, m22["TRASH_BAG_SERIAL"])])
+check("and it said why", any("no 'Level N'" in x for x in MSGS), True)
+
+print()
+print("   -- THE STALE SNAPSHOT: the pack must be RE-OPENED, not just read --")
+print("      Player.Backpack.Contains is a snapshot taken when the container")
+print("      was opened. It does not update as things drop in, so the sweep")
+print("      kept reading the pre-kill contents and found nothing to do.")
+
+
+class StaleBackpack(object):
+    """Contains only reflects reality after UseItem re-opens the container."""
+    Serial = 0x41D40F58
+
+    def __init__(self):
+        self.opened = 0
+        self.visible = []          # what a read returns right now
+
+    def reopen(self):
+        self.opened += 1
+        self.visible = list(PACK)  # NOW it sees what is really there
+
+    @property
+    def Contains(self):
+        return list(self.visible)
+
+
+m23 = load()
+stale = StaleBackpack()
+del PACK[:]
+del MOVES[:]
+bag = Bag(m23["TRASH_BAG_SERIAL"], m23["TRASH_BAG_ID"], m23["TRASH_BAG_HUE"],
+          "Trash Bag (Deletes Items In 30 Seconds)")
+PACK.append(bag)
+stale.reopen()                      # the pack as it was BEFORE the kill
+
+# The kill drops a chest in. The snapshot does not know about it yet.
+PACK.append(chest(0x49990001))
+check("the stale snapshot cannot see it",
+      [i.Serial for i in stale.Contains], [bag.Serial])
+
+m23["Player"].Backpack = stale
+
+
+def use_item(serial):
+    if serial == stale.Serial:
+        stale.reopen()
+
+
+m23["Items"].UseItem = use_item
+m23["Items"].FindBySerial = lambda s: stale if s == stale.Serial else None
+
+check("it is binned anyway, because the pack is re-opened",
+      m23["trash_junk"](), 1)
+check("the pack WAS re-opened", stale.opened > 1, True)
+check("it went to the bag", MOVES, [(0x49990001, m23["TRASH_BAG_SERIAL"])])
+
+print()
+print("   -- the polled sweep is rate-limited, not run every tick --")
+m24 = load()
+fresh_pack(m24)
+calls = []
+m24["trash_junk"] = lambda announce=True: calls.append(announce) or 0
+m24["_last_trash_sweep"][0] = 0.0
+m24["maybe_trash"]()
+check("the first tick sweeps", len(calls), 1)
+check("and quietly", calls, [False])
+m24["maybe_trash"]()
+check("the very next tick does not", len(calls), 1)
+
+print()
+print("   -- the graphic alone is not enough either: the name must match --")
+m11 = load()
+bag = fresh_pack(m11)
+impostor = PackItem(0x41110001, 0x09AB, 0x047E, "a rusty bucket")
+PACK.append(impostor)
+check("right graphic, wrong name -> left alone", m11["trash_junk"](), 0)
+check("nothing moved", MOVES, [])
+
+print()
+print("   -- the blocklist holds even if a serial somehow matches --")
+m12 = load()
+bag = fresh_pack(m12)
+# A storage serial wearing the lootable graphic AND name - belt and braces.
+trap = PackItem(0x400CEF90, 0x09AB, 0x047E,
+                "a glimmering chest of belongings")
+PACK.append(trap)
+check("TRASH_NEVER_SERIALS refuses it", m12["trash_junk"](), 0)
+check("nothing moved", MOVES, [])
+
+print()
+print("   -- the bag never bins itself --")
+m13 = load()
+bag = fresh_pack(m13)
+check("nothing to do", m13["trash_junk"](), 0)
+check("the bag is untouched", MOVES, [])
+
+print()
+print("   -- ordinary loot is never touched --")
+m14 = load()
+bag = fresh_pack(m14)
+PACK.append(PackItem(0x42220001, 0x0EED, 0x0000, "gold coins"))
+PACK.append(PackItem(0x42220002, 0x1BF2, 0x096D, "43694 ingots"))
+PACK.append(chest(0x42220003))
+check("only the chest goes", m14["trash_junk"](), 1)
+check("and it was the chest", MOVES, [(0x42220003, m14["TRASH_BAG_SERIAL"])])
+
+print()
+print("   -- a move the server refuses stops the sweep, it does not spin --")
+m15 = load()
+bag = fresh_pack(m15)
+stuck = chest(0x43330001)
+PACK.append(stuck)
+
+
+def refuse(source, dest, amount):
+    MOVES.append((source.Serial, dest.Serial))     # asked, but nothing happens
+
+
+m15["Items"].Move = refuse
+check("gives up rather than looping", m15["trash_junk"](), 0)
+check("asked exactly once", len(MOVES), 1)
+
+print()
+print("   -- a missing bag bins nothing --")
+m16 = load()
+del PACK[:]
+del MOVES[:]
+check("no bag -> no moves", m16["trash_junk"](), 0)
+check("nothing moved", MOVES, [])
+
+print()
+print("   -- TRASH_ENABLED off does nothing --")
+m17 = load()
+fresh_pack(m17)
+PACK.append(chest(0x44440001))
+m17["TRASH_ENABLED"] = False
+check("disabled", m17["trash_junk"](), 0)
+check("nothing moved", MOVES, [])
+
+print()
+print("   -- THE REAL BUG: a chest whose Name has not loaded yet --")
+print("      Item.Name is empty until the properties are asked for, so a")
+print("      name-only match skipped exactly the chest that just dropped.")
+m25 = load()
+bag = fresh_pack(m25)
+unnamed = chest(0x4A0A0001, hue=0x08A5, item_id=0x0E41)
+unnamed.Name = ""                      # not loaded yet - the tooltip has it
+PACK.append(unnamed)
+check("the Name really is empty", unnamed.Name, "")
+check("the tooltip still names it",
+      any("Glimmering" in p for p in unnamed.Props), True)
+check("binned from the tooltip", m25["trash_junk"](), 1)
+check("it went to the bag", MOVES, [(0x4A0A0001, m25["TRASH_BAG_SERIAL"])])
+
+print()
+print("   -- concatenated tooltip text still matches --")
+m26 = load()
+bag = fresh_pack(m26)
+seam = chest(0x4B0B0001)
+seam.Name = ""
+seam.Props = ["A Glimmering Chest Of BelongingsWeight: 8 Stones",
+              "Contents: 5/125 Items, 7 StonesLevel 1"]
+PACK.append(seam)
+check("binned through the seam", m26["trash_junk"](), 1)
+
+print()
+print("   -- ordinary unnamed loot is still left alone --")
+m27 = load()
+bag = fresh_pack(m27)
+mystery = PackItem(0x4C0C0001, 0x0EED, 0x0000, "", ["a pile of gold coins"])
+PACK.append(mystery)
+check("not binned", m27["trash_junk"](), 0)
+check("nothing moved", MOVES, [])
+
+print()
+print("   -- a sweep that bins nothing says what IS in the pack --")
+m28 = load()
+bag = fresh_pack(m28)
+del MSGS[:]
+PACK.append(PackItem(0x4D0D0001, 0x0EED, 0x0000, "gold coins"))
+check("nothing binned", m28["trash_junk"](), 0)
+check("but it reported the contents",
+      any("nothing binned" in x for x in MSGS), True)
+check("and listed the item",
+      any("0x0EED" in x for x in MSGS), True)
+
+print()
+print("=" * 100)
+print("CAMP - a fixed configured spot, not wherever the script started")
+print("=" * 100)
+m29 = load()
+check("CAMP_POINT is the configured spot", m29["CAMP_POINT"], (750, 475))
+m29["_camp"] = (m29["CAMP_POINT"][0], m29["CAMP_POINT"][1])
+m29["Player"].Position = Point(750, 475)
+check("already there -> no walk", m29["return_to_camp"](), True)
+
+m30 = load()
+m30["_camp"] = (750, 475)
+m30["Player"].Position = Point(741, 477)
+del MSGS[:]
+m30["return_to_camp"]()
+check("walks back to 750, 475",
+      any("750, 475" in x for x in MSGS), True)
 
 print()
 print("=" * 100)
