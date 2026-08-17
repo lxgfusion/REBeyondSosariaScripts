@@ -466,15 +466,21 @@ def test_zero_is_a_real_resistance_not_missing_data(m):
 
 
 def test_weakest_is_chosen_from_what_you_can_cast(m):
-    """A dragon's absolute lowest is POISON, which Magery cannot deliver
-    usefully. Picking it would choose a spell you do not have."""
+    """A dragon's absolute lowest is POISON. Nothing in SPELL_TABLE delivers
+    poison - Poison Strike's damage is not a plain GetNewAosDamage call, so it
+    was left out rather than guessed at - and picking a type you cannot cast
+    would choose a spell you do not have."""
     dragon = m["species_resistances"]("dragon")
     check("poison really is its lowest",
           min(dragon, key=lambda k: dragon[k]), "poison")
-    check("but the answer is castable", m["weakest_damage_type"]("dragon"),
-          "cold")
-    check("and every castable type has a spell",
-          sorted(m["SPELL_BY_DAMAGE"]), sorted(m["CASTABLE_DAMAGE_TYPES"]))
+
+    deliverable = set(kind for _n, _s, kind, _b in m["usable_spells"]())
+    check("but poison is not deliverable", "poison" in deliverable, False)
+    check("so the reported weakness is one we can use",
+          m["weakest_damage_type"]("dragon") in deliverable, True)
+    check("and the chosen spell is real",
+          m["best_spell_against"]("dragon")[0] in
+          [row[0] for row in m["SPELL_TABLE"]], True)
 
 
 def test_known_weaknesses(m):
@@ -520,6 +526,85 @@ def test_substring_ordering_trap(m):
 def test_hiryu_is_peaced_before_taming(m):
     check("hiryu counts as aggressive", m["is_aggressive_species"]("hiryu"), True)
     check("listed by word", "hiryu" in m["PEACE_AGGRESSIVE_WORDS"], True)
+
+
+def test_the_spell_choice_beats_naive_lowest_resistance(m):
+    """THE WHOLE POINT of weighing damage. A hiryu resists cold 20 and energy
+    45, so "lowest resistance" says Harm - but Harm is base 17 against Energy
+    Bolt's 40, so the bolt lands 22 where Harm lands 13.6. The bolt wins, which
+    is what actually happens in game."""
+    check("naive answer is cold", m["weakest_damage_type"]("hiryu"), "cold")
+    best = m["best_spell_against"]("hiryu")
+    check("but the chosen spell is Energy Bolt", best[0], "Energy Bolt")
+    check("which is energy, not cold", best[2], "energy")
+    check("and it lands harder", round(best[3], 1), 22.0)
+    check("Harm would land less",
+          round(m["expected_damage"](17, 20), 1) < round(best[3], 1), True)
+
+
+def test_expected_damage_maths(m):
+    check("no resistance", m["expected_damage"](40, 0), 40.0)
+    check("half resisted", m["expected_damage"](40, 50), 20.0)
+    check("fully resisted", m["expected_damage"](40, 100), 0.0)
+    check("over-resisted never goes negative",
+          m["expected_damage"](40, 150), 0.0)
+
+
+def test_only_schools_you_have_are_used(m):
+    saved = list(m["AVAILABLE_SCHOOLS"])
+    try:
+        m["AVAILABLE_SCHOOLS"][:] = ["magery"]
+        for spell, school, _t, _b in m["usable_spells"]():
+            check("%s is magery" % spell, school, "magery")
+
+        m["AVAILABLE_SCHOOLS"][:] = ["mysticism"]
+        names = [sp for sp, _s, _t, _b in m["usable_spells"]()]
+        check("Bombard is available", "Bombard" in names, True)
+        check("Energy Bolt is not", "Energy Bolt" in names, False)
+
+        m["AVAILABLE_SCHOOLS"][:] = []
+        check("no schools -> no spells", m["usable_spells"](), [])
+        check("and no choice can be made",
+              m["best_spell_against"]("hiryu"), None)
+    finally:
+        m["AVAILABLE_SCHOOLS"][:] = saved
+
+
+def test_area_spells_are_off_by_default(m):
+    """They hit everything nearby, which during a tame includes your target."""
+    check("area is off", m["ALLOW_AREA_SPELLS"], False)
+    names = [sp for sp, _s, _t, _b in m["usable_spells"]()]
+    for area_spell in ("Chain Lightning", "Meteor Swarm", "Hail Storm"):
+        check("%s excluded" % area_spell, area_spell in names, False)
+    allowed = [sp for sp, _s, _t, _b in m["usable_spells"](allow_area=True)]
+    check("but available when asked for",
+          "Chain Lightning" in allowed, True)
+
+
+def test_wildfire_is_spellweaving(m):
+    """Checked in ServUO: Scripts/Spells/Spellweaving/Wildfire.cs. Casting it
+    as Mysticism simply fails. It is absent from SPELL_TABLE because its damage
+    is not a plain GetNewAosDamage call - measured, not guessed."""
+    names = [row[0] for row in m["SPELL_TABLE"]]
+    check("not in the table", "Wildfire" in names, False)
+    src = open(SCRIPT, encoding="utf-8").read()
+    check("and the file says where it lives",
+          "WILDFIRE IS SPELLWEAVING" in src, True)
+
+
+def test_every_table_spell_has_a_real_damage_type(m):
+    valid = {"physical", "fire", "cold", "poison", "energy"}
+    for name, school, kind, base, area in m["SPELL_TABLE"]:
+        check("%s type" % name, kind in valid, True)
+        check("%s has base damage" % name, base > 0, True)
+        check("%s school is one we know" % name,
+              school in ("magery", "necromancy", "spellweaving", "mysticism"),
+              True)
+
+
+def test_unknown_creature_gets_no_spell_choice(m):
+    check("no data, no choice",
+          m["best_spell_against"]("something imaginary"), None)
 
 
 def check(label, got, want):
@@ -770,6 +855,13 @@ def main():
     module["build_species"]()          # populates the name patterns
 
     test_species_matching(module)
+    test_the_spell_choice_beats_naive_lowest_resistance(module)
+    test_expected_damage_maths(module)
+    test_only_schools_you_have_are_used(module)
+    test_area_spells_are_off_by_default(module)
+    test_wildfire_is_spellweaving(module)
+    test_every_table_spell_has_a_real_damage_type(module)
+    test_unknown_creature_gets_no_spell_choice(module)
     test_resistances_came_from_servuo_not_a_wiki(module)
     test_zero_is_a_real_resistance_not_missing_data(module)
     test_weakest_is_chosen_from_what_you_can_cast(module)

@@ -600,23 +600,49 @@ SPECIES_RESISTANCES = {
     "wolf spider":           ( 32,  25,  30, 100,  30),
 }
 
-# Damage types you can actually deliver with Magery. Poison and physical are
-# left out on purpose: there is no worthwhile Magery poison nuke, and physical
-# is a weapon, so "lowest resistance" has to mean "lowest of the ones you can
-# actually cast" or it picks a spell you do not have.
+# ---------------------------------------------------------------------------
+# SPELLS
 #
-# NOTE THIS IS NOT THE WHOLE STORY. Base spell damage matters as much as the
-# resistance: Energy Bolt hits far harder than Harm, so a target with cold 20
-# and energy 45 may still die faster to energy. This picks the lowest resist
-# among what you can cast; refine it once there is something to measure.
-CASTABLE_DAMAGE_TYPES = ["fire", "cold", "energy"]
+# Which schools you actually have. A spell from a school not listed here is
+# never chosen, so trimming this is how you stop it reaching for something you
+# cannot cast.
+#
+# Note WILDFIRE IS SPELLWEAVING, not Mysticism - checked in ServUO, it lives in
+# Scripts/Spells/Spellweaving/Wildfire.cs. Casting it as the wrong school just
+# fails.
+AVAILABLE_SCHOOLS = ["magery", "necromancy", "spellweaving", "mysticism"]
 
-# Which spell delivers each type. Used once THREAT_ATTACK is implemented.
-SPELL_BY_DAMAGE = {
-    "fire":   "Fireball",
-    "cold":   "Harm",
-    "energy": "Energy Bolt",
-}
+# Damage spells, from ServUO Scripts/Spells. `base` is the first argument to
+# GetNewAosDamage, which is the spell's base damage before resistances.
+#
+#     (name, school, damage type, base damage, is area)
+#
+# Area spells are listed for completeness but are excluded from single-target
+# choices by ALLOW_AREA_SPELLS below - they hit everything nearby, including
+# the animal you are trying to tame.
+#
+# Spells whose damage is not a simple GetNewAosDamage call are deliberately
+# absent rather than guessed at: Poison Strike and Wither (Necromancy),
+# Wildfire, Thunderstorm and Essence of Wind (Spellweaving), and Earthquake
+# (Magery) all compute damage differently. They can be added once measured.
+SPELL_TABLE = [
+    ("Bombard",            "mysticism",     "physical", 40, False),
+    ("Chain Lightning",    "magery",        "energy", 51, True ),
+    ("Eagle Strike",       "mysticism",     "energy", 19, False),
+    ("Energy Bolt",        "magery",        "energy", 40, False),
+    ("Explosion",          "magery",        "fire", 40, False),
+    ("Fireball",           "magery",        "fire", 19, False),
+    ("Flame Strike",       "magery",        "fire", 48, False),
+    ("Hail Storm",         "mysticism",     "cold", 51, True ),
+    ("Harm",               "magery",        "cold", 17, False),
+    ("Lightning",          "magery",        "energy", 23, False),
+    ("Magic Arrow",        "magery",        "fire", 10, False),
+    ("Meteor Swarm",       "magery",        "fire", 51, True ),
+]
+
+# Area spells hit everything around them, which during a tame includes your own
+# target. Off by default for that reason.
+ALLOW_AREA_SPELLS = False
 
 _RESIST_ORDER = ["physical", "fire", "cold", "poison", "energy"]
 
@@ -638,19 +664,66 @@ def species_resistances(name):
     return dict(zip(_RESIST_ORDER, row))
 
 
-def weakest_damage_type(name, among=None):
-    """The damage type this species resists least, or None if unknown.
+def usable_spells(allow_area=None):
+    """The spells you can actually cast, as (name, school, type, base)."""
+    if allow_area is None:
+        allow_area = ALLOW_AREA_SPELLS
+    out = []
+    for name, school, kind, base, area in SPELL_TABLE:
+        if school not in AVAILABLE_SCHOOLS:
+            continue
+        if area and not allow_area:
+            continue
+        out.append((name, school, kind, base))
+    return out
 
-    `among` limits the answer to types you can actually deliver - by default
-    the Magery ones. Returning None rather than a guess is deliberate: an
-    unknown creature should be attacked with whatever you would normally use,
-    not with a type chosen from no information.
+
+def expected_damage(base, resistance):
+    """What a spell of `base` damage lands after `resistance` per cent."""
+    return base * max(0, 100 - int(resistance)) / 100.0
+
+
+def best_spell_against(name, allow_area=None):
+    """The spell that lands hardest on this species, or None if unknown.
+
+    NOT simply "lowest resistance". Base damage matters just as much, and the
+    two disagree often enough to matter:
+
+        a hiryu resists cold 20 and energy 45, so the lowest resistance says
+        Harm - but Harm is base 17 against Energy Bolt's 40, so the bolt lands
+        22 where Harm lands 13.6. Energy Bolt wins, which is what actually
+        happens in game.
+
+    Returns (spell, school, type, expected damage), or None for a creature not
+    in the table - an unknown one should be fought with whatever you would
+    normally use rather than a choice made from no information.
     """
     resistances = species_resistances(name)
     if not resistances:
         return None
-    types = among if among is not None else CASTABLE_DAMAGE_TYPES
-    usable = dict((t, resistances[t]) for t in types if t in resistances)
+
+    best = None
+    for spell, school, kind, base in usable_spells(allow_area):
+        if kind not in resistances:
+            continue
+        landed = expected_damage(base, resistances[kind])
+        if best is None or landed > best[3]:
+            best = (spell, school, kind, landed)
+    return best
+
+
+def weakest_damage_type(name, among=None):
+    """The damage type this species resists least, or None if unknown.
+
+    Kept for reporting - it answers "what is it soft against", which is not
+    the same question as "what should I cast". Use best_spell_against for that.
+    """
+    resistances = species_resistances(name)
+    if not resistances:
+        return None
+    if among is None:
+        among = sorted(set(kind for _n, _s, kind, _b in usable_spells()))
+    usable = dict((t, resistances[t]) for t in among if t in resistances)
     if not usable:
         return None
     return min(usable, key=lambda t: usable[t])
