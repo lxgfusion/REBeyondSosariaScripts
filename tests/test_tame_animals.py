@@ -169,6 +169,46 @@ def test_find_instrument_only_looks_in_the_pack(m):
         player.Backpack = saved
 
 
+def test_only_the_aggressive_get_peaced(m):
+    """Unicorns and ki-rin are peaceful - playing at them is wasted time.
+    Dragons, drakes and their relatives chew on you for the whole tame."""
+    for name in ("dragon", "greater dragon", "frost dragon", "swamp dragon",
+                 "dragon wolf", "drake", "cold drake", "stygian drake",
+                 "white wyrm", "shadow wyrm"):
+        check("%r is aggressive" % name, m["is_aggressive_species"](name), True)
+    for name in ("unicorn", "ki-rin", "chicken", "horse", "great hart",
+                 "polar bear", "hiryu"):
+        check("%r is not" % name, m["is_aggressive_species"](name), False)
+
+
+def test_aggressive_mode_still_calms_anything_already_swinging(m):
+    """The word list is about temperament. Something actually fighting gets
+    calmed whatever it is called."""
+    class Mob(object):
+        def __init__(self, war):
+            self.WarMode = war
+
+    saved = (m["PEACE_ENABLED"], m["PEACE_WHEN"])
+    try:
+        m["PEACE_ENABLED"] = True
+        m["PEACE_WHEN"] = "aggressive"
+        check("a calm unicorn is left alone",
+              m["should_peace"](Mob(False), "unicorn"), False)
+        check("a unicorn that is fighting is not",
+              m["should_peace"](Mob(True), "unicorn"), True)
+        check("a calm dragon is still calmed first",
+              m["should_peace"](Mob(False), "greater dragon"), True)
+    finally:
+        m["PEACE_ENABLED"], m["PEACE_WHEN"] = saved
+
+
+def test_the_default_is_aggressive_only(m):
+    check("default mode", m["PEACE_WHEN"], "aggressive")
+    check("dragons listed", "dragon" in m["PEACE_AGGRESSIVE_WORDS"], True)
+    check("drakes listed", "drake" in m["PEACE_AGGRESSIVE_WORDS"], True)
+    check("wyverns listed", "wyvern" in m["PEACE_AGGRESSIVE_WORDS"], True)
+
+
 def test_should_peace_honours_the_mode(m):
     class Mob(object):
         def __init__(self, war):
@@ -242,6 +282,163 @@ def test_peace_clears_the_cursor_on_every_bail(m):
              and n.func.attr == "WaitForTarget"]
     check("it clears the cursor", len(clears) >= 3, True)
     check("it waits on a cursor", len(waits) >= 1, True)
+
+
+class ThreatMob(object):
+    def __init__(self, serial, notoriety=3, name="a dragon"):
+        self.Serial = serial
+        self.Notoriety = notoriety
+        self.Name = name
+
+
+def install_threats(m, mobs, distances):
+    """Drive Mobiles.ApplyFilter and Player.DistanceTo from a fixture."""
+    class F(object):
+        def __init__(self):
+            self.Enabled = False
+            self.RangeMax = None
+
+    class Mob(object):
+        Filter = F
+
+        @staticmethod
+        def ApplyFilter(f):
+            assert f.RangeMax is not None, "RangeMax must always be set"
+            return list(mobs)
+
+        @staticmethod
+        def FindBySerial(serial):
+            for x in mobs:
+                if x.Serial == serial:
+                    return x
+            return None
+
+        @staticmethod
+        def WaitForProps(mob, delay):
+            return True
+
+        @staticmethod
+        def SingleClick(mob):
+            return None
+
+    m["Mobiles"] = Mob
+    m["Player"].DistanceTo = staticmethod(lambda mob: distances[mob.Serial])
+
+
+def test_grey_alone_is_not_a_threat(m):
+    """THE POINT. Every wild animal is grey, including the one being tamed.
+    Something standing still is scenery however grey it is."""
+    m["forget_threats"]()
+    dragon = ThreatMob(0xA1)
+    install_threats(m, [dragon], {0xA1: 6})
+
+    check("first sighting is only recorded", m["closing_threats"](), [])
+    check("still at 6 tiles - not closing", m["closing_threats"](), [])
+
+
+def test_closing_in_is_what_makes_it_a_threat(m):
+    m["forget_threats"]()
+    dragon = ThreatMob(0xA1)
+    distances = {0xA1: 8}
+    install_threats(m, [dragon], distances)
+
+    check("first sighting", m["closing_threats"](), [])
+    distances[0xA1] = 5
+    coming = m["closing_threats"]()
+    check("it closed 8 -> 5", len(coming), 1)
+    check("and it is the right creature", coming[0][0].Serial, 0xA1)
+
+
+def test_moving_away_is_never_a_threat(m):
+    m["forget_threats"]()
+    boar = ThreatMob(0xB2, name="a boar")
+    distances = {0xB2: 3}
+    install_threats(m, [boar], distances)
+    m["closing_threats"]()
+    distances[0xB2] = 7
+    check("walking off is not an attack", m["closing_threats"](), [])
+
+
+def test_the_creature_being_tamed_is_never_a_threat(m):
+    """It is grey, it is adjacent, and taming keeps you next to it - so it
+    looks exactly like something attacking you. Excluding it by serial is the
+    whole reason colour cannot be trusted on its own."""
+    m["forget_threats"]()
+    target = ThreatMob(0xC3, name="a dragon")
+    distances = {0xC3: 6}
+    install_threats(m, [target], distances)
+
+    m["closing_threats"](exclude_serial=0xC3)
+    distances[0xC3] = 1
+    check("closing right onto you, still ignored",
+          m["closing_threats"](exclude_serial=0xC3), [])
+
+    # Without the exclusion the very same movement IS a threat.
+    m["forget_threats"]()
+    distances[0xC3] = 6
+    m["closing_threats"]()
+    distances[0xC3] = 1
+    check("and it would have been picked up otherwise",
+          len(m["closing_threats"]()), 1)
+
+
+def test_friendly_notoriety_is_ignored(m):
+    m["forget_threats"]()
+    blue = ThreatMob(0xD4, notoriety=1, name="a townsperson")
+    distances = {0xD4: 9}
+    install_threats(m, [blue], distances)
+    m["closing_threats"]()
+    distances[0xD4] = 2
+    check("an innocent charging you is not a threat",
+          m["closing_threats"](), [])
+
+
+def test_never_words_win(m):
+    m["forget_threats"]()
+    pet = ThreatMob(0xE5, name="Fluffy the hellhound")
+    distances = {0xE5: 9}
+    saved = list(m["THREAT_NEVER_WORDS"])
+    try:
+        m["THREAT_NEVER_WORDS"][:] = ["fluffy"]
+        install_threats(m, [pet], distances)
+        m["closing_threats"]()
+        distances[0xE5] = 2
+        check("named exception is never a threat", m["closing_threats"](), [])
+    finally:
+        m["THREAT_NEVER_WORDS"][:] = saved
+
+
+def test_out_of_range_history_is_forgotten(m):
+    """Otherwise a creature that left at 2 tiles and came back at 9 would read
+    as having closed 2 -> 9, or worse, a stale entry would linger forever."""
+    m["forget_threats"]()
+    mob = ThreatMob(0xF6)
+    distances = {0xF6: 4}
+    install_threats(m, [mob], distances)
+    m["closing_threats"]()
+    check("it is remembered", 0xF6 in m["_threat_distance"], True)
+
+    install_threats(m, [], {})
+    m["closing_threats"]()
+    check("gone from range, gone from memory",
+          0xF6 in m["_threat_distance"], False)
+
+
+def test_nothing_is_attacked_yet(m):
+    """Detection ships before the attack on purpose - naming the wrong
+    creature is cheap, shooting it is not."""
+    check("attacking is off", m["THREAT_ATTACK"], False)
+    import ast
+    with open(SCRIPT, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    attacks = [n for n in ast.walk(tree)
+               if isinstance(n, ast.Call)
+               and isinstance(n.func, ast.Attribute)
+               and n.func.attr in ("Attack", "SetWarMode")
+               and getattr(n.func.value, "id", "") == "Player"]
+    # SetWarMode(False) at startup is fine; an Attack call is not.
+    calls = [n for n in attacks if n.func.attr == "Attack"]
+    check("nothing calls Player.Attack", calls, [])
 
 
 def check(label, got, want):
@@ -492,10 +689,21 @@ def main():
     module["build_species"]()          # populates the name patterns
 
     test_species_matching(module)
+    test_grey_alone_is_not_a_threat(module)
+    test_closing_in_is_what_makes_it_a_threat(module)
+    test_moving_away_is_never_a_threat(module)
+    test_the_creature_being_tamed_is_never_a_threat(module)
+    test_friendly_notoriety_is_ignored(module)
+    test_never_words_win(module)
+    test_out_of_range_history_is_forgotten(module)
+    test_nothing_is_attacked_yet(module)
     test_peace_messages_are_the_servuo_ones(module)
     test_instrument_list_is_real_graphics(module)
     test_find_instrument_only_looks_in_the_pack(module)
     test_should_peace_honours_the_mode(module)
+    test_only_the_aggressive_get_peaced(module)
+    test_aggressive_mode_still_calms_anything_already_swinging(module)
+    test_the_default_is_aggressive_only(module)
     test_peace_failure_never_blocks_taming(module)
     test_peace_clears_the_cursor_on_every_bail(module)
     test_real_deed(module)

@@ -126,6 +126,51 @@ NEVER_TAME_WORDS = [
 
 
 # =============================================================================
+# CONFIG - THREATS
+# =============================================================================
+#
+# HOW A THREAT IS RECOGNISED. UO has no "who is targeting me" - nothing in the
+# protocol says it - so it is inferred from the two things that are visible: a
+# creature that has locked on turns GREY and MOVES TOWARDS YOU.
+#
+# Grey on its own is not enough, and this is the part that matters: the animal
+# you are TAMING is grey too, and so is every other harmless wild animal
+# standing around. Acting on colour alone would have the script attack the very
+# creature it is trying to tame.
+#
+# So a threat has to be BOTH:
+#
+#   * a hostile notoriety (below), and
+#   * getting CLOSER across successive checks - it has to actually be coming
+#     for you, not just standing there being grey.
+#
+# and it is never the creature currently being tamed, whatever it looks like.
+#
+# REPORT ONLY FOR NOW. Nothing is attacked yet: the script names what it thinks
+# is coming for you so the detection can be checked against what you can see
+# before anything starts swinging. Fighting back comes next, and getting this
+# half wrong means hitting the wrong creature.
+THREAT_DETECTION = True
+THREAT_ATTACK = False             # not implemented yet - see the note above
+
+# Notorieties that can count as a threat.
+#   3 attackable/grey   4 criminal   5 enemy/orange   6 murderer/red
+# Wild animals sit at 3, which is exactly why "closing in" is required as well.
+THREAT_NOTORIETY = [3, 4, 5, 6]
+
+# How close something has to be before it is worth caring about.
+THREAT_RANGE = 10
+
+# It must have closed by at least this many tiles since the last check to count
+# as coming for you. 1 is enough; wandering animals drift both ways.
+THREAT_CLOSING_TILES = 1
+
+# Names that are NEVER treated as a threat, however they behave - your own
+# pets, summons, and anything else you would rather not shoot at.
+THREAT_NEVER_WORDS = []
+
+
+# =============================================================================
 # CONFIG - BEHAVIOUR
 # =============================================================================
 
@@ -187,16 +232,37 @@ HUE_BAD = 0x0021         # red
 # says so rather than letting you wonder why nothing happens.
 #
 # WHEN to play it:
-#   "always"    before every taming attempt. Simplest, and wasted on a
-#               chicken - a failed peace on a passive animal costs a few
-#               seconds and nothing else.
-#   "fighting"  only when the creature is actually in war mode, i.e. it has
-#               engaged something. Faster, but an aggressive that has not
-#               closed on you yet is not yet in war mode, so the first
-#               taming attempt may still be taken unprotected.
-#   "never"     off. Same behaviour as before this existed.
+#   "aggressive"  only at species named in PEACE_AGGRESSIVE_WORDS below. This
+#                 is the default: unicorns and ki-rin are peaceful and calming
+#                 them is wasted time, while a dragon will chew on you for the
+#                 whole tame.
+#   "always"      before every taming attempt, whatever it is. Simplest, and
+#                 wasted on a chicken - a failed peace on a passive animal
+#                 costs a few seconds and nothing else.
+#   "fighting"    only when the creature is already in war mode. Faster, but an
+#                 aggressive that has not closed on you YET is not in war mode,
+#                 so the first taming attempt is still taken unprotected.
+#   "never"       off. Same behaviour as before this existed.
 PEACE_ENABLED = True
-PEACE_WHEN = "always"
+PEACE_WHEN = "aggressive"
+
+# Which species count as naturally aggressive. Matched case-insensitively as a
+# SUBSTRING of the creature's name, so "dragon" covers the greater, frost,
+# serpentine, swamp and dragon wolf variants in one word.
+#
+# Err towards including things. A peace played at something docile costs a few
+# seconds; one NOT played at something aggressive costs the tame and some hit
+# points. Nothing here is ever refused a tame - the word list only decides
+# whether music gets played first.
+#
+# "wyvern" is listed for shards that have a tameable one; ServUO does not, so
+# it simply never matches there.
+PEACE_AGGRESSIVE_WORDS = [
+    "dragon",       # dragon, greater/frost/serpentine/swamp dragon, dragon wolf
+    "drake",        # drake, cold/crimson/platinum/stygian drake
+    "wyvern",
+    "wyrm",         # shadow wyrm, white wyrm - same family, same temper
+]
 
 # Tries per creature before taming is attempted anyway. A failed peace is not
 # fatal - it just means the tame happens the hard way.
@@ -1012,6 +1078,116 @@ def approach(serial, goal=None, accept=None):
 
 
 # =============================================================================
+# THREATS
+# =============================================================================
+
+# serial -> distance at the previous check. How "is it getting closer?" is
+# answered without the protocol telling us anything.
+_threat_distance = {}
+
+
+def forget_threats():
+    """Drop the distance history. Call when a tame ends or the target changes."""
+    _threat_distance.clear()
+
+
+def threat_candidates(exclude_serial=None):
+    """Hostile-looking mobiles in range, nearest first.
+
+    `exclude_serial` is the creature being tamed. It is grey and it is right
+    next to you, so without this it would look exactly like something attacking
+    you - and it is the one thing that must never be treated as a threat.
+    """
+    try:
+        scan = Mobiles.Filter()
+        scan.Enabled = True
+        scan.RangeMax = THREAT_RANGE      # never leave this unset
+        found = list(Mobiles.ApplyFilter(scan) or [])
+    except Exception as err:
+        log("threat scan failed: %s" % err, HUE_WARN)
+        return []
+
+    out = []
+    for mob in found:
+        try:
+            serial = int(mob.Serial)
+        except Exception:
+            continue
+        if serial == int(Player.Serial):
+            continue
+        if exclude_serial is not None and serial == int(exclude_serial):
+            continue                       # the creature being tamed
+        try:
+            if int(mob.Notoriety) not in THREAT_NOTORIETY:
+                continue
+        except Exception:
+            continue
+
+        name = (mob_name(mob) or "").lower()
+        if any(word.strip().lower() in name
+               for word in THREAT_NEVER_WORDS if word.strip()):
+            continue
+        out.append(mob)
+
+    out.sort(key=lambda m: Player.DistanceTo(m))
+    return out
+
+
+def closing_threats(exclude_serial=None):
+    """Those that have moved TOWARDS you since the last check.
+
+    Grey alone means nothing - every wild animal is grey. Closing distance is
+    what separates something that has locked on from scenery.
+
+    The first sighting of a mobile only records its distance; it can only be
+    judged once there are two readings to compare. That is deliberate - it
+    costs one poll and avoids calling every animal that wanders into range an
+    attacker.
+    """
+    coming = []
+    seen = set()
+    for mob in threat_candidates(exclude_serial):
+        try:
+            serial = int(mob.Serial)
+            distance = Player.DistanceTo(mob)
+        except Exception:
+            continue
+        seen.add(serial)
+
+        previous = _threat_distance.get(serial)
+        _threat_distance[serial] = distance
+        if previous is None:
+            continue                      # first sighting - nothing to compare
+        if previous - distance >= THREAT_CLOSING_TILES:
+            coming.append((mob, previous, distance))
+
+    for serial in list(_threat_distance):
+        if serial not in seen:
+            del _threat_distance[serial]  # out of range; forget it
+    return coming
+
+
+def report_threats(exclude_serial=None):
+    """Name anything closing on you. Returns how many.
+
+    Detection only. Nothing is attacked - THREAT_ATTACK is not implemented -
+    so this is here to be checked against what you can see on screen before it
+    is trusted to pick targets.
+    """
+    if not THREAT_DETECTION:
+        return 0
+    coming = closing_threats(exclude_serial)
+    for mob, previous, distance in coming:
+        try:
+            log("  THREAT: %s (notoriety %s) closed %d -> %d tiles"
+                % (mob_name(mob) or "0x%X" % int(mob.Serial),
+                   mob.Notoriety, previous, distance), HUE_WARN)
+        except Exception:
+            continue
+    return len(coming)
+
+
+# =============================================================================
 # PEACEMAKING
 # =============================================================================
 
@@ -1034,7 +1210,19 @@ def find_instrument():
     return None
 
 
-def should_peace(mob):
+def is_aggressive_species(name):
+    """Whether this creature is one of the naturally aggressive ones."""
+    low = (name or "").strip().lower()
+    if not low:
+        return False
+    for word in PEACE_AGGRESSIVE_WORDS:
+        word = word.strip().lower()
+        if word and word in low:
+            return True
+    return False
+
+
+def should_peace(mob, name=None):
     """Whether to play at this creature before taming it."""
     if not PEACE_ENABLED or PEACE_WHEN == "never":
         return False
@@ -1045,6 +1233,17 @@ def should_peace(mob):
             return bool(mob.WarMode)
         except Exception:
             return False
+    if PEACE_WHEN == "aggressive":
+        if name is None:
+            name = mob_name(mob)
+        # A creature already swinging gets calmed whatever it is called - the
+        # word list is about temperament, not about what is happening now.
+        try:
+            if bool(mob.WarMode):
+                return True
+        except Exception:
+            pass
+        return is_aggressive_species(name)
     return False
 
 
@@ -1120,7 +1319,7 @@ def calm_before_taming(serial, label):
     behind a bard skill.
     """
     mob = Mobiles.FindBySerial(serial)
-    if mob is None or not should_peace(mob):
+    if mob is None or not should_peace(mob, label):
         return False
 
     for attempt in range(1, max(1, PEACE_ATTEMPTS) + 1):
@@ -1160,8 +1359,16 @@ def watch_attempt(serial):
     sight check. Caller must Journal.Clear() first.
     """
     deadline = time.time() + TAME_ATTEMPT_TIMEOUT / 1000.0
+    next_threat_check = 0.0
 
     while time.time() < deadline:
+        # While standing still taming is exactly when something gets to walk
+        # up on you unnoticed. The creature being tamed is excluded by serial:
+        # it is grey and adjacent, so it would otherwise look like the threat.
+        if THREAT_DETECTION and time.time() >= next_threat_check:
+            next_threat_check = time.time() + 1.0
+            report_threats(exclude_serial=serial)
+
         if journal_hit(MSG_SUCCESS):
             return "success"
         if journal_hit(MSG_ABORT):
@@ -1200,6 +1407,7 @@ def tame(serial, label):
     attempts = 0
 
     calmed_at = [0.0]
+    forget_threats()      # distances from the last creature mean nothing here
 
     while attempts < MAX_TAME_ATTEMPTS:
         mob = Mobiles.FindBySerial(serial)
