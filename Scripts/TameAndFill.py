@@ -262,6 +262,24 @@ PEACE_AGGRESSIVE_WORDS = [
     "drake",        # drake, cold/crimson/platinum/stygian drake
     "wyvern",
     "wyrm",         # shadow wyrm, white wyrm - same family, same temper
+    "hiryu",        # hiryu and lesser hiryu
+]
+
+# ---------------------------------------------------------------------------
+# KILL ON SIGHT
+#
+# Species with no taming order to fill, which are worth clearing out of the way
+# rather than walking around. Matched as a substring, like the list above.
+#
+# "lesser hiryu" is the case this exists for: there is no taming order for one,
+# only for the full hiryu, and the catalogue confirms it - `hiryu` is in it and
+# `lesser hiryu` is not.
+#
+# NOT ACTED ON YET. THREAT_ATTACK is False and nothing in this script attacks
+# anything, so for now this only decides what gets reported. It is here so the
+# list is settled before the attacking half is written.
+KILL_ON_SIGHT_WORDS = [
+    "lesser hiryu",
 ]
 
 # Tries per creature before taming is attempted anyway. A failed peace is not
@@ -439,6 +457,203 @@ AMBIGUOUS_BODIES = {
     0x2CC: ["battle chicken lizard", "chicken lizard"],
     0x2DE: ["slith", "stone slith"],
 }
+
+
+# =============================================================================
+# RESISTANCES
+# =============================================================================
+#
+# Extracted from ServUO Scripts/Mobiles by tools/extract_resistances.py - the
+# same source the animal catalogue came from, and authoritative for a
+# ServUO-derived shard in a way an OSI wiki is not.
+#
+# Order is (PHYSICAL, FIRE, COLD, POISON, ENERGY).
+#
+# ServUO declares each as a RANGE - SetResistance(Type, min, max) - because
+# every creature rolls its own within it. These are the MIDPOINTS, which is
+# what an average specimen has.
+#
+# A resistance ServUO never sets is 0, and that is real rather than missing:
+# a chicken declares Physical and nothing else. An early version of the
+# extractor required all five and silently dropped every low-level animal.
+#
+# The table is NOT limited to tameable species. What gets shot at is by
+# definition the stuff you are NOT taming - "lesser hiryu" is here for exactly
+# that reason - so anything worth attacking needs a row whether or not it can
+# be tamed. Add more with the extractor.
+#
+# 109 of the 112 catalogue species are here. Bird, parrot and giant beetle are
+# absent - bird declares no resistances at all and randomises its name into
+# crow/raven/magpie, and the other two are not in Scripts/Mobiles in this
+# ServUO version. All three are harmless, and weakest_damage_type() returns
+# None for anything it does not know rather than guessing.
+SPECIES_RESISTANCES = {
+    "alligator":             ( 30,   7,   0,   7,   0),
+    "bake kitsune":          ( 50,  80,  50,  50,  50),
+    "battle chicken lizard": ( 17,  10,   0,   0,   0),
+    "black bear":            ( 22,   0,  12,   7,   0),
+    "blood fox":             ( 55,  25,  60,  30,  35),
+    "boar":                  ( 12,   7,   0,   7,   0),
+    "brown bear":            ( 25,   0,  17,  12,   0),
+    "bull":                  ( 27,   0,  12,   0,   0),
+    "bull frog":             (  7,   0,   0,   0,   0),
+    "cat":                   (  7,   0,   0,   0,   0),
+    "chicken":               (  3,   0,   0,   0,   0),
+    "chicken lizard":        ( 17,  10,   0,   0,   0),
+    "cold drake":            ( 57,  35,  82,  45,  45),
+    "corrosive slime":       (  7,   0,   0,  17,   0),
+    "cougar":                ( 22,   7,  12,   7,   0),
+    "cow":                   ( 10,   0,   0,   0,   0),
+    "crimson drake":         ( 40,  35,  35,  45,  40),
+    "cu sidhe":              ( 57,  35,  77,  40,  77),
+    "deathwatch beetle":     ( 37,  22,  22,  65,  27),
+    "desert ostard":         ( 17,  10,   0,   0,   0),
+    "dire wolf":             ( 22,  15,   7,   7,  12),
+    "dog":                   ( 12,   0,   0,   0,   0),
+    "dragon":                ( 60,  65,  35,  30,  40),
+    "dragon wolf":           ( 50,  35,  35,  45,  45),
+    "drake":                 ( 47,  55,  45,  25,  35),
+    "dread spider":          ( 45,  25,  25, 100,  25),
+    "dread warhorse":        ( 70,  30,  30,  55,  45),
+    "eagle":                 ( 22,  12,  22,   7,   7),
+    "ferret":                ( 47,  12,  35,  23,  22),
+    "fire beetle":           ( 40,  72,  10,  30,  30),
+    "fire steed":            ( 35,  75,  25,  35,  35),
+    "forest ostard":         ( 17,   0,   0,   0,   0),
+    "frenzied ostard":       ( 27,  12,   0,  22,  22),
+    "frost dragon":          ( 88,  62,  90,  67,  70),
+    "frost mite":            ( 65,  20,  95,  60,  42),
+    "frost spider":          ( 27,   7,  45,  25,  15),
+    "gaman":                 ( 60,  40,  40,  50,  40),
+    "gargoyle pet":          ( 60,  40,  40,  40,  40),
+    "giant ice worm":        ( 32,   0,  85,  20,  15),
+    "giant rat":             ( 17,   7,   0,  30,   0),
+    "giant spider":          ( 17,   0,   0,  30,   0),
+    "giant toad":            ( 22,   7,   0,   0,   7),
+    "goat":                  ( 10,   0,   0,   0,   0),
+    "gorilla":               ( 22,   7,  12,   0,   0),
+    "great hart":            ( 22,   0,   7,   0,   0),
+    "greater dragon":        ( 72,  77,  47,  50,  62),
+    "greater mongbat":       ( 20,   0,   0,   0,   0),
+    "grey wolf":             ( 17,  12,  22,  12,  12),
+    "grizzly bear":          ( 30,   0,  20,   7,   7),
+    "hell cat":              ( 30,  85,   0,   0,  17),
+    "hell hound":            ( 28,  35,   0,  15,  15),
+    "high plains boura":     ( 55,  37,  15,  35,  35),
+    "hind":                  ( 10,   0,   5,   0,   0),
+    "hiryu":                 ( 62,  80,  20,  45,  45),
+    "horse":                 ( 17,   0,   0,   0,   0),
+    "ice hound":             ( 30,   0,  45,  15,  15),
+    "imp":                   ( 30,  45,  25,  35,  35),
+    "iron beetle":           ( 57,  25,  25,  35,  50),
+    "jack rabbit":           (  3,   0,   0,   0,   0),
+    "ki-rin":                ( 60,  40,  30,  30,  30),
+    "lesser hiryu":          ( 57,  70,  10,  35,  35),   # kill on sight - not tameable
+    "lava lizard":           ( 40,  37,   0,  30,  30),
+    "lion":                  ( 45,  40,  35,  35,  30),
+    "llama":                 ( 17,   0,   0,   0,   0),
+    "lowland boura":         ( 55,  37,  15,  35,  35),
+    "mongbat":               (  7,   0,   0,   0,   0),
+    "mountain goat":         ( 15,   7,  15,  12,  12),
+    "nightmare":             ( 60,  35,  35,  35,  25),
+    "ossein ram":            ( 55,  15,  45,  35,  45),
+    "pack horse":            ( 22,  12,  22,  12,  12),
+    "pack llama":            ( 30,  12,  12,  12,  12),
+    "panther":               ( 22,   7,  12,   7,   0),
+    "phoenix":               ( 50,  65,   0,  30,  45),
+    "pig":                   ( 12,   0,   0,   0,   0),
+    "platinum drake":        ( 40,  40,  40,  45,  40),
+    "polar bear":            ( 30,   0,  70,  20,  12),
+    "predator hellcat":      ( 30,  35,   0,   0,  10),
+    "rabbit":                (  7,   0,   0,   0,   0),
+    "rat":                   (  7,   0,   0,   7,   0),
+    "reptalon":              ( 58,  40,  40,  57,  77),
+    "ridable llama":         ( 12,   7,   7,   7,   7),
+    "ridgeback":             ( 20,   7,   7,   7,   7),
+    "ruddy boura":           ( 55,  37,  15,  35,  35),
+    "rune beetle":           ( 52,  42,  42,  85,  50),
+    "saber-toothed tiger":   ( 45,  35,  55,  35,  45),
+    "savage ridgeback":      ( 17,  12,  17,  12,  12),
+    "scorpion":              ( 22,  12,  22,  45,  12),
+    "serpentine dragon":     ( 37,  30,  30,  30,  30),
+    "sewer rat":             (  7,   0,   0,  20,   7),
+    "shadow wyrm":           ( 70,  55,  50,  25,  55),
+    "sheep":                 (  7,   0,   0,   0,   0),
+    "skittering hopper":     (  7,   0,  15,   0,   7),
+    "skree":                 ( 60,  50,  32,  60,  32),
+    "slime":                 (  7,   0,   0,  15,   0),
+    "slith":                 ( 37,  40,   0,  30,  27),
+    "snake":                 ( 17,   0,   0,  25,   0),
+    "snow leopard":          ( 22,   7,  35,  15,  25),
+    "squirrel":              ( 32,  12,  32,  22,  22),
+    "stone slith":           ( 52,  25,  15,  35,  35),
+    "stygian drake":         ( 60,  65,  35,  35,  65),
+    "swamp dragon":          ( 37,  25,  30,  25,  35),
+    "timber wolf":           ( 17,   7,  12,   7,   7),
+    "triceratops":           ( 75,  45,  45,  35,  45),
+    "tsuki wolf":            ( 50,  60,  60,  60,  60),
+    "unicorn":               ( 60,  32,  32,  60,  32),
+    "walrus":                ( 22,   7,  22,   7,   7),
+    "white wolf":            ( 17,  12,  22,  12,  12),
+    "white wyrm":            ( 62,  20,  85,  45,  45),
+    "wild tiger":            ( 65,  30,  59,  35,  30),
+    "wolf spider":           ( 32,  25,  30, 100,  30),
+}
+
+# Damage types you can actually deliver with Magery. Poison and physical are
+# left out on purpose: there is no worthwhile Magery poison nuke, and physical
+# is a weapon, so "lowest resistance" has to mean "lowest of the ones you can
+# actually cast" or it picks a spell you do not have.
+#
+# NOTE THIS IS NOT THE WHOLE STORY. Base spell damage matters as much as the
+# resistance: Energy Bolt hits far harder than Harm, so a target with cold 20
+# and energy 45 may still die faster to energy. This picks the lowest resist
+# among what you can cast; refine it once there is something to measure.
+CASTABLE_DAMAGE_TYPES = ["fire", "cold", "energy"]
+
+# Which spell delivers each type. Used once THREAT_ATTACK is implemented.
+SPELL_BY_DAMAGE = {
+    "fire":   "Fireball",
+    "cold":   "Harm",
+    "energy": "Energy Bolt",
+}
+
+_RESIST_ORDER = ["physical", "fire", "cold", "poison", "energy"]
+
+
+def species_resistances(name):
+    """{type: value} for a species, or None if it is not in the table."""
+    low = (name or "").strip().lower()
+    row = SPECIES_RESISTANCES.get(low)
+    if row is None:
+        # The catalogue name and the creature's own name can differ in
+        # punctuation - "ki-rin" against "ki rin" - so try it loosely too.
+        squashed = re.sub(r"[^a-z0-9]+", "", low)
+        for key, value in SPECIES_RESISTANCES.items():
+            if re.sub(r"[^a-z0-9]+", "", key) == squashed:
+                row = value
+                break
+    if row is None:
+        return None
+    return dict(zip(_RESIST_ORDER, row))
+
+
+def weakest_damage_type(name, among=None):
+    """The damage type this species resists least, or None if unknown.
+
+    `among` limits the answer to types you can actually deliver - by default
+    the Magery ones. Returning None rather than a guess is deliberate: an
+    unknown creature should be attacked with whatever you would normally use,
+    not with a type chosen from no information.
+    """
+    resistances = species_resistances(name)
+    if not resistances:
+        return None
+    types = among if among is not None else CASTABLE_DAMAGE_TYPES
+    usable = dict((t, resistances[t]) for t in types if t in resistances)
+    if not usable:
+        return None
+    return min(usable, key=lambda t: usable[t])
 
 
 # =============================================================================
@@ -1208,6 +1423,23 @@ def find_instrument():
         except Exception:
             continue
     return None
+
+
+def is_kill_on_sight(name):
+    """Whether this species is one to clear rather than tame.
+
+    Careful with ordering: "lesser hiryu" contains "hiryu", so anything asking
+    both questions has to ask THIS one first, or a lesser hiryu reads as a
+    tameable hiryu.
+    """
+    low = (name or "").strip().lower()
+    if not low:
+        return False
+    for word in KILL_ON_SIGHT_WORDS:
+        word = word.strip().lower()
+        if word and word in low:
+            return True
+    return False
 
 
 def is_aggressive_species(name):

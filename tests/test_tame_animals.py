@@ -174,10 +174,10 @@ def test_only_the_aggressive_get_peaced(m):
     Dragons, drakes and their relatives chew on you for the whole tame."""
     for name in ("dragon", "greater dragon", "frost dragon", "swamp dragon",
                  "dragon wolf", "drake", "cold drake", "stygian drake",
-                 "white wyrm", "shadow wyrm"):
+                 "white wyrm", "shadow wyrm", "hiryu", "lesser hiryu"):
         check("%r is aggressive" % name, m["is_aggressive_species"](name), True)
     for name in ("unicorn", "ki-rin", "chicken", "horse", "great hart",
-                 "polar bear", "hiryu"):
+                 "polar bear"):
         check("%r is not" % name, m["is_aggressive_species"](name), False)
 
 
@@ -441,6 +441,87 @@ def test_nothing_is_attacked_yet(m):
     check("nothing calls Player.Attack", calls, [])
 
 
+def test_resistances_came_from_servuo_not_a_wiki(m):
+    """Spot values against ServUO Scripts/Mobiles. Midpoints of the declared
+    ranges, because every creature rolls its own within them."""
+    hiryu = m["species_resistances"]("hiryu")
+    check("hiryu physical", hiryu["physical"], 62)     # 55-70
+    check("hiryu fire", hiryu["fire"], 80)             # 70-90
+    check("hiryu cold", hiryu["cold"], 20)             # 15-25
+    check("hiryu energy", hiryu["energy"], 45)         # 40-50
+
+    lesser = m["species_resistances"]("lesser hiryu")
+    check("lesser hiryu cold", lesser["cold"], 10)
+
+
+def test_zero_is_a_real_resistance_not_missing_data(m):
+    """ServUO only calls SetResistance for what a creature actually resists.
+    An extractor that required all five silently dropped every low-level
+    animal - a chicken declares Physical and nothing else."""
+    chicken = m["species_resistances"]("chicken")
+    check("chicken is in the table", chicken is not None, True)
+    if chicken:
+        check("physical is set", chicken["physical"] > 0, True)
+        check("cold is a real zero", chicken["cold"], 0)
+
+
+def test_weakest_is_chosen_from_what_you_can_cast(m):
+    """A dragon's absolute lowest is POISON, which Magery cannot deliver
+    usefully. Picking it would choose a spell you do not have."""
+    dragon = m["species_resistances"]("dragon")
+    check("poison really is its lowest",
+          min(dragon, key=lambda k: dragon[k]), "poison")
+    check("but the answer is castable", m["weakest_damage_type"]("dragon"),
+          "cold")
+    check("and every castable type has a spell",
+          sorted(m["SPELL_BY_DAMAGE"]), sorted(m["CASTABLE_DAMAGE_TYPES"]))
+
+
+def test_known_weaknesses(m):
+    check("white wyrm burns", m["weakest_damage_type"]("white wyrm"), "fire")
+    check("hiryu feels the cold", m["weakest_damage_type"]("hiryu"), "cold")
+    check("lesser hiryu too", m["weakest_damage_type"]("lesser hiryu"), "cold")
+    check("drake takes energy", m["weakest_damage_type"]("drake"), "energy")
+
+
+def test_an_unknown_creature_is_not_guessed_at(m):
+    check("no row -> no answer",
+          m["weakest_damage_type"]("something that does not exist"), None)
+    check("and no resistances either",
+          m["species_resistances"]("something that does not exist"), None)
+
+
+def test_punctuation_does_not_break_the_lookup(m):
+    """The catalogue says "ki-rin"; a creature may call itself "Ki Rin"."""
+    check("ki-rin", m["species_resistances"]("ki-rin") is not None, True)
+    check("ki rin", m["species_resistances"]("Ki Rin") is not None, True)
+    check("kirin", m["species_resistances"]("kirin") is not None, True)
+
+
+def test_lesser_hiryu_is_kill_on_sight_and_hiryu_is_not(m):
+    """There is no taming order for a lesser hiryu - the catalogue has `hiryu`
+    and not `lesser hiryu`, which is the same fact from the other side."""
+    check("lesser hiryu is cleared", m["is_kill_on_sight"]("lesser hiryu"), True)
+    check("hiryu is tamed, not killed", m["is_kill_on_sight"]("hiryu"), False)
+
+    species = [row[0] for row in m["ANIMAL_CATALOGUE"]]
+    check("hiryu is tameable", "hiryu" in species, True)
+    check("lesser hiryu is not", "lesser hiryu" in species, False)
+
+
+def test_substring_ordering_trap(m):
+    """"lesser hiryu" CONTAINS "hiryu". Anything asking both questions has to
+    ask kill-on-sight first, or a lesser hiryu reads as a tameable hiryu."""
+    check("the trap is real", "hiryu" in "lesser hiryu", True)
+    check("kill list catches it first",
+          m["is_kill_on_sight"]("a lesser hiryu"), True)
+
+
+def test_hiryu_is_peaced_before_taming(m):
+    check("hiryu counts as aggressive", m["is_aggressive_species"]("hiryu"), True)
+    check("listed by word", "hiryu" in m["PEACE_AGGRESSIVE_WORDS"], True)
+
+
 def check(label, got, want):
     ok = got == want
     if not ok:
@@ -689,6 +770,15 @@ def main():
     module["build_species"]()          # populates the name patterns
 
     test_species_matching(module)
+    test_resistances_came_from_servuo_not_a_wiki(module)
+    test_zero_is_a_real_resistance_not_missing_data(module)
+    test_weakest_is_chosen_from_what_you_can_cast(module)
+    test_known_weaknesses(module)
+    test_an_unknown_creature_is_not_guessed_at(module)
+    test_punctuation_does_not_break_the_lookup(module)
+    test_lesser_hiryu_is_kill_on_sight_and_hiryu_is_not(module)
+    test_substring_ordering_trap(module)
+    test_hiryu_is_peaced_before_taming(module)
     test_grey_alone_is_not_a_threat(module)
     test_closing_in_is_what_makes_it_a_threat(module)
     test_moving_away_is_never_a_threat(module)
