@@ -1,4 +1,76 @@
-# Resource order runner — handoff
+# Resource order handoff
+
+## Granite — DONE in `.33`, and it was the 0/429 bug
+
+All nine granite hues are confirmed from live Item Inspector dumps
+(2026-08-18). `GRANITE_IDS = [0x1779]`.
+
+| Hue | Book name | Stack tooltip says |
+|---|---|---|
+| `0x0000` | `High Quality Granite` | *(no third line at all)* |
+| `0x0973` | `Dull Copper Granite` | Dull Copper |
+| `0x0966` | `Shadow Granite` | **Shadow Iron** |
+| `0x096D` | `Copper Granite` | Copper |
+| `0x0972` | `Bronze Granite` | Bronze |
+| `0x08A5` | `Gold Granite` | **Golden** |
+| `0x0979` | `Agapite Granite` | Agapite |
+| `0x089F` | `Verite Granite` | Verite |
+| `0x08AB` | `Valorite Granite` | Valorite |
+
+Three are worded differently by the stack and the book, exactly like the ingots
+(`golden` on the stack, `Gold` in the book). The left-hand name must be the
+BOOK's or the entry matches no order.
+
+### Why orders sat at 0/429
+
+**Every granite stack is named `<amount> high quality granite`**, whatever metal
+it is — the metal is only on the third tooltip line. And there is a resource
+called *High Quality Granite*. So the `by: "name"` fallback did not fail
+harmlessly the way it does for boards: it claimed **every** granite stack of
+every metal as High Quality Granite. A Valorite stack was then offered to fill a
+High Quality order, the server refused it, and the deed never moved.
+
+The code comment had asserted the opposite — *"an entry with no hue keeps its
+`by: name` match, which is harmless"*. True of boards and scales, false here.
+
+Two guards came out of it:
+
+- A family member with no hue listed is marked `UNMATCHABLE` rather than left
+  matching by name. **Unidentified must mean invisible, never mistaken for
+  something else** — invisible costs a skipped order, mistaken pours the wrong
+  metal into a deed and cannot be undone. The disarming is surgical: only the
+  entry whose name the generic stack name would claim. A blunter "anything
+  ending in Scales" rule broke `Delicate Scales`, which is a genuinely
+  differently-named item (`0x573A`).
+- Hue uniqueness is validated **per family, not globally**. Matching is graphic
+  AND hue, so `0x0000` is legitimately both `Regular Boards` (`0x1BD7`) and
+  `High Quality Granite` (`0x1779`) — "no hue" is how every family spells its
+  plain member. The global check called that a clash and **refused to start**.
+
+### Reading a hue table off the game
+
+`report_unknown_families` now prints each unknown hue **with the material from
+the stack's tooltip**, so the table fills itself:
+
+```
+    hue 0x0979  874 granite(s) in 1 stack(s)   tooltip says: Agapite
+      "Agapite": 0x0979,
+```
+
+Change the left-hand name to the book's wording before pasting.
+
+`report_unidentified_stacks` is the wider net: every stack in the chests that
+`resource_of()` cannot name at all, grouped by graphic and hue. That is the one
+that catches a family whose GRAPHIC is wrong, which no per-family report can.
+
+### Still open
+
+`SCALE_HUES` — five of six still unknown (`Yellow`, `Blue`, `Red`, `White`,
+`Black`). Only `Green Scales` (`0x0851`) is confirmed. The same report prints
+them; note scale stacks may carry no material line, in which case they still
+need matching by eye.
+
+---
 
 State as of 2026-07-30. `CLAUDE.md` carries the conventions and the API gotchas
 and loads automatically; this file is only the state of *this* task.

@@ -212,6 +212,547 @@ def test_peerless_matched_by_name(m):
           m["resource_of"](FakeItem("5 Some Random Thing", 5, 0x5AAD, 0)), None)
 
 
+def test_granite_name_collision_is_disarmed(m):
+    """EVERY granite stack is named "<amount> high quality granite".
+
+    That is the whole bug. There IS an entry called "High Quality Granite", so
+    the name match did not fail harmlessly the way it does for boards - it
+    claimed every granite stack of every metal. A Valorite stack was then
+    offered to fill a High Quality order, the server refused it, and the deed
+    sat at 0/429 reporting that neither targeting nor dragging worked.
+    """
+    hq = [r for r in m["RESOURCES"] if r["name"] == "High Quality Granite"][0]
+    check("High Quality Granite no longer matches by name",
+          hq.get("by") == "name", False)
+
+    # The real stack from the Item Inspector, 2026-08-18.
+    valorite = FakeItem("402 high quality granite", 402, 0x1779, 0x08AB,
+                        serial=0x40581636)
+    check("a Valorite stack is Valorite, not High Quality",
+          m["resource_of"](valorite), "Valorite Granite")
+
+    # An unlisted granite hue must be INVISIBLE, never mistaken for another.
+    # Invisible costs a skipped order; mistaken pours the wrong metal in.
+    unlisted = FakeItem("300 high quality granite", 300, 0x1779, 0x0999,
+                        serial=0x40581637)
+    check("an unlisted granite hue identifies as nothing",
+          m["resource_of"](unlisted), None)
+
+
+def test_valorite_granite_is_pinned(m):
+    """Confirmed live - ItemID 0x1779, hue 0x08AB, tooltip line 3 "Valorite"."""
+    check("granite graphic", m["GRANITE_IDS"], [0x1779])
+    check("Valorite Granite hue", m["GRANITE_HUES"]["Valorite Granite"], 0x08AB)
+
+    entry = [r for r in m["RESOURCES"] if r["name"] == "Valorite Granite"][0]
+    check("the entry took the graphic", entry["id"], 0x1779)
+    check("and the hue", entry["hue"], 0x08AB)
+
+
+def test_no_hue_serves_two_resources(m):
+    """Within a family, one hue must mean one thing.
+
+    NOT across families: matching is graphic AND hue, so two families with
+    different graphics may share a hue - and they do. Hue 0x0000 is both
+    Regular Boards (0x1BD7) and High Quality Granite (0x1779), because "no
+    hue" is how every family spells its plain, uncoloured member. Checking
+    globally called that a clash and refused to start the script.
+    """
+    for family in m["HUE_FAMILIES"]:
+        seen = {}
+        for name, hue in family["hues"].items():
+            check("%s hue 0x%04X is not shared" % (family["label"], int(hue)),
+                  seen.get(int(hue), name), name)
+            seen[int(hue)] = name
+
+    # And the cross-family case that must be ALLOWED.
+    plain = [(f["label"], n) for f in m["HUE_FAMILIES"]
+             for n, h in f["hues"].items() if int(h) == 0]
+    check("more than one family has a plain member at hue 0",
+          len(plain) > 1, True)
+    check("startup accepts that", m["validate_board_hues"](), True)
+
+
+def test_material_line_reads_the_third_tooltip_line(m):
+    """Ingots, boards and granite all name their material on line 3."""
+    original = m["props"]
+    try:
+        m["props"] = lambda item: ["402 High Quality Granite",
+                                   "Weight: 402 Stones", "Valorite"]
+        check("reads the material", m["material_line"](None), "Valorite")
+
+        # Plain iron and default boards carry no third line - that absence is
+        # itself the identification, not a failure.
+        m["props"] = lambda item: ["91715 board", "Weight: 91715 Stones"]
+        check("no third line means the default", m["material_line"](None), "")
+
+        m["props"] = lambda item: []
+        check("no tooltip at all is survivable", m["material_line"](None), "")
+    finally:
+        m["props"] = original
+
+# Every granite stack as the Item Inspector reported it, 2026-08-18.
+# (hue, amount, serial, tooltip material, the BOOK's name)
+LIVE_GRANITE = [
+    (0x0000, 2278, 0x409104D4, "",            "High Quality Granite"),
+    (0x0973, 2896, 0x40DAF3FD, "Dull Copper", "Dull Copper Granite"),
+    (0x0966, 2230, 0x40581515, "Shadow Iron", "Shadow Granite"),
+    (0x096D, 1632, 0x4058153A, "Copper",      "Copper Granite"),
+    (0x0972, 1864, 0x40581578, "Bronze",      "Bronze Granite"),
+    (0x08A5, 1504, 0x4058159A, "Golden",      "Gold Granite"),
+    (0x0979,  874, 0x4069DB95, "Agapite",     "Agapite Granite"),
+    (0x089F, 1148, 0x405815DE, "Verite",      "Verite Granite"),
+    (0x08AB,  402, 0x40581636, "Valorite",    "Valorite Granite"),
+]
+
+
+def test_every_live_granite_identifies_as_itself(m):
+    """Pinned from the live dumps. Each stack must be its OWN metal.
+
+    This is the regression for the 0/429 failure: every one of these is named
+    "<amount> high quality granite", so before the hues went in they all
+    resolved to High Quality Granite and the wrong stack was offered to fill.
+    """
+    for hue, amount, serial, _material, book_name in LIVE_GRANITE:
+        stack = FakeItem("%d high quality granite" % amount, amount,
+                         0x1779, hue, serial=serial)
+        check("hue 0x%04X is %s" % (hue, book_name),
+              m["resource_of"](stack), book_name)
+
+
+def test_granite_table_is_complete_and_unique(m):
+    """Nine metals, nine hues, no hue serving two - one would fill the other."""
+    hues = m["GRANITE_HUES"]
+    check("all nine granites are listed", len(hues), 9)
+    check("no hue is shared", len(set(hues.values())), 9)
+
+    for _hue, _amount, _serial, _material, book_name in LIVE_GRANITE:
+        check("%s is in the table" % book_name, book_name in hues, True)
+        check("%s is a real resource" % book_name,
+              any(r["name"] == book_name for r in m["RESOURCES"]), True)
+
+
+def test_granite_entries_now_match_by_graphic(m):
+    """With a hue listed, the entry stops matching by name entirely.
+
+    That is what disarms the collision for good: High Quality Granite is only
+    hue 0x0000 now, not "any stack whose name contains those words".
+    """
+    for name in m["GRANITE_HUES"]:
+        entry = [r for r in m["RESOURCES"] if r["name"] == name][0]
+        check("%s matches by graphic" % name, entry.get("by"), None)
+        check("%s uses the granite graphic" % name, entry["id"], 0x1779)
+
+
+def test_book_names_differ_from_the_tooltip(m):
+    """Three of the nine are worded differently by the stack and the book.
+
+    Pasting the tooltip word straight into the table would silently produce an
+    entry that matches no order - the same trap the ingots have, where the
+    stack says "golden" and the book says "Gold".
+    """
+    for _hue, _amount, _serial, material, book_name in LIVE_GRANITE:
+        if not material:
+            continue
+        if material.lower() != book_name.lower().replace(" granite", ""):
+            # These three MUST be mapped by hand, so assert they are mapped
+            # to a name the book actually has.
+            check("%r maps to the book's %r" % (material, book_name),
+                  any(r["name"] == book_name for r in m["RESOURCES"]), True)
+
+
+def test_plain_granite_has_no_material_line(m):
+    """Hue 0x0000 carries no third tooltip line, exactly like plain iron.
+
+    The ABSENCE is the identification. A report that required a material line
+    would leave the commonest granite permanently unidentified.
+    """
+    original = m["props"]
+    try:
+        m["props"] = lambda item: ["2278 High Quality Granite",
+                                   "Weight: 2278 Stones"]
+        check("plain granite reports no material", m["material_line"](None), "")
+        plain = FakeItem("2278 high quality granite", 2278, 0x1779, 0x0000,
+                         serial=0x409104D4)
+        check("and is still identified by its hue",
+              m["resource_of"](plain), "High Quality Granite")
+    finally:
+        m["props"] = original
+
+# Every ingot stack as the Item Inspector reported it, 2026-08-18.
+# (hue, amount, serial, tooltip material, the BOOK's name)
+LIVE_INGOTS = [
+    (0x0000, 56750, 0x40BAE41A, "",            "Iron Ingots"),
+    (0x0973,  5632, 0x40D9A64F, "Dull Copper", "Dull Copper Ingots"),
+    (0x0966,  2358, 0x40999C4D, "Shadow Iron", "Shadow Ingots"),
+    (0x0057,   293, 0x4088DD61, "Mythril",     "Mythril Ingots"),
+    (0x0972, 48216, 0x43D74565, "Bronze",      "Bronze Ingots"),
+    (0x096D, 59999, 0x40114AD4, "Copper",      "Copper Ingots"),
+    (0x0979, 50744, 0x40742A35, "Agapite",     "Agapite Ingots"),
+    (0x08A5, 47767, 0x4058116E, "Golden",      "Gold Ingots"),
+]
+
+
+def test_every_live_ingot_identifies_as_itself(m):
+    """Pinned from the live dumps, including IRON.
+
+    Iron was suspected of not filling. These dumps say the entry was right all
+    along - 0x1BF2 / hue 0x0000, no third tooltip line - so if Iron orders are
+    not being filled the cause is not identification. Pinned so a later edit
+    cannot quietly break the one that was already correct.
+    """
+    for hue, amount, serial, _material, book_name in LIVE_INGOTS:
+        stack = FakeItem("%d ingots" % amount, amount, 0x1BF2, hue,
+                         serial=serial)
+        check("ingot hue 0x%04X is %s" % (hue, book_name),
+              m["resource_of"](stack), book_name)
+
+
+def test_mythril_is_this_shards_own_metal(m):
+    """Mythril is in no ServUO table, like the Magewood and Darkwood boards.
+
+    It shipped as {"id": 0, "hue": -1, "by": "name"} - which can never match,
+    because an ingot stack is called "<amount> ingots" and names no metal - so
+    all 146 of its orders were unfillable and nothing said so.
+    """
+    entry = [r for r in m["RESOURCES"] if r["name"] == "Mythril Ingots"][0]
+    check("Mythril has the ingot graphic", entry["id"], 0x1BF2)
+    check("Mythril hue", entry["hue"], 0x0057)
+    check("and no longer matches by name", entry.get("by"), None)
+
+
+def test_no_ingot_entry_is_left_unmatchable(m):
+    """Any *_Ingots entry still on id 0 can never match a stack.
+
+    That is the silent failure this whole class of bug keeps taking: the
+    resource has orders in the book, stock in the chest, and no way to connect
+    the two.
+    """
+    stranded = [r["name"] for r in m["RESOURCES"]
+                if r["name"].endswith("Ingots") and not r.get("id")]
+    check("every ingot can be identified", stranded, [])
+
+
+def test_ingot_hues_are_unique(m):
+    """One hue, one metal - a shared hue would fill one order with another."""
+    seen = {}
+    for r in m["RESOURCES"]:
+        if r.get("id") != 0x1BF2:
+            continue
+        for hue in (r["hue"] if isinstance(r["hue"], list) else [r["hue"]]):
+            check("ingot hue 0x%04X is not shared" % int(hue),
+                  seen.get(int(hue), r["name"]), r["name"])
+            seen[int(hue)] = r["name"]
+
+
+def test_granite_and_ingots_share_hues_but_not_graphics(m):
+    """The two families use the SAME hues - only the graphic separates them.
+
+    Dull Copper is 0x0973 as both an ingot (0x1BF2) and granite (0x1779). That
+    is why identification must be graphic AND hue, and why hue uniqueness can
+    only ever be checked within one graphic.
+    """
+    for hue in (0x0973, 0x0966, 0x0972, 0x096D, 0x0979, 0x08A5, 0x0000):
+        ingot = FakeItem("100 ingots", 100, 0x1BF2, hue, serial=0x50000000 + hue)
+        granite = FakeItem("100 high quality granite", 100, 0x1779, hue,
+                           serial=0x51000000 + hue)
+        got_ingot = m["resource_of"](ingot)
+        got_granite = m["resource_of"](granite)
+        check("hue 0x%04X: ingot and granite differ" % hue,
+              got_ingot != got_granite, True)
+        check("hue 0x%04X ingot is an ingot" % hue,
+              bool(got_ingot) and got_ingot.endswith("Ingots"), True)
+        check("hue 0x%04X granite is granite" % hue,
+              bool(got_granite) and got_granite.endswith("Granite"), True)
+
+def test_census_sums_every_stack_of_a_resource(m):
+    """Iron and Regular Boards are held in MANY stacks - all of them count."""
+    stacks = [FakeItem("%d ingots" % n, n, 0x1BF2, 0x0000, serial=0x51000000 + i)
+              for i, n in enumerate([56750, 12000, 8000, 300])]
+    chest = FakeContainer(stacks)
+    stock = m["census"]([chest])
+
+    check("iron is in the census", "Iron Ingots" in stock, True)
+    check("every stack counted", stock["Iron Ingots"]["amount"],
+          56750 + 12000 + 8000 + 300)
+    check("and all four are kept", len(stock["Iron Ingots"]["stacks"]), 4)
+
+    budget = m["fill_budget"](stock, keep=0)
+    check("the whole lot is spendable", budget["Iron Ingots"], 77050)
+
+
+def test_census_reopens_before_believing_a_resource_is_gone(m):
+    """A resource whose stacks all fail to resolve is a STALE SNAPSHOT.
+
+    chest_stacks has always reopened and retried before believing an empty
+    result. The census did not - so it could drop a resource the filler would
+    have found, and a resource missing from the census gets a budget of 0 and
+    is passed over in SILENCE. That is what "it just skips them" looked like.
+    """
+    check("the census has a retry pass", "_census_pass" in m, True)
+
+    # A pass over a chest whose items do not resolve must REPORT the loss
+    # rather than quietly returning an empty census.
+    ghost = FakeItem("40000 ingots", 40000, 0x1BF2, 0x0000, serial=0x7FFFFFF1)
+    _REGISTRY.pop(0x7FFFFFF1, None)          # server-side it is gone
+    stock, lost = m["_census_pass"]([FakeContainer([ghost])])
+    check("a stack that will not resolve is not counted",
+          "Iron Ingots" in stock, False)
+    check("but it IS reported as lost, not silently dropped",
+          "Iron Ingots" in lost, True)
+
+
+def test_a_skipped_resource_is_never_silent(m):
+    """Every pass-over must produce a line naming the resource and its numbers.
+
+    Three different causes end up here - not in the census at all, held back by
+    the reserve, or genuinely spent - and only the numbers tell them apart.
+    """
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    start = src.index("if budget.get(resource, 0) <= 0:")
+    block = src[start:start + 1400]
+    check("the skip logs when the resource is missing entirely",
+          "not in the chest census at all" in block, True)
+    check("and logs the numbers when it is present but unspendable",
+          "spendable (keep" in block, True)
+    check("it no longer skips with a bare continue",
+          block.split("continue")[0].count("log(") >= 2, True)
+
+def test_fill_passes_scale_with_the_stack_count(m):
+    """A flat pass limit is a single-stack assumption in disguise.
+
+    An order of MAX_ORDER_SIZE is one target against a 56,750 stack, but nine
+    against stacks of 3,000. At a flat 6 the deed was abandoned with plenty of
+    metal still in the chest and reported as unfillable.
+    """
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def fill_deed("):src.index("def openAR(")]
+
+    check("the allowance is computed, not constant",
+          "len(on_hand) + 2" in body, True)
+    check("it never drops below the floor",
+          "max(MAX_FILL_ATTEMPTS" in body, True)
+    check("and it is bounded",
+          "MAX_FILL_ATTEMPTS_CEILING" in body, True)
+    check("the loop uses the allowance, not the constant",
+          "for attempt in range(allowance)" in body, True)
+
+
+def test_fill_allowance_covers_a_worst_case_order(m):
+    """The ceiling has to clear the worst order the runner will accept.
+
+    MAX_ORDER_SIZE against stacks no larger than MAX_STACK is the bound that
+    matters; anything smaller means a legitimate order can run out of passes.
+    """
+    ceiling = m["MAX_FILL_ATTEMPTS_CEILING"]
+    check("the floor is still the old default", m["MAX_FILL_ATTEMPTS"], 6)
+    check("the ceiling is above the floor", ceiling > m["MAX_FILL_ATTEMPTS"],
+          True)
+
+    # Worst realistic case: an order at the size cap, drawn from stacks a
+    # tenth the size of a full one.
+    modest_stack = m["MAX_STACK"] // 10
+    needed_passes = -(-m["MAX_ORDER_SIZE"] // modest_stack)   # ceil
+    check("the ceiling clears a %d-pass order" % needed_passes,
+          ceiling >= needed_passes, True)
+
+
+def test_a_failed_fill_says_what_stock_remained(m):
+    """"Still at 0/429" is only actionable with the stock alongside it."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def fill_deed("):src.index("def openAR(")]
+    tail = body[body.index("still at %s after"):]
+    check("it reports the stacks left", "stack(s) and %d %s" in tail, True)
+    check("and names the knob to raise",
+          "MAX_FILL_ATTEMPTS_CEILING" in tail, True)
+
+
+def test_every_resource_reports_its_stack_count_in_the_report(m):
+    """Multi-stack state has to be visible for every resource, not just some."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    check("the stock report shows stacks and the biggest",
+          "in %d stack(s), biggest %d" in src, True)
+
+# The gem stacks as the Item Inspector reported them, 2026-08-18.
+LIVE_GEMS = [
+    (0x3194, 6517, 0x41CE9DE1, "Perfect Emerald"),
+    (0x3195, 6377, 0x41CE9B45, "Ecru Citrine"),
+    (0x3197, 5525, 0x41CE9E28, "Fire Ruby"),
+]
+
+
+def test_every_live_gem_identifies(m):
+    """Pinned from the dumps. Perfect Emerald was missing from RESOURCES
+    entirely, so 6517 of them were invisible and no order could be filled."""
+    for item_id, amount, serial, name in LIVE_GEMS:
+        stack = FakeItem("%d %s" % (amount, name), amount, item_id, 0x0000,
+                         serial=serial)
+        check("0x%04X is %s" % (item_id, name), m["resource_of"](stack), name)
+
+
+def test_the_gem_graphic_block_has_no_gaps(m):
+    """0x3192-0x3199 is one contiguous run of gems.
+
+    Perfect Emerald was the single gap in it. A gap there is invisible: the
+    stock does not count, the orders never fill, and nothing says why.
+    """
+    by_id = {}
+    for r in m["RESOURCES"]:
+        gid = r.get("id")
+        if isinstance(gid, int) and 0x3192 <= gid <= 0x3199:
+            by_id[gid] = r["name"]
+    missing = [g for g in range(0x3192, 0x319A) if g not in by_id]
+    check("no gap in the gem block", ["0x%04X" % g for g in missing], [])
+
+
+def test_perfect_emerald_cannot_be_confused_with_emerald(m):
+    """"Emerald" is a substring of "Perfect Emerald" - the trap the deed
+    matcher already documents. They must stay separate resources."""
+    names = [r["name"] for r in m["RESOURCES"]]
+    check("both exist", "Perfect Emerald" in names and "Emerald" in names, True)
+
+    perfect = [r for r in m["RESOURCES"] if r["name"] == "Perfect Emerald"][0]
+    check("Perfect Emerald matches by graphic, not name",
+          perfect.get("by"), None)
+    check("and has its own graphic", perfect["id"], 0x3194)
+
+    # A deed for one must never be filled from the other.
+    check("an Emerald deed is refused for Perfect Emerald",
+          m["deed_matches_resource"]({"resource": "Emerald"},
+                                     "Perfect Emerald"), False)
+    check("and the other way round",
+          m["deed_matches_resource"]({"resource": "Perfect Emerald"},
+                                     "Emerald"), False)
+    check("but each matches itself",
+          m["deed_matches_resource"]({"resource": "Perfect Emerald"},
+                                     "Perfect Emerald"), True)
+
+
+def test_no_two_resources_share_a_graphic_and_hue(m):
+    """Two entries answering to the same graphic+hue would fill each other."""
+    seen = {}
+    for r in m["RESOURCES"]:
+        gid = r.get("id")
+        if not gid:
+            continue
+        hues = r["hue"] if isinstance(r["hue"], list) else [r["hue"]]
+        for hue in hues:
+            key = (int(gid), int(hue))
+            check("0x%04X/0x%04X is not shared" % key,
+                  seen.get(key, r["name"]), r["name"])
+            seen[key] = r["name"]
+
+# Every dragon scale stack in the chest, Item Inspector 2026-08-18.
+# All ItemID 0x26B4, all named "<amount> dragon scales", NO material line.
+LIVE_SCALES = [
+    (0x0851,    7, 0x409083A4, "Green Scales"),
+    (0x0455, 1353, 0x40908214, "Black Scales"),
+    (0x066D, 5388, 0x40908071, "Red Scales"),
+    (0x08A8, 4854, 0x40908143, "Yellow Scales"),
+    (0x08FD, 2657, 0x40908376, "White Scales"),
+]
+
+
+def test_every_live_scale_identifies_as_its_colour(m):
+    """All five colours read off the stacks in game, 2026-08-18.
+
+    Scales carry no material line - every colour is a stack called "<amount>
+    dragon scales" at graphic 0x26B4 - so the hue is the ONLY signal and these
+    five mappings are the whole of the knowledge.
+    """
+    for hue, amount, serial, colour in LIVE_SCALES:
+        stack = FakeItem("%d dragon scales" % amount, amount, 0x26B4, hue,
+                         serial=serial)
+        check("hue 0x%04X is %s" % (hue, colour),
+              m["resource_of"](stack), colour)
+
+
+def test_blue_scales_stays_unmapped_rather_than_guessed(m):
+    """There were no blue scales in the chest to look at.
+
+    An unlisted hue must identify as NOTHING. Guessing blue - from ServUO or
+    from the gap in the sequence - would pour whichever colour it really is
+    into a blue order, and that cannot be undone.
+    """
+    check("Blue Scales is still a book resource",
+          any(r["name"] == "Blue Scales" for r in m["RESOURCES"]), True)
+    check("but it has no hue mapped", "Blue Scales" in m["SCALE_HUES"], False)
+
+    entry = [r for r in m["RESOURCES"] if r["name"] == "Blue Scales"][0]
+    check("so it cannot match a graphic", entry.get("id"), 0)
+
+    # And a scale hue nobody has mapped stays invisible.
+    unknown = FakeItem("500 dragon scales", 500, 0x26B4, 0x0999,
+                       serial=0x40908FFF)
+    check("an unmapped scale hue identifies as nothing",
+          m["resource_of"](unknown), None)
+
+
+def test_an_unmapped_scale_hue_is_reported_with_a_stack_to_look_at(m):
+    """All five known colours are mapped now, but the machinery still matters.
+
+    Blue has no stock yet, and a sixth colour could turn up. Scales carry no
+    material line, so the report cannot say what a hue IS - it has to point at
+    one specific stack for a person to go and look at.
+    """
+    known = [FakeItem("%d dragon scales" % a, a, 0x26B4, h, serial=s_)
+             for h, a, s_, _c in LIVE_SCALES]
+    family = [f for f in m["HUE_FAMILIES"] if f["label"] == "scale"][0]
+
+    check("nothing known is left unmapped",
+          sorted(m["unknown_family_stacks"]([FakeContainer(known)], family)), [])
+
+    # A colour nobody has mapped yet - blue, or whatever turns up next.
+    stranger = FakeItem("4242 dragon scales", 4242, 0x26B4, 0x0999,
+                        serial=0x40908ABC)
+    unknown = m["unknown_family_stacks"](
+        [FakeContainer(known + [stranger])], family)
+
+    check("the new hue is reported", sorted(unknown), [0x0999])
+    check("with the stack to go and look at",
+          (unknown[0x0999]["serial"], unknown[0x0999]["biggest"]),
+          (0x40908ABC, 4242))
+    check("and no material, because scales have none",
+          unknown[0x0999]["material"], "")
+
+
+def test_the_book_wants_six_colours(m):
+    """Six scale resources, five hues in the chest - one has no stock."""
+    scales = [r["name"] for r in m["RESOURCES"]
+              if r["name"].endswith("Scales") and r["name"] != "Delicate Scales"
+              and "Medusa" not in r["name"]]
+    for colour in ("Black Scales", "Green Scales", "Yellow Scales",
+                   "Red Scales", "Blue Scales", "White Scales"):
+        check("%s is a book resource" % colour, colour in scales, True)
+
+    mapped = m["SCALE_HUES"]
+    check("five of the six are mapped", sorted(mapped),
+          ["Black Scales", "Green Scales", "Red Scales", "White Scales",
+           "Yellow Scales"])
+    check("Blue is the one with no stock", "Blue Scales" in mapped, False)
+
+
+def test_an_unmapped_scale_is_claimed_by_nobody(m):
+    """Every colour is a stack called "dragon scales", so a NAME match would
+    claim all of them for whichever entry it hit first.
+
+    The hue must be the only thing that decides. 0x0999 is deliberately a hue
+    nobody has mapped - an earlier version of this test used 0x0455 as the
+    stand-in and started failing the moment that turned out to be Black.
+    """
+    stack = FakeItem("999 dragon scales", 999, 0x26B4, 0x0999,
+                     serial=0x40908999)
+    got = m["resource_of"](stack)
+    check("an unmapped scale hue belongs to no resource", got, None)
+
+    for name in ("Yellow Scales", "Red Scales", "Blue Scales", "White Scales",
+                 "Black Scales", "Green Scales"):
+        check("%s does not claim it" % name, got == name, False)
+
 def test_graphic_match_wins_over_name_match(m):
     """An ingot stack is called "<amount> ingots". If a name entry could claim
     it, hue would stop deciding the metal - so graphic entries are tried first."""
@@ -798,13 +1339,18 @@ def test_every_name_came_from_the_book(m):
     previous table was largely invented: 38 entries the book never asks for and
     48 it wants that had no entry at all."""
     names = set(r["name"] for r in m["RESOURCES"])
-    check("79 names", len(names), 79)
+    # 79 names came from the book harvest; Perfect Emerald is the 80th, added
+    # 2026-08-18 from a live chest with 6517 of them in it. See
+    # test_gem_entries for why the earlier "leave it out" call was reversed.
+    check("80 names", len(names), 80)
     check("shadow iron is 'Shadow Ingots'", "Shadow Ingots" in names, True)
     check("plain leather is 'Regular Leather'",
           "Regular Leather" in names, True)
     check("bare 'Leather' is not a book name", "Leather" in names, False)
     check("book capitalisation kept", "Eye of the Travesty" in names, True)
-    for gone in ("Perfect Emerald", "Zealot Heart", "Rare Serpent Egg",
+    check("Perfect Emerald IS listed - stock exists for it", 
+          "Perfect Emerald" in names, True)
+    for gone in ("Zealot Heart", "Rare Serpent Egg",
                  "Captain's Key Ring", "Tainted Blade", "Blighted Cotton"):
         check("%r no longer listed" % gone, gone in names, False)
 
@@ -1398,8 +1944,18 @@ def test_order_size_ceiling_admits_real_orders(m):
 def test_gems_are_identified_by_graphic(m):
     """Gems have their own graphic and no meaningful hue, so hue is -1.
 
-    Perfect Emerald is deliberately absent: the book has ZERO orders for it,
-    so an entry would only cost a fruitless search every lap."""
+    Perfect Emerald was deliberately absent - the book had ZERO orders for it
+    at harvest time, and the note here said an entry would cost a fruitless
+    search every lap. Reversed 2026-08-18 for two reasons:
+
+      * The chest holds 6517 of them. Absent from RESOURCES it is absent from
+        the CENSUS too, so the stock report cannot even say they are there.
+      * The cost is one search per RUN, not per lap: a resource that comes back
+        with nothing is added to `exhausted` and gets no further turn.
+
+    A book is restocked with new orders over time, so "zero orders that day" is
+    not a permanent property.
+    """
     by_name = dict((r["name"], r) for r in m["RESOURCES"])
     for name, item_id in [("Blue Diamond", 0x3198), ("Brilliant Amber", 0x3199),
                           ("Dark Sapphire", 0x3192), ("Ecru Citrine", 0x3195),
@@ -1408,8 +1964,12 @@ def test_gems_are_identified_by_graphic(m):
         entry = by_name.get(name, {})
         check("%s graphic" % name, entry.get("id"), item_id)
         check("%s hue is any" % name, entry.get("hue"), -1)
-    check("Perfect Emerald absent - the book never asks",
-          "Perfect Emerald" in by_name, False)
+    check("Perfect Emerald IS present now",
+          "Perfect Emerald" in by_name, True)
+    check("Perfect Emerald graphic",
+          by_name.get("Perfect Emerald", {}).get("id"), 0x3194)
+    check("Perfect Emerald hue is any",
+          by_name.get("Perfect Emerald", {}).get("hue"), -1)
 
 
 def test_resource_names_are_unique(m):
@@ -1823,7 +2383,22 @@ def test_boards_still_work_through_the_shared_family_table(m):
     """Boards and scales are now driven from one table. The board hues that
     were confirmed in game must survive that."""
     labels = [f["label"] for f in m["HUE_FAMILIES"]]
-    check("both families present", sorted(labels), ["board", "scale"])
+    check("every hue family is present", sorted(labels),
+          ["board", "granite", "scale"])
+
+    # Granite is the same trap a third time: a stack is called "<amount>
+    # granite" and names no metal, so all nine entries shipped as
+    # {"id": 0, "hue": -1, "by": "name"} and could never match. The table is
+    # EMPTY on purpose - nothing here is guessed, and pouring Verite into a
+    # Valorite order cannot be undone.
+    granite = [f for f in m["HUE_FAMILIES"] if f["label"] == "granite"][0]
+    check("granite has a graphic to match on", bool(granite["ids"]), True)
+    for name in ("Valorite Granite", "Agapite Granite", "Dull Copper Granite"):
+        check("%s is still in RESOURCES" % name,
+              any(r["name"] == name for r in m["RESOURCES"]), True)
+    for name, hue in granite["hues"].items():
+        check("granite hue %r is a real resource" % name,
+              any(r["name"] == name for r in m["RESOURCES"]), True)
     for hue, want, _amount in LIVE_BOARD_HUES:
         board = _FakeBoard(0x1, m["BOARD_IDS"][0], hue, 500)
         check("0x%04X still -> %s" % (hue, want),

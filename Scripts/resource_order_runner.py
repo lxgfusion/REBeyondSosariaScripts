@@ -89,7 +89,7 @@ import time
 # line in the journal says which copy is actually loaded - two separate
 # debugging rounds were spent on a bug that was already fixed on disk but not
 # in the Scripts folder.
-SCRIPT_VERSION = "2026-08-13.32"
+SCRIPT_VERSION = "2026-08-18.38"
 
 
 # =============================================================================
@@ -323,9 +323,24 @@ MAX_REWIND_PRESSES = 4
 # (stock minus KEEP_PER_TYPE) is what actually protects the chest.
 MAX_ORDER_SIZE = 25000
 
-# Fill passes per deed. One target usually does the whole amount; the extra
-# passes cover a shard that consumes one stack at a time.
+# Fill passes per deed, as a FLOOR. One target usually does the whole amount;
+# the extra passes cover a shard that consumes one stack at a time.
+#
+# The real allowance is worked out per deed from how many stacks are actually
+# in the chest, because a flat number is a single-stack assumption in disguise:
+# an order of 25,000 is one target against a 56,750 stack, but nine against
+# stacks of 3,000, and at 6 it would give up with plenty of metal left and
+# report the deed as unfillable.
+#
+# Raising this is nearly free. A deed that is NOT progressing exits on the
+# first pass that moves nothing - it never spends the allowance - so this only
+# ever buys passes that are actually filling the order.
 MAX_FILL_ATTEMPTS = 6
+
+# Hard ceiling on those passes, so a pathological chest cannot loop forever.
+# 25,000 (MAX_ORDER_SIZE) can need at most this many stacks unless they are
+# tiny, and consolidation normally collapses them first.
+MAX_FILL_ATTEMPTS_CEILING = 40
 
 
 # =============================================================================
@@ -503,7 +518,13 @@ RESOURCES = [
     {"name": "Brilliant Amber",            "id": 0x3199, "hue": -1},      # 148 orders
     {"name": "Copper Granite",             "id": 0, "hue": -1, "by": "name",}, # 148 orders
     {"name": "Light Medusa Scales",        "id": 0, "hue": -1, "by": "name",}, # 148 orders
-    {"name": "Mythril Ingots",             "id": 0, "hue": -1, "by": "name",}, # 146 orders
+    # Mythril is this shard's OWN metal - it is in no ServUO table, like the
+    # Magewood and Darkwood boards. Confirmed by Item Inspector 2026-08-18:
+    # ItemID 0x1BF2, hue 0x0057, stack named "293 ingots", tooltip line 3
+    # "Mythril". It shipped as {"id": 0, "hue": -1, "by": "name"}, which could
+    # never match - an ingot stack is called "<amount> ingots" and names no
+    # metal - so all 146 of its orders were unfillable.
+    {"name": "Mythril Ingots",             "id": 0x1BF2, "hue": 0x0057}, # 146 orders
     {"name": "Ruby",                       "id": 0, "hue": -1, "by": "name",}, # 145 orders
     {"name": "Spined Leather",             "id": 0x1081, "hue": [0x08AC, 0x0283]}, # 145 orders
     {"name": "Fertile Dirt",               "id": 0, "hue": -1, "by": "name",}, # 144 orders
@@ -559,6 +580,15 @@ RESOURCES = [
     {"name": "Blue Diamond",               "id": 0x3198, "hue": -1},      # 1 orders
     {"name": "Dark Sapphire",              "id": 0x3192, "hue": -1},      # 1 orders
     {"name": "Ecru Citrine",               "id": 0x3195, "hue": -1},      # 1 orders
+    # The one gap in an otherwise complete 0x3192-0x3199 run, and the only gem
+    # of that block missing from RESOURCES entirely - so its stock was
+    # invisible and no order for it could ever be filled. Confirmed by Item
+    # Inspector 2026-08-18: ItemID 0x3194, hue 0x0000, 6517 in the chest.
+    #
+    # It is matched by GRAPHIC like the rest of the block, not by name. Name
+    # matching is what makes "Perfect Emerald" and "Emerald" dangerous
+    # neighbours - see deed_matches_resource, which already calls that out.
+    {"name": "Perfect Emerald",            "id": 0x3194, "hue": -1},      # not in the harvested book
     {"name": "Fire Ruby",                  "id": 0x3197, "hue": -1},      # 1 orders
     {"name": "Iron Ingots",                "id": 0x1BF2, "hue": 0x0000},  # 1 orders
     {"name": "Turquoise",                  "id": 0x3193, "hue": -1},      # 1 orders
@@ -663,33 +693,141 @@ SCALE_IDS = [0x26B4]
 #
 # Delicate Scales is NOT here on purpose: that stack really is named "delicate
 # scales" (ItemID 0x573A), so the plain name match already works for it.
+# EVERY hue in the chest, from Item Inspector dumps on 2026-08-18. All are
+# ItemID 0x26B4 and all are named "<amount> dragon scales" with NO third
+# tooltip line - so unlike the ingots, boards and granite, the stack itself
+# cannot be made to say which colour it is. The hue is the only signal, and
+# only a person looking at it in game can map hue -> colour.
+#
+#   hue      amount   serial        colour
+#   0x0851        7   0x409083A4    Green
+#   0x0455     1353   0x40908214    Black
+#   0x066D     5388   0x40908071    Red
+#   0x08A8     4854   0x40908143    Yellow
+#   0x08FD     2657   0x40908376    White
+#
+# All five read off the stacks in game, 2026-08-18. Nothing here is guessed and
+# nothing came from ServUO - this shard has already turned out to have
+# resources ServUO does not (Magewood and Darkwood boards, Mythril ingots), and
+# pouring red scales into a green order cannot be undone.
+#
+# BLUE SCALES HAS NO HUE because there were none in the chest to look at. The
+# book asks for six colours and only five are stocked. Blue stays commented
+# out, which means an unlisted blue stack identifies as NOTHING rather than
+# being mistaken for one of these five - add it the day some turn up.
+#
+# 0x08AF ("Medusa scales") and 0x08B0 ("sea serpent scales") are their own
+# creatures rather than dragon colours - do not map them to a dragon entry.
 SCALE_HUES = {
-    "Green Scales":  0x0851,     # confirmed in game
-    # "Yellow Scales": 0x0000,
-    # "Blue Scales":   0x0000,
-    # "Red Scales":    0x0000,
-    # "White Scales":  0x0000,
-    # "Black Scales":  0x0000,
+    "Green Scales":  0x0851,
+    "Black Scales":  0x0455,
+    "Red Scales":    0x066D,
+    "Yellow Scales": 0x08A8,
+    "White Scales":  0x08FD,
+    # "Blue Scales": 0x0000,     # none in the chest - do NOT guess this one
 }
 
-# Every family of "one graphic, the hue is the resource". Boards and scales
-# behave identically, so they are driven from one table rather than two copies
-# of the same loop - the ingots are already handled entry by entry.
+# =============================================================================
+# GRANITE - the same trap a third time.
+# =============================================================================
+# A granite stack is called "<amount> granite" and says nothing about which
+# metal it is, so all nine entries shipped as {"id": 0, "hue": -1, "by": "name"}
+# could never match anything. Exactly the ingot trap and the board trap.
+#
+# 0x1779 is the graphic the harvest runner already treats as granite in its
+# PURGE_ID list. If nothing in the chest matches it, the "not identified at
+# all" report below prints every graphic it found instead, which is how to
+# correct this without guessing.
+GRANITE_IDS = [0x1779]
+
+# hue -> the name the BOOK uses. EMPTY ON PURPOSE.
+#
+# Nothing here is guessed. Run once with granite in the chest and the stock
+# report prints every granite hue it finds with the exact line to paste, the
+# same way BOARD_HUES was filled. Pouring Verite into a Valorite order cannot
+# be undone, and the shard's hues are not necessarily ServUO's - two of the
+# nine woods turned out to be this shard's own inventions.
+#
+# The nine the book asks for, from the order counts in RESOURCES:
+# EVERY granite stack is NAMED "<amount> high quality granite", whatever metal
+# it actually is. The metal is on the stack's THIRD tooltip line, exactly as
+# ingots and boards name theirs:
+#
+#     402 High Quality Granite
+#     Weight: 402 Stones
+#     Valorite                      <- the metal, and the only thing that says it
+#
+# Confirmed by Item Inspector 2026-08-18: ItemID 0x1779, hue 0x08AB, named
+# "402 high quality granite", tooltip line 3 "Valorite".
+#
+# That naming is why granite could not simply be left unlisted the way boards
+# and scales were - see the note in the family import below. It is also why the
+# unknown-hue report prints each stack's metal line: you do not have to match
+# colours by eye, the stack says what it is.
+# All nine confirmed by Item Inspector, 2026-08-18. The left-hand name is the
+# BOOK's; the comment is what the STACK's tooltip says, and the two differ for
+# three of them - the same trap as the ingots, where the stack says "golden"
+# and the book says "Gold".
+GRANITE_HUES = {
+    "High Quality Granite": 0x0000,   # no third line at all - the plain one
+    "Dull Copper Granite":  0x0973,   # tooltip: Dull Copper
+    "Shadow Granite":       0x0966,   # tooltip: Shadow Iron
+    "Copper Granite":       0x096D,   # tooltip: Copper
+    "Bronze Granite":       0x0972,   # tooltip: Bronze
+    "Gold Granite":         0x08A5,   # tooltip: Golden
+    "Agapite Granite":      0x0979,   # tooltip: Agapite
+    "Verite Granite":       0x089F,   # tooltip: Verite
+    "Valorite Granite":     0x08AB,   # tooltip: Valorite
+}
+
+# Every family of "one graphic, the hue is the resource". Boards, scales and
+# granite behave identically, so they are driven from one table rather than
+# three copies of the same loop - the ingots are already handled entry by entry.
+# "generic" is the bare name EVERY stack in the family carries, when that name
+# happens to collide with one of the resource names. Only granite has this
+# problem: every stack is "<amount> high quality granite", and there is a
+# resource called High Quality Granite. Boards are "<amount> boards" and scales
+# are "<amount> dragon scales", which collide with nothing.
 HUE_FAMILIES = [
     {"label": "board", "ids": BOARD_IDS, "hues": BOARD_HUES},
     {"label": "scale", "ids": SCALE_IDS, "hues": SCALE_HUES},
+    {"label": "granite", "ids": GRANITE_IDS, "hues": GRANITE_HUES,
+     "generic": "High Quality Granite"},
 ]
 
-# Give those entries a graphic to match on. An entry with no hue yet keeps its
-# "by": "name" match, which is harmless - it simply will not match a stack
-# called "<amount> boards" or "<amount> dragon scales".
+# Give those entries a graphic to match on, and DISARM the ones still without a
+# hue.
+#
+# The old note here said an entry with no hue "keeps its 'by': 'name' match,
+# which is harmless - it simply will not match a stack called '<amount> boards'".
+# That was true of boards and scales and is FALSE of granite, because every
+# granite stack is literally named "<amount> high quality granite" and there is
+# an entry called "High Quality Granite". So the name match did not fail
+# harmlessly - it claimed EVERY granite stack, of every metal, as High Quality
+# Granite. A Valorite stack was then offered to fill a High Quality order, the
+# server refused it, and the deed sat at 0/429 while the runner reported that
+# neither targeting nor dragging worked.
+#
+# An unidentified stack must be INVISIBLE, never mistaken for something else:
+# invisible costs a skipped order, mistaken pours the wrong metal into a deed
+# and cannot be undone. So a family member without a hue is marked unmatchable
+# and the stock report names it.
+# Disarming is SURGICAL - only the one entry whose name the generic stack name
+# would claim. A blunter rule ("anything ending in Scales") breaks Delicate
+# Scales, which is a genuinely differently-named item (0x573A) that the plain
+# name match identifies correctly and always has.
+UNMATCHABLE = "__no_hue_listed__"
+
 for _family in HUE_FAMILIES:
+    _generic = _family.get("generic")
     for _entry in RESOURCES:
         _hue = _family["hues"].get(_entry["name"])
         if _hue is not None:
             _entry["id"] = _family["ids"][0]
             _entry["hue"] = _hue
             _entry.pop("by", None)
+        elif _generic and _entry["name"] == _generic:
+            _entry["by"] = UNMATCHABLE
 
 
 # Which of the above to work, in order. Empty = every entry in RESOURCES.
@@ -1170,6 +1308,8 @@ def resource_of(item):
     if not bare:
         return None
     for entry in RESOURCES:
+        # UNMATCHABLE entries are family members with no hue listed yet. They
+        # must never match by name - see the family import for what that cost.
         if entry.get("by") != "name":
             continue
         # `item_name` is what the ITEM is called when that differs from what
@@ -1304,12 +1444,17 @@ def only_live(stacks):
 
 
 def unknown_family_stacks(chests, family):
-    """Stacks of one hue-family whose hue is not listed: {hue: {amount, stacks}}.
+    """Stacks of one hue-family whose hue is not listed: {hue: {...}}.
 
     This is what makes the tables fillable without guessing. A stack is called
-    "<amount> boards" or "<amount> dragon scales" and says nothing about which
-    one it is, so an unlisted hue is invisible to resource_of and that resource
-    silently has no stock at all.
+    "<amount> boards", "<amount> dragon scales" or "<amount> high quality
+    granite" and says nothing useful about which one it is, so an unlisted hue
+    is invisible to resource_of and that resource silently has no stock at all.
+
+    The stack's tooltip is captured too. Ingots, boards and granite all name
+    their material on the THIRD line - "402 High Quality Granite / Weight: 402
+    Stones / Valorite" - so for those the report can say outright which one a
+    hue is, instead of asking you to match colours by eye.
     """
     known = set(int(h) for h in family["hues"].values())
     ids = set(int(i) for i in family["ids"])
@@ -1324,11 +1469,35 @@ def unknown_family_stacks(chests, family):
                 continue
             if hue in known:
                 continue
-            record = out.setdefault(hue, {"amount": 0, "stacks": 0})
-            record["amount"] += int(getattr(item, "Amount", 0) or 0)
+            amount = int(getattr(item, "Amount", 0) or 0)
+            record = out.setdefault(hue, {"amount": 0, "stacks": 0,
+                                          "material": "", "serial": 0,
+                                          "biggest": 0})
+            record["amount"] += amount
             record["stacks"] += 1
+            if not record["material"]:
+                record["material"] = material_line(item)
+            if amount >= record["biggest"]:
+                record["biggest"] = amount
+                record["serial"] = int(getattr(item, "Serial", 0) or 0)
     return out
 
+
+def material_line(item):
+    """The material named on a stack's tooltip, or "".
+
+    Line 1 is "<amount> <generic name>", line 2 is the weight, and line 3 - if
+    there is one - is the material. Plain iron and default-hue boards carry no
+    third line at all, which is itself the identification: no line means the
+    uncoloured default.
+    """
+    lines = [spaced(l).strip() for l in props(item) if str(l).strip()]
+    for line in lines[2:]:
+        low = line.lower()
+        if "weight" in low or "stones" in low:
+            continue
+        return line
+    return ""
 
 def report_unknown_families(chests):
     """Name every hue the runner cannot identify, with the line to paste.
@@ -1349,13 +1518,79 @@ def report_unknown_families(chests):
             % (len(unknown), label), HUE_WARN)
         for hue, record in sorted(unknown.items(),
                                   key=lambda kv: -kv[1]["amount"]):
-            log("    hue 0x%04X  %d %s(s) in %d stack(s)"
-                % (hue, record["amount"], label, record["stacks"]), HUE_WARN)
-        log("  Match each hue to what it looks like in game, then paste into "
-            "%s_HUES at the top of this script:" % label.upper(), HUE_WARN)
+            if record.get("material"):
+                # Ingots, boards and granite name their material on the
+                # tooltip, so the answer is right there.
+                log("    hue 0x%04X  %d %s(s) in %d stack(s)   tooltip says: %s"
+                    % (hue, record["amount"], label, record["stacks"],
+                       record["material"]), HUE_WARN)
+            else:
+                # Scales carry NO material line - the hue is the only signal,
+                # and no amount of reading the item will say which colour it
+                # is. So point at ONE specific stack instead: find that serial
+                # in game, look at it, and that is the answer.
+                log("    hue 0x%04X  %d %s(s) in %d stack(s)   no material on "
+                    "the tooltip - look at stack 0x%X (the %d one) in game"
+                    % (hue, record["amount"], label, record["stacks"],
+                       record.get("serial", 0), record.get("biggest", 0)),
+                    HUE_WARN)
+        log("  Paste these into %s_HUES at the top of this script:"
+            % label.upper(), HUE_WARN)
         for hue in sorted(unknown):
-            log('      "<name>": 0x%04X,' % hue, HUE_WARN)
-        log("  Use the BOOK's name on the left.", HUE_WARN)
+            said = unknown[hue].get("material") or ""
+            log('      "%s": 0x%04X,%s'
+                % (said or "<name>", hue,
+                   "" if said else "   # no material on the tooltip"),
+                HUE_WARN)
+        log("  Use the BOOK's name on the left - the tooltip says the material "
+            "but the book may word it differently (the stack says 'golden', "
+            "the book says 'Gold').", HUE_WARN)
+
+
+def report_unidentified_stacks(chests):
+    """Every stack in the chests the runner cannot name AT ALL, by graphic.
+
+    The hue-family reports only cover graphics already known to be a board, a
+    scale or granite. This one asks the wider question - "what is in the chest
+    that resource_of() cannot name?" - and so it also catches a family whose
+    GRAPHIC is wrong, which no per-family report can.
+
+    That matters because an unidentifiable stack is invisible to the budget:
+    its orders are skipped exactly as if the chest were empty, and nothing says
+    why. This is the report to read when an order will not fill despite the
+    resource plainly sitting in the chest.
+    """
+    groups = {}
+    for chest in as_list(chests):
+        for item in list(getattr(chest, "Contains", None) or []):
+            if resource_of(item) is not None:
+                continue
+            try:
+                key = (int(item.ItemID), int(item.Hue))
+            except Exception:
+                continue
+            record = groups.setdefault(key, {"amount": 0, "stacks": 0,
+                                             "name": ""})
+            record["amount"] += int(getattr(item, "Amount", 0) or 0)
+            record["stacks"] += 1
+            if not record["name"]:
+                record["name"] = strip_amount(
+                    getattr(item, "Name", "") or "").strip()
+
+    if not groups:
+        log("Every stack in the chests is identified.", HUE_GOOD)
+        return
+
+    log("%d kind(s) of stack in the chests cannot be identified, so they are "
+        "invisible to the budget and their orders are skipped:"
+        % len(groups), HUE_WARN)
+    for (item_id, hue), record in sorted(groups.items(),
+                                         key=lambda kv: -kv[1]["amount"]):
+        log("    id 0x%04X hue 0x%04X  %d in %d stack(s)  %s"
+            % (item_id, hue, record["amount"], record["stacks"],
+               record["name"] or "(no name)"), HUE_WARN)
+    log("  If one of those is a resource the book asks for, add its graphic to "
+        "the matching *_IDS list and its hue to *_HUES.", HUE_WARN)
 
 
 def unknown_board_stacks(chests):
@@ -1418,23 +1653,31 @@ def validate_board_hues():
     pairs = []
     for family in HUE_FAMILIES:
         for name, hue in family["hues"].items():
-            pairs.append((name, hue))
+            pairs.append((family["label"], name, hue))
 
-    for name, hue in pairs:
+    for label, name, hue in pairs:
         if name.strip().lower() not in by_name:
-            log("BOARD_HUES names %r, which is not in RESOURCES - it will "
+            log("%s_HUES names %r, which is not in RESOURCES - it will "
                 "never match an order. Check the spelling against the book."
-                % name, HUE_BAD)
+                % (label.upper(), name), HUE_BAD)
             ok = False
 
-    seen = {}
-    for name, hue in pairs:
-        if int(hue) in seen:
-            log("BOARD_HUES gives hue 0x%04X to both %r and %r - one of them "
-                "would be filled with the other's wood."
-                % (int(hue), seen[int(hue)], name), HUE_BAD)
-            ok = False
-        seen[int(hue)] = name
+    # Uniqueness is PER FAMILY, not global. Matching is graphic AND hue, so two
+    # families with different graphics may share a hue perfectly safely - and
+    # they do: hue 0x0000 is both Regular Boards (0x1BD7) and High Quality
+    # Granite (0x1779), because "no hue" is how every family spells its plain,
+    # uncoloured member. Checking globally reported that as a clash and refused
+    # to start.
+    for family in HUE_FAMILIES:
+        seen = {}
+        for name, hue in family["hues"].items():
+            if int(hue) in seen:
+                log("%s_HUES gives hue 0x%04X to both %r and %r - one of them "
+                    "would be filled with the other's."
+                    % (family["label"].upper(), int(hue), seen[int(hue)], name),
+                    HUE_BAD)
+                ok = False
+            seen[int(hue)] = name
 
     for family in HUE_FAMILIES:
         count = len(family["hues"])
@@ -1456,16 +1699,54 @@ def census(chests):
     were poured out - and a resource can end up with a budget that does not
     match what is really there.
     """
+    stock, lost = _census_pass(chests)
+    if lost:
+        # A resource whose every stack failed to resolve is the STALE SNAPSHOT
+        # case, not an empty chest. chest_stacks has always reopened and
+        # retried before believing an empty result; the census did not, so it
+        # could drop a resource the filler would have found - and a resource
+        # missing from the census gets a budget of 0 and is passed over in
+        # silence.
+        #
+        # This bites resources held in MANY stacks hardest, which is exactly
+        # where Contains is least trustworthy: iron and regular boards run to
+        # tens of stacks.
+        log("census: %s resolved no live stacks - reopening the chests and "
+            "counting again." % ", ".join(sorted(lost)), HUE_WARN)
+        fresh = [refresh_chest(c) for c in as_list(chests)]
+        fresh = [c for c in fresh if c is not None]
+        if fresh:
+            retried, still_lost = _census_pass(fresh)
+            for resource, data in retried.items():
+                if resource not in stock:
+                    log("census: the reopen found %d %s in %d stack(s) that "
+                        "the first pass missed."
+                        % (data["amount"], resource, len(data["stacks"])),
+                        HUE_GOOD)
+                stock[resource] = data
+            if still_lost:
+                log("census: %s still resolves nothing after a reopen - treat "
+                    "it as genuinely gone." % ", ".join(sorted(still_lost)),
+                    HUE_WARN)
+    return stock
+
+
+def _census_pass(chests):
+    """One counting pass. Returns (stock, names whose stacks all went stale)."""
     stock = {}
+    lost = set()
     for resource, stacks in all_resource_stacks(chests).items():
         live = only_live(stacks)
         if not live:
+            # Something claimed to be there and then would not resolve. That is
+            # the difference between "spent" and "the snapshot is old".
+            lost.add(resource)
             continue
         stock[resource] = {
             "amount": sum(int(getattr(s, "Amount", 0) or 0) for s in live),
             "stacks": live,
         }
-    return stock
+    return stock, lost
 
 
 def keep_for(resource):
@@ -2470,7 +2751,16 @@ def fill_deed(deed, chests, resource):
            len(on_hand),
            int(getattr(on_hand[0], "Amount", 0) or 0) if on_hand else 0))
 
-    for attempt in range(MAX_FILL_ATTEMPTS):
+    # One pass per stack that might be needed, never fewer than the floor. The
+    # deed is capped at MAX_ORDER_SIZE and a stack at MAX_STACK, so this is
+    # generous by design - an unproductive pass ends the loop on its own.
+    allowance = min(MAX_FILL_ATTEMPTS_CEILING,
+                    max(MAX_FILL_ATTEMPTS, len(on_hand) + 2))
+    if allowance > MAX_FILL_ATTEMPTS:
+        log("  %d stack(s) of %s - allowing %d fill passes"
+            % (len(on_hand), resource, allowance))
+
+    for attempt in range(allowance):
         short = needed - filled
         if short <= 0:
             return True
@@ -2543,17 +2833,39 @@ def fill_deed(deed, chests, resource):
                 return True
 
         if filled == before:
+            # Say WHAT was targeted, not just that it failed. "Neither
+            # targeting nor dragging fills it" is true of two completely
+            # different faults - a stack that is the wrong resource, and a
+            # deed the server will not let this character fill - and the only
+            # way to tell them apart is to name the stack that was offered.
+            tried = stacks[0]
             log("Deed 0x%X did not advance past %s after attempt %d. Neither "
                 "targeting nor dragging fills it - stopping."
                 % (serial, progress_text(filled, needed), attempt + 1), HUE_BAD)
+            log("  The deed wants: %r" % fields.get("resource"), HUE_BAD)
+            log("  It was offered: 0x%X  id 0x%04X hue 0x%04X  amount %d  %r"
+                % (int(tried.Serial), int(tried.ItemID), int(tried.Hue),
+                   int(getattr(tried, "Amount", 0) or 0),
+                   strip_amount(getattr(tried, "Name", "") or "").strip()),
+                HUE_BAD)
+            log("  If that stack is not %r, the resource table is matching the "
+                "wrong graphic or hue - check the 'cannot be identified' lines "
+                "in the stock report." % resource, HUE_BAD)
+            for line in tooltip or []:
+                log("  | %s" % spaced(line), HUE_INFO)
             return False
 
         log("  %s" % progress_text(filled, needed))
 
     if filled is not None and needed is not None and filled >= needed:
         return True
-    log("Deed 0x%X still at %s after %d attempts - stopping."
-        % (serial, progress_text(filled, needed), MAX_FILL_ATTEMPTS), HUE_BAD)
+    left = chest_stacks(chests, resource)
+    log("Deed 0x%X still at %s after %d pass(es), with %d stack(s) and %d %s "
+        "still in the chest. Raise MAX_FILL_ATTEMPTS_CEILING if this is a "
+        "deed that was steadily filling."
+        % (serial, progress_text(filled, needed), allowance, len(left),
+           sum(int(getattr(x, "Amount", 0) or 0) for x in left), resource),
+        HUE_BAD)
     return False
 
 
@@ -3553,6 +3865,7 @@ def fill_orders(chests, offset=0):
     # stock it did recognise, because an unidentified wood looks exactly like
     # an empty chest from every other angle.
     report_unknown_families(chests)
+    report_unidentified_stacks(chests)
 
     if not any(budget.get(r["name"], 0) > 0 for r in worked_resources()):
         log("Nothing above the reserves. Nothing to fill.", HUE_WARN)
@@ -3596,6 +3909,27 @@ def fill_orders(chests, offset=0):
             if resource in exhausted:
                 continue
             if budget.get(resource, 0) <= 0:
+                # This used to skip in COMPLETE SILENCE, which is exactly what
+                # "it just passes them over" looks like from the outside - the
+                # resource never appears in the log at all, so it is
+                # indistinguishable from one that was worked and found nothing.
+                #
+                # The three causes need telling apart and only the numbers can
+                # do it: not in the census at all (identification, or a stale
+                # chest snapshot), in the census but held back by the reserve,
+                # or genuinely spent.
+                entry = stock.get(resource)
+                if entry is None:
+                    log("%s: SKIPPED - not in the chest census at all. Either "
+                        "no stack of it is identifiable, or the chest snapshot "
+                        "went stale. See the 'cannot be identified' lines in "
+                        "the stock report." % resource, HUE_WARN)
+                else:
+                    log("%s: SKIPPED - %d on hand in %d stack(s) but %d "
+                        "spendable (keep %d)."
+                        % (resource, entry["amount"], len(entry["stacks"]),
+                           budget.get(resource, 0), keep_for(resource)),
+                        HUE_WARN)
                 exhausted.add(resource)
                 continue
 
@@ -3609,13 +3943,21 @@ def fill_orders(chests, offset=0):
                 # is deep stock of it, so "nothing to do" is surprising and
                 # needs to distinguish "the book has no orders" from "the
                 # orders are all too big for the budget".
+                entry = stock.get(resource, {"amount": 0, "stacks": []})
                 if resource in priority_names:
-                    entry = stock.get(resource, {"amount": 0, "stacks": []})
                     log("PRIORITY %s took nothing: %d on hand, %d spendable, "
                         "in %d stack(s)."
                         % (resource, entry["amount"],
                            budget.get(resource, 0), len(entry["stacks"])),
                         HUE_WARN)
+                else:
+                    # Every resource says something now. A pass-over with no
+                    # line at all is what made this impossible to diagnose from
+                    # in game - the resource simply never appeared in the log.
+                    log("%s took nothing: %d on hand in %d stack(s), %d "
+                        "spendable - the book had no order it could fill."
+                        % (resource, entry["amount"], len(entry["stacks"]),
+                           budget.get(resource, 0)))
                 exhausted.add(resource)
                 continue
             took_any = True
