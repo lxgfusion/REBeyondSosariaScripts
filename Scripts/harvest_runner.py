@@ -50,7 +50,7 @@ Misc.Pause(5000)
 # This script has FOUR copies that differ on purpose (repo, main character,
 # MrGatherer, Mystic Gatherer). Give each a distinct SCRIPT_TAG so the banner
 # also says which copy is running, not just which version.
-SCRIPT_VERSION = "2026-08-22.20"
+SCRIPT_VERSION = "2026-08-29.21"
 SCRIPT_TAG = "repo"
 
 
@@ -1341,10 +1341,10 @@ AREA_SPOT_HARD_CAP_MS = 120000
 # and a couple of unload trips is legitimately long.
 WAYPOINT_HARD_CAP_MS = 420000
 
-# Times the pack may be emptied into a carried key at ONE waypoint before a
-# trip home is made instead. The in-place unload returns to the same spot
-# without advancing, so an unload that frees nothing loops on itself.
-UNLOAD_IN_PLACE_LIMIT = 3
+# How many in-place unloads at one waypoint before it is worth SAYING so. Not
+# a limit - going home is not triggered by this - just the point at which a
+# rune that keeps filling the pack is worth a line in the journal.
+UNLOAD_IN_PLACE_NOTE = 6
 
 # Say something while a spot is still being worked, this often. A spot that
 # takes minutes in complete silence is indistinguishable from a hung script -
@@ -5227,16 +5227,22 @@ def run_job(job, resume=False):
             # Smelt, then let anything carried take the load. Only if the pack
             # is STILL full has a trip home earned itself.
             #
-            # BOUNDED. This `continue` does NOT set need_waypoint, so it comes
-            # straight back to task() at the same spot - which is right once or
-            # twice and an infinite loop if the pack never actually frees up.
-            if unloads_here < UNLOAD_IN_PLACE_LIMIT and unload_in_place():
+            # NO COUNT ON THIS. unload_in_place() returns True only when the
+            # pack ACTUALLY HAS ROOM afterwards - that is its whole contract -
+            # so a True can never be followed by an immediate "full", and the
+            # runaway loop this looked like it needed guarding against cannot
+            # happen. A count here does the opposite of what it looks like: it
+            # sends a character whose keys are working perfectly home after
+            # three successful in-place unloads, which is what "he recalls home
+            # constantly" turned out to be. The waypoint watchdog is the
+            # backstop for anything genuinely stuck.
+            if unload_in_place():
                 unloads_here += 1
+                if unloads_here == UNLOAD_IN_PLACE_NOTE:
+                    log("%s: %d in-place unloads at this waypoint - the keys "
+                        "are keeping up, staying out."
+                        % (name, unloads_here), HUE_INFO)
                 continue
-            if unloads_here >= UNLOAD_IN_PLACE_LIMIT:
-                log("%s: unloaded in place %d times at this waypoint and the "
-                    "pack is still full - going home instead."
-                    % (name, unloads_here), HUE_WARN)
 
             index = _waypoint.get(name, 0)
             total = len(_routes.get(name) or [])

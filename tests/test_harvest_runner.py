@@ -4417,21 +4417,43 @@ def test_the_watchdog_forces_the_next_rune(m):
     check("and says so loudly", "HUE_BAD" in window, True)
 
 
-def test_unloading_in_place_is_bounded(m):
-    """That `continue` does not set need_waypoint, so it returns to the same
-    spot - correct once or twice, an infinite loop if the pack never frees."""
-    check("there is a limit", m["UNLOAD_IN_PLACE_LIMIT"] >= 1, True)
+def test_unloading_in_place_is_never_capped(m):
+    """THE REGRESSION THAT SENT HIM HOME CONSTANTLY.
 
-    import ast as _ast
+    unload_in_place() returns True only when the pack ACTUALLY HAS ROOM
+    afterwards - that is its whole contract - so a True can never be followed
+    by an immediate "full", and the runaway loop a cap looked like it was
+    guarding against cannot happen. Capping it did the opposite of what it
+    looked like: a character whose keys were working perfectly was sent home
+    after three successful in-place unloads.
+    """
     with open(SCRIPT, "r", encoding="utf-8") as fh:
         src = fh.read()
     body = src[src.index("def run_job("):]
     body = body[:body.index("\ndef ")]
-    check("the limit gates the in-place unload",
-          "unloads_here < UNLOAD_IN_PLACE_LIMIT" in body, True)
+
+    check("nothing caps the in-place unload", "unloads_here < " in body, False)
+    check("its own return value is the only gate",
+          "if unload_in_place():" in body, True)
+    check("and no count sends it home", "going home instead" in body, False)
+
+    # It still counts, but only so a busy rune can be reported.
     check("the counter advances", "unloads_here += 1" in body, True)
-    check("and it is reset on arrival", "unloads_here = 0" in body, True)
-    check("hitting it says why", "still full - going home" in body, True)
+    check("and is reset on arrival", "unloads_here = 0" in body, True)
+    check("a busy rune is reported, not punished", "staying out" in body, True)
+
+
+def test_unload_in_place_only_reports_room_it_really_has(m):
+    """The contract the above depends on. If this ever returned True with a
+    full pack, an uncapped loop really would spin - so it is pinned here."""
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def unload_in_place("):]
+    body = body[:body.index("\ndef ")]
+    check("it ends on a real room check",
+          body.rstrip().endswith("return pack_has_room(threshold)"), True)
+    check("and its early return is also a room check",
+          "if pack_has_room(threshold):" in body, True)
 
 
 def test_an_unknown_task_result_does_not_mean_stay_here(m):
@@ -4474,7 +4496,8 @@ def main():
     test_a_waypoint_cannot_be_held_forever(module)
     test_the_watchdog_is_armed_only_by_arriving_somewhere(module)
     test_the_watchdog_forces_the_next_rune(module)
-    test_unloading_in_place_is_bounded(module)
+    test_unloading_in_place_is_never_capped(module)
+    test_unload_in_place_only_reports_room_it_really_has(module)
     test_an_unknown_task_result_does_not_mean_stay_here(module)
     test_page_info(module)
     test_dropoff_smelts_before_the_keys_get_first_refusal(module)
