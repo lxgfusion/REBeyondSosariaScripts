@@ -208,6 +208,23 @@ class StubItem(object):
     ItemID = 0x0E75
 
 
+class StubPos(object):
+    def __init__(self, x, y, z=0):
+        self.X = x
+        self.Y = y
+        self.Z = z
+
+
+class StubStatics(object):
+    """Nothing is mineable unless a test says so."""
+
+    def GetLandID(self, x, y, world):
+        return 0x0003
+
+    def GetStaticsTileInfo(self, x, y, world):
+        return []
+
+
 class StubPlayer(object):
     Serial = 0x0001A2B3
     Backpack = StubItem()
@@ -220,8 +237,13 @@ class StubPlayer(object):
     IsGhost = False
     WarMode = False
     Name = "Minerbot"
+    Map = 0
+    Position = StubPos(100, 100)
 
     def ChatSay(self, colour, msg=None):
+        pass
+
+    def HeadMessage(self, colour, msg=None):
         pass
 
     def GetSkillValue(self, name):
@@ -711,6 +733,1628 @@ def test_a_full_pack_says_which_measure_tripped(m):
         ITEMS.reset()
 
 
+def test_weight_reserve_replaces_the_fraction(m):
+    """Harvest until one more yield will not fit, not until 60% of capacity.
+
+    The fraction threw away everything above it: at 0.6 a 495-stone character
+    stored at 297 and left 198 stones unused on every trip.
+    """
+    player = m["Player"]
+    saved = (player.Weight, player.MaxWeight)
+    original_log = m["log"]
+    m["_max_yield"].clear()
+    try:
+        m["log"] = lambda *a, **k: None
+
+        # Well under the limit at a weight the old 0.6 rule called full.
+        player.Weight, player.MaxWeight = 300, 495
+        check("keeps working at 300 of 495", m["pack_has_room"](), True)
+
+        # Right at the edge - free weight down to the reserve.
+        player.Weight, player.MaxWeight = 495 - m["weight_reserve"](), 495
+        check("stores when free weight hits the reserve",
+              m["pack_has_room"](), False)
+
+        player.Weight, player.MaxWeight = 400, 495
+        check("still working at 400 of 495", m["pack_has_room"](), True)
+
+        # An explicit threshold is still a fraction - the job hand-over needs
+        # "start the next job under 15%", which is a different question.
+        player.Weight, player.MaxWeight = 100, 495
+        check("explicit threshold is still a fraction",
+              m["pack_has_room"](0.15), False)
+        player.Weight, player.MaxWeight = 50, 495
+        check("under the hand-over fraction", m["pack_has_room"](0.15), True)
+    finally:
+        m["log"] = original_log
+        player.Weight, player.MaxWeight = saved
+        m["_max_yield"].clear()
+
+
+def test_reserve_is_measured_not_guessed(m):
+    """The reserve grows to cover the heaviest yield actually seen, and is capped."""
+    original_debug = m["debug"]
+    m["_max_yield"].clear()
+    try:
+        m["debug"] = lambda *a, **k: None
+        check("floor before anything is measured",
+              m["weight_reserve"](), m["PACK_WEIGHT_RESERVE"])
+
+        m["note_yield"]("mine", 60)
+        check("learns from a heavy yield",
+              m["weight_reserve"](), int(60 * m["PACK_RESERVE_SAFETY"]))
+
+        # A lighter yield must not lower it - the heaviest is what has to fit.
+        m["note_yield"]("mine", 5)
+        check("a light yield does not lower the reserve",
+              m["weight_reserve"](), int(60 * m["PACK_RESERVE_SAFETY"]))
+
+        # One freak reading must not park the reserve at half the pack.
+        m["note_yield"]("mine", 100000)
+        check("capped", m["weight_reserve"](), m["PACK_RESERVE_MAX"])
+
+        check("a negative reading is ignored", m["weight_gain"](100), 0)
+    finally:
+        m["debug"] = original_debug
+        m["_max_yield"].clear()
+
+
+def test_mining_step_is_the_ore_bank(m):
+    """Spot spacing must match ServUO's BankWidth, or the walk re-mines itself.
+
+    Mining.cs sets BankWidth = BankHeight = 8. A bank is what depletes, so
+    anything less than 8 tiles lands the character back inside the block they
+    just emptied. Lumber banks are 4x3, which is why that sweep steps 3.
+    """
+    check("mining steps one whole ore bank", m["MINE_AREA_STEP"], 8)
+    check("lumber steps its own, smaller bank",
+          (m["LUMBER_AREA_STEP_X"], m["LUMBER_AREA_STEP_Y"]), (4, 3))
+    check("mining looks the distance asked for", m["MINE_AREA_RADIUS"], 18)
+
+    offsets = m["area_offsets"](m["MINE_AREA_RADIUS"] * 2, m["MINE_AREA_STEP"])
+    check("mining offsets step a bank at a time", offsets, [-16, -8, 0, 8, 16])
+    check("nothing beyond the radius",
+          [o for o in offsets if abs(o) > m["MINE_AREA_RADIUS"]], [])
+
+
+def test_area_offsets_is_generic(m):
+    """One helper serves both sweeps."""
+    check("8/3 gives the lumber grid", m["area_offsets"](8, 3), [-3, 0, 3])
+    check("36/8 gives the mining grid",
+          m["area_offsets"](36, 8), [-16, -8, 0, 8, 16])
+    check("a step bigger than the box gives one spot",
+          m["area_offsets"](4, 8), [0])
+    # A step of 0 must not divide by zero. It clamps to 1 - a spot every
+    # tile, which is slow but harmless, rather than a crash mid-route.
+    check("step 0 clamps to 1 instead of crashing",
+          m["area_offsets"](8, 0), [-4, -3, -2, -1, 0, 1, 2, 3, 4])
+    check("a negative size gives one spot", m["area_offsets"](-8, 3), [0])
+
+
+def test_mineable_tiles_came_from_source(m):
+    """The tile lists must be real, and must not have picked up m_Offsets.
+
+    Mining.cs also declares m_Offsets - spawn coordinate deltas including
+    negative numbers. An extractor that read it as tiles would inject 0 and 1
+    into the list, and every patch of grass would then look mineable.
+    """
+    tiles = m["MOUNTAIN_AND_CAVE_TILES"]
+    check("mountain and cave tiles are loaded", len(tiles) > 250, True)
+    check("no spawn offsets leaked in", 0 in tiles or 1 in tiles, False)
+    check("sand is a separate list", 0 in m["SAND_TILES"], False)
+    check("the two lists are distinct",
+          m["SAND_TILES"] == tiles, False)
+
+
+def test_spot_is_minable_checks_the_whole_reach(m):
+    """You stand on cave floor and mine the wall - not the tile underfoot."""
+    tiles = sorted(m["MOUNTAIN_AND_CAVE_TILES"])
+    rock = tiles[0]
+
+    class FakeStatics(object):
+        def __init__(self, rock_at):
+            self.rock_at = rock_at
+
+        def GetLandID(self, x, y, world):
+            return self.rock_at if (x, y) == self.rock_at_xy else 0x0003
+
+        def GetStaticsTileInfo(self, x, y, world):
+            return []
+
+    fake = FakeStatics(rock)
+    fake.rock_at_xy = (102, 200)
+    original = m.get("Statics")
+    try:
+        m["Statics"] = fake
+        # Rock two tiles east - inside the server's MaxRange of 2.
+        check("rock within reach counts", m["spot_is_minable"](100, 200), True)
+        # Move it out of reach.
+        fake.rock_at_xy = (110, 200)
+        check("rock out of reach does not", m["spot_is_minable"](100, 200),
+              False)
+    finally:
+        m["Statics"] = original
+
+
+def test_mine_single_matches_old_behaviour(m):
+    """MINE_AREA_ENABLED = False must behave as the script used to."""
+    outcomes = {}
+    original_dig = m["dig_once"]
+    original_smelt = m["smelt"]
+    original_make = m["make_shovel"]
+    original_log = m["log"]
+    try:
+        m["dig_once"] = lambda shovel, timeout: outcomes["reply"]
+        m["smelt"] = lambda *a: None
+        m["make_shovel"] = lambda *a: None
+        m["log"] = lambda *a, **k: None
+        for reply, want in (("ok", "ok"), ("broke", "ok"), ("full", "full"),
+                            ("empty", "next"), ("notrock", "next"),
+                            ("silent", "next")):
+            outcomes["reply"] = reply
+            check("single mine spot: %s -> %s" % (reply, want),
+                  m["mine_single"](None), want)
+    finally:
+        m["dig_once"] = original_dig
+        m["smelt"] = original_smelt
+        m["make_shovel"] = original_make
+        m["log"] = original_log
+
+
+def test_mine_messages_separate_empty_from_barren(m):
+    """The sweep needs "bank empty" and "no rock at all" to be different.
+
+    They lead to opposite decisions: an empty bank means step 8 tiles to the
+    next one, no rock at all means never walk here again.
+    """
+    depleted = " ".join(m["MINE_DEPLETED"]).lower()
+    barren = " ".join(m["MINE_BAD_TARGET"]).lower()
+    check("no metal is a depleted bank", "no metal" in depleted, True)
+    check("can't mine there is barren ground",
+          "can't mine there" in barren, True)
+    check("the two do not overlap",
+          set(m["MINE_DEPLETED"]) & set(m["MINE_BAD_TARGET"]), set())
+    check("a full pack is its own answer",
+          any("backpack is full" in t.lower() for t in m["MINE_PACK_FULL"]),
+          True)
+
+
+def test_vendor_round_counts_collections_not_visits(m):
+    """Only a real collection earns the trip home.
+
+    serve_vendor returns True for an NPC that answered "nothing yet" - a
+    cooldown is a successful visit but not a collection, so counting visits
+    would send the character home after every empty round.
+    """
+    check("dropoff after vendors is on", m["DROPOFF_AFTER_VENDORS"], True)
+
+    m["_collected_this_round"] = 0
+    m["_vendor_history"].clear()
+    try:
+        m["note_vendor_collected"]({"label": "Test vendor"})
+        m["note_vendor_collected"]({"label": "Test vendor"})
+        check("collections are counted", m["_collected_this_round"], 2)
+    finally:
+        m["_vendor_history"].clear()
+        m["_collected_this_round"] = 0
+
+class FakePathFinding(object):
+    """A map with a wall, so "no path" and "the long way round" are both real.
+
+    `blocked` is a set of tiles that cannot be entered. GetPath does a plain
+    BFS from the player, which is enough to tell apart the three cases that
+    matter: straight through, round the outside, and no way at all.
+    """
+
+    def __init__(self, player, blocked=(), bounds=40):
+        self.player = player
+        self.blocked = set(blocked)
+        self.bounds = bounds
+        self.walked = []
+
+    class Route(object):
+        pass
+
+    def Go(self, route):
+        self.walked.append((route.X, route.Y))
+        return True
+
+    def GetPath(self, x, y, ignoremob):
+        start = (self.player.Position.X, self.player.Position.Y)
+        goal = (x, y)
+        if goal in self.blocked:
+            return []
+        seen = {start: None}
+        queue = [start]
+        while queue:
+            here = queue.pop(0)
+            if here == goal:
+                path = []
+                while here is not None:
+                    path.append(here)
+                    here = seen[here]
+                return list(reversed(path))[1:]
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    nxt = (here[0] + dx, here[1] + dy)
+                    if nxt in seen or nxt in self.blocked:
+                        continue
+                    if abs(nxt[0] - start[0]) > self.bounds:
+                        continue
+                    if abs(nxt[1] - start[1]) > self.bounds:
+                        continue
+                    seen[nxt] = here
+                    queue.append(nxt)
+        return []
+
+
+def test_unreachable_spot_is_never_walked_at(m):
+    """The cave bug: a spot behind a mountain wall must not be walked at.
+
+    Reported in game - the character stood at the mouth of a cave shuffling
+    into the rock face because the next standing spot was on the other side of
+    it. PathFinding.Go bounces off the wall without ever failing outright, so
+    "did I move" never says no and only the move timeout ends it.
+    """
+    player = m["Player"]
+    saved = player.Position
+    original_pf = m["PathFinding"]
+    original_debug = m["debug"]
+    try:
+        m["debug"] = lambda *a, **k: None
+        player.Position = StubPos(100, 100)
+
+        # A solid wall down x=104, sealing off everything east of it.
+        wall = set()
+        for y in range(60, 140):
+            for x in range(104, 108):
+                wall.add((x, y))
+        fake = FakePathFinding(player, wall, bounds=6)
+        m["PathFinding"] = fake
+
+        check("a spot inside the wall is refused",
+              m["reachable_spot"](105, 100, 0), None)
+        check("and nothing was walked at", fake.walked, [])
+
+        check("walk_to refuses it too", m["walk_to"](105, 100, 500, 0), False)
+        check("still nothing walked at", fake.walked, [])
+
+        # An open spot on our own side is fine.
+        check("an open spot is accepted",
+              m["reachable_spot"](102, 100, 0), (102, 100))
+    finally:
+        m["PathFinding"] = original_pf
+        m["debug"] = original_debug
+        player.Position = saved
+
+
+def test_long_way_round_is_refused(m):
+    """A real path that goes round the mountain is still the wrong answer.
+
+    "Did GetPath return something" is not enough on its own: 8 tiles through
+    rock can have a perfectly valid 80-tile path around the outside, and
+    walking it takes the character out of the mine.
+    """
+    player = m["Player"]
+    saved = player.Position
+    original_pf = m["PathFinding"]
+    original_debug = m["debug"]
+    try:
+        m["debug"] = lambda *a, **k: None
+        player.Position = StubPos(100, 100)
+
+        # A wall with a gap far to the south, so there IS a way round.
+        wall = set()
+        for y in range(80, 118):
+            wall.add((104, y))
+        fake = FakePathFinding(player, wall, bounds=30)
+        m["PathFinding"] = fake
+
+        direct = 8
+        goal = (108, 100)
+        path = m["path_to"](*goal)
+        check("a way round genuinely exists", bool(path), True)
+        check("and it is a long way round", len(path) > direct * 3, True)
+        check("so the spot is refused", m["reachable_spot"](goal[0], goal[1], 0),
+              None)
+    finally:
+        m["PathFinding"] = original_pf
+        m["debug"] = original_debug
+        player.Position = saved
+
+
+def test_spot_inside_rock_falls_back_to_a_neighbour(m):
+    """The grid is arithmetic, so spots land in walls. Take the tile beside it.
+
+    Writing the spot off would throw away ore that is perfectly reachable from
+    one tile over - the accept radius exists for exactly this.
+    """
+    player = m["Player"]
+    saved = player.Position
+    original_pf = m["PathFinding"]
+    original_debug = m["debug"]
+    try:
+        m["debug"] = lambda *a, **k: None
+        player.Position = StubPos(100, 100)
+
+        # A single boulder exactly where the grid wants us to stand.
+        fake = FakePathFinding(player, {(108, 100)}, bounds=20)
+        m["PathFinding"] = fake
+
+        got = m["reachable_spot"](108, 100, 1)
+        check("a neighbour is used instead of the blocked tile",
+              got is not None and got != (108, 100), True)
+        check("and it is within the accept radius",
+              max(abs(got[0] - 108), abs(got[1] - 100)) <= 1, True)
+    finally:
+        m["PathFinding"] = original_pf
+        m["debug"] = original_debug
+        player.Position = saved
+
+
+def test_walk_gives_up_when_it_stops_getting_closer(m):
+    """Progress is measured against the best distance reached, not the last.
+
+    A pathfinder working along a wall shuffles back and forth. "Did I move"
+    answers yes forever, so only "am I getting closer" can end it.
+    """
+    player = m["Player"]
+    saved = player.Position
+    original_pf = m["PathFinding"]
+    original_debug = m["debug"]
+    original_pause = m["interruptible_pause"]
+    try:
+        m["debug"] = lambda *a, **k: None
+        m["interruptible_pause"] = lambda *a, **k: None
+        player.Position = StubPos(100, 100)
+
+        shuffle = {"n": 0}
+
+        class Shuffler(FakePathFinding):
+            def Go(self, route):
+                # Moves, but never any closer - back and forth by one tile.
+                shuffle["n"] += 1
+                player.Position = StubPos(100 + (shuffle["n"] % 2), 100)
+                self.walked.append((route.X, route.Y))
+                return True
+
+        fake = Shuffler(player, bounds=30)
+        m["PathFinding"] = fake
+
+        # 30s of budget, but it must give up on stall long before that.
+        check("gives up rather than burning the timeout",
+              m["walk_to"](120, 100, 30000, 0), False)
+        check("and did not shuffle forever",
+              len(fake.walked) <= m["AREA_STALL_STEPS"] + 2, True)
+    finally:
+        m["PathFinding"] = original_pf
+        m["debug"] = original_debug
+        m["interruptible_pause"] = original_pause
+        player.Position = saved
+
+
+def test_walk_config_is_sane(m):
+    check("a detour cap is set", m["AREA_MAX_DETOUR"] >= 1, True)
+    check("the cap is not so loose it is meaningless",
+          m["AREA_MAX_DETOUR"] <= 5, True)
+    check("stall steps are bounded", 1 <= m["AREA_STALL_STEPS"] <= 20, True)
+
+def test_ingot_key_has_the_same_options_as_wood_storage(m):
+    """Both keys must be configurable the same way.
+
+    The ingot key had no top-level settings at all - it existed only as a
+    literal buried in RESTOCK_KEYS, so the one thing three of the four mining
+    characters rely on could not be pointed anywhere without editing a list
+    halfway down the file.
+    """
+    for suffix in ("WHERE", "SERIAL", "ID", "HUE", "RANGE", "NAMES"):
+        check("INGOT_KEY_%s exists" % suffix,
+              ("INGOT_KEY_%s" % suffix) in m, True)
+        check("WOOD_STORAGE_%s exists" % suffix,
+              ("WOOD_STORAGE_%s" % suffix) in m, True)
+
+    check("the ingot key can be switched off", "INGOT_KEY_ENABLED" in m, True)
+
+    # Same shape of value, so the two behave the same way.
+    check("both search the same kind of place",
+          m["INGOT_KEY_WHERE"] in ("pack", "world")
+          and m["WOOD_STORAGE_WHERE"] in ("pack", "world"), True)
+    check("both accept any colour",
+          (m["INGOT_KEY_HUE"], m["WOOD_STORAGE_HUE"]), (-1, -1))
+    check("both carry name hints",
+          bool(m["INGOT_KEY_NAMES"]) and bool(m["WOOD_STORAGE_NAMES"]), True)
+
+
+def test_ingot_key_entry_is_built_from_the_settings(m):
+    """The RESTOCK_KEYS entry must READ the settings, not restate them.
+
+    A literal in the list is how the two drifted apart: the settings said one
+    thing and the entry the script actually uses said another.
+    """
+    entry = [k for k in m["RESTOCK_KEYS"] if k.get("label") == "Ingot key"]
+    check("one ingot key entry", len(entry), 1)
+    entry = entry[0]
+
+    check("serial tracks the setting", entry.get("serial"), m["INGOT_KEY_SERIAL"])
+    check("id tracks the setting", entry.get("id"), m["INGOT_KEY_ID"])
+    check("hue tracks the setting", entry.get("hue"), m["INGOT_KEY_HUE"])
+    check("where tracks the setting", entry.get("where"), m["INGOT_KEY_WHERE"])
+    check("range tracks the setting", entry.get("range"), m["INGOT_KEY_RANGE"])
+    check("names track the setting", entry.get("names"), m["INGOT_KEY_NAMES"])
+    check("enabled tracks the setting",
+          entry.get("enabled"), m["INGOT_KEY_ENABLED"])
+
+
+def test_ingot_key_found_at_any_hue(m):
+    """A key of an unexpected colour must still be found, like the wood one."""
+    entry = [k for k in m["RESTOCK_KEYS"] if k.get("label") == "Ingot key"][0]
+    spec = dict(entry)
+    spec["serial"] = 0
+    spec["where"] = "pack"
+
+    for hue in (0x0014, 0x0000, 0x0058, 0x08FD):
+        ITEMS.reset()
+        ITEMS.register(StubWorldItem(0x40005678, 0x1BE8, hue, "Ingot Keys"),
+                       "pack")
+        check("ingot key found at hue 0x%04X" % hue,
+              [i.Serial for i in m["find_restock"](spec)], [0x40005678])
+
+    # Switched off means not used at all, whatever is in the pack.
+    ITEMS.reset()
+    ITEMS.register(StubWorldItem(0x40005678, 0x1BE8, 0x0014, "Ingot Keys"),
+                   "pack")
+    off = dict(spec)
+    off["enabled"] = False
+    check("disabled key is not looked for", m["find_restock"](off), [])
+    ITEMS.reset()
+
+def test_store_at_ninety_percent(m):
+    """Store once 90% of carry weight is used - reported in game as packs
+    filling right up with ingots."""
+    player = m["Player"]
+    saved = (player.Weight, player.MaxWeight)
+    original_log = m["log"]
+    m["_max_yield"].clear()
+    try:
+        m["log"] = lambda *a, **k: None
+        check("the store level is 90%", m["PACK_STORE_AT"], 0.90)
+
+        player.Weight, player.MaxWeight = 400, 495       # 81%
+        check("keeps working at 81%", m["pack_has_room"](), True)
+
+        player.Weight, player.MaxWeight = 445, 495       # 89.9%
+        check("still working just under 90%", m["pack_has_room"](), True)
+
+        player.Weight, player.MaxWeight = 446, 495       # 90.1%
+        check("stores at 90%", m["pack_has_room"](), False)
+
+        player.Weight, player.MaxWeight = 490, 495
+        check("and stays full above it", m["pack_has_room"](), False)
+    finally:
+        m["log"] = original_log
+        player.Weight, player.MaxWeight = saved
+        m["_max_yield"].clear()
+
+
+def test_reserve_still_backstops_a_heavy_yield(m):
+    """Under 90%, one more yield that would go OVER must still stop it.
+
+    Going over means the server refuses the resource outright and it is lost,
+    so the measured reserve stays as a backstop beneath the percentage.
+    """
+    player = m["Player"]
+    saved = (player.Weight, player.MaxWeight)
+    original_log = m["log"]
+    original_debug = m["debug"]
+    m["_max_yield"].clear()
+    try:
+        m["log"] = lambda *a, **k: None
+        m["debug"] = lambda *a, **k: None
+
+        # 88% used - under the store level, so the percentage alone allows it.
+        player.Weight, player.MaxWeight = 436, 495
+        check("percentage alone would carry on", m["pack_has_room"](), True)
+
+        # Now we have seen a 60-stone yield: 59 free is not enough for another.
+        m["note_yield"]("mine", 60)
+        check("but a heavy yield stops it short", m["pack_has_room"](), False)
+    finally:
+        m["log"] = original_log
+        m["debug"] = original_debug
+        player.Weight, player.MaxWeight = saved
+        m["_max_yield"].clear()
+
+
+def test_bank_of_groups_tiles_the_way_the_server_does(m):
+    """A bank is the unit that depletes, so the sweep has to think in banks."""
+    w, h = m["LUMBER_BANK_W"], m["LUMBER_BANK_H"]
+
+    # Everything inside one 4x3 block is the same bank.
+    check("same wood bank across its width",
+          m["bank_of"](0, 0, w, h), m["bank_of"](3, 0, w, h))
+    check("same wood bank across its height",
+          m["bank_of"](0, 0, w, h), m["bank_of"](0, 2, w, h))
+    # One tile past it is not.
+    check("a step of the bank width leaves it",
+          m["bank_of"](0, 0, w, h) == m["bank_of"](4, 0, w, h), False)
+    check("a step of the bank height leaves it",
+          m["bank_of"](0, 0, w, h) == m["bank_of"](0, 3, w, h), False)
+
+    # THE BUG: the old step of 3 stayed inside a 4-wide bank.
+    check("the old step of 3 did NOT leave the bank",
+          m["bank_of"](0, 0, w, h) == m["bank_of"](3, 0, w, h), True)
+
+    b = m["MINE_BANK"]
+    check("ore banks are 8 wide",
+          m["bank_of"](0, 0, b, b) == m["bank_of"](7, 7, b, b), True)
+    check("and 8 tiles clears one",
+          m["bank_of"](0, 0, b, b) == m["bank_of"](8, 0, b, b), False)
+
+
+def test_depleted_match_survives_the_apostrophe(m):
+    """500493 is "There's not enough wood here to harvest."
+
+    Matching the leading "There's" makes the whole thing depend on whether the
+    apostrophe is ASCII or typographic - and a mismatch fails SILENTLY: the
+    line never matches, the swing times out instead, and every depleted spot
+    costs a full timeout of standing still. Which is what was reported.
+    """
+    for text in m["LUMBER_DEPLETED"]:
+        check("no apostrophe in %r" % text, "'" in text or "\u2019" in text,
+              False)
+
+    phrase = m["LUMBER_DEPLETED"][0].lower()
+    for wording in ("There's not enough wood here to harvest.",
+                    "There\u2019s not enough wood here to harvest.",
+                    "there's not enough wood here to harvest"):
+        check("matches %r" % wording[:18], phrase in wording.lower(), True)
+
+    # Still specific enough not to fire on an ordinary success line.
+    check("does not match a successful chop",
+          phrase in "You put 12 logs in your backpack.".lower(), False)
+
+def test_spot_cap_is_a_real_bound(m):
+    """15 seconds at one spot, then move on - reported as a miner wedged
+    against a cave wall and staying there."""
+    check("the cap is 15 seconds", m["AREA_SPOT_TIMEOUT_MS"], 15000)
+
+    # Before this, a spot could hold the character for swings x timeout.
+    worst_mine = m["MINE_AREA_MAX_SWINGS"] * m["MINE_SWING_TIMEOUT"]
+    worst_lumber = m["LUMBER_AREA_MAX_SWINGS"] * m["LUMBER_SWING_TIMEOUT"]
+    check("the cap is far below the old mining worst case",
+          m["AREA_SPOT_TIMEOUT_MS"] < worst_mine, True)
+    check("and below the old lumber worst case",
+          m["AREA_SPOT_TIMEOUT_MS"] < worst_lumber, True)
+
+    # Walking must SHARE the budget, not add to it, or the cap caps nothing.
+    check("a move timeout alone cannot exceed the cap",
+          max(m["MINE_AREA_MOVE_TIMEOUT"], m["LUMBER_AREA_MOVE_TIMEOUT"])
+          <= m["AREA_SPOT_TIMEOUT_MS"], True)
+
+
+def test_budget_shares_the_spot_deadline(m):
+    """budget_ms hands out what is LEFT, so walk + swing stay inside the cap."""
+    now = m["time"].time()
+
+    # Plenty of time left -> capped by the caller's own limit.
+    check("capped by the caller's limit",
+          m["budget_ms"](now + 100, 8000), 8000)
+
+    # Nearly out of time -> the caller gets what remains, not its full limit.
+    got = m["budget_ms"](now + 2.0, 12000)
+    check("gets only what is left", 1000 < got <= 2100, True)
+
+    # Out of time -> never zero. A walk given no time reads as instant failure
+    # and would mark a good spot dead.
+    check("never returns zero", m["budget_ms"](now - 10, 12000), 500)
+
+
+def test_spot_deadline_stops_the_swing_loop(m):
+    """A spot that keeps answering must still be abandoned at the cap."""
+    calls = {"n": 0}
+    original_chop = m["chop_once"]
+    original_pack = m["pack_has_room"]
+    original_log = m["log"]
+    original_debug = m["debug"]
+    original_pause = m["interruptible_pause"]
+    try:
+        # Always "ok", so nothing but the deadline can end this loop.
+        m["chop_once"] = lambda axe, timeout: "ok"
+        m["pack_has_room"] = lambda *a: True
+        m["log"] = lambda *a, **k: None
+        m["debug"] = lambda *a, **k: None
+        m["interruptible_pause"] = lambda *a, **k: calls.__setitem__("n", calls["n"] + 1)
+
+        state = {"cut": 0, "silent": 0, "dead": set(), "spent": set()}
+        # A deadline that has already passed: it must stop at once.
+        out = m["work_spot"](None, 0, 9, state, m["time"].time() - 1)
+        check("expired deadline stops immediately", out, "")
+        check("and took no swings", state["cut"], 0)
+
+        # Without a deadline the swing cap still bounds it.
+        state = {"cut": 0, "silent": 0, "dead": set(), "spent": set()}
+        m["work_spot"](None, 0, 9, state, None)
+        check("swing cap still bounds an endless spot",
+              state["cut"], m["LUMBER_AREA_MAX_SWINGS"])
+    finally:
+        m["chop_once"] = original_chop
+        m["pack_has_room"] = original_pack
+        m["log"] = original_log
+        m["debug"] = original_debug
+        m["interruptible_pause"] = original_pause
+
+
+def test_mine_spot_honours_the_deadline_too(m):
+    """The miner is the one that got stuck, so assert it explicitly."""
+    original_dig = m["dig_once"]
+    original_pack = m["pack_has_room"]
+    original_smelt = m["smelt"]
+    original_log = m["log"]
+    original_debug = m["debug"]
+    original_pause = m["interruptible_pause"]
+    try:
+        m["dig_once"] = lambda shovel, timeout: "ok"
+        m["pack_has_room"] = lambda *a: True
+        m["smelt"] = lambda *a: None
+        m["log"] = lambda *a, **k: None
+        m["debug"] = lambda *a, **k: None
+        m["interruptible_pause"] = lambda *a, **k: None
+
+        state = {"dug": 0, "silent": 0, "dead": set(), "spent": set()}
+        out = m["mine_spot"](None, 0, 25, state, m["time"].time() - 1)
+        check("expired deadline stops the miner at once", out, "")
+        check("and it dug nothing", state["dug"], 0)
+    finally:
+        m["dig_once"] = original_dig
+        m["pack_has_room"] = original_pack
+        m["smelt"] = original_smelt
+        m["log"] = original_log
+        m["debug"] = original_debug
+        m["interruptible_pause"] = original_pause
+
+def test_idle_watchdog_abandons_a_barren_rune(m):
+    """Producing NOTHING anywhere must abandon the rune, not just the spot.
+
+    The spot cap and this are different failures. A character wedged against a
+    cave wall passes the spot cap happily - it moves on every 15 seconds, to
+    another spot behind the same wall. On a 25-spot mining grid that is six
+    minutes of looking busy and harvesting nothing.
+    """
+    check("an idle limit is set", m["AREA_IDLE_TIMEOUT_MS"] > 0, True)
+    check("it is longer than one spot's cap",
+          m["AREA_IDLE_TIMEOUT_MS"] > m["AREA_SPOT_TIMEOUT_MS"], True)
+
+    # A whole barren mining grid must not outlast it.
+    spots = len(m["area_offsets"](m["MINE_AREA_RADIUS"] * 2,
+                                  m["MINE_AREA_STEP"])) ** 2
+    worst = spots * m["AREA_SPOT_TIMEOUT_MS"]
+    check("it cuts a barren grid far short of the spot caps alone",
+          m["AREA_IDLE_TIMEOUT_MS"] < worst, True)
+
+    state = {"last_yield": m["time"].time()}
+    check("fresh state is not idle", m["area_is_idle"](state), False)
+
+    state = {"last_yield": m["time"].time()
+             - (m["AREA_IDLE_TIMEOUT_MS"] / 1000.0) - 1}
+    check("nothing harvested for the limit is idle",
+          m["area_is_idle"](state), True)
+
+    # A yield resets it, so a slow but productive area is never interrupted.
+    m["note_area_yield"](state)
+    check("a yield resets the clock", m["area_is_idle"](state), False)
+
+    # Missing key must not throw - it just means "not idle yet".
+    check("no clock yet is not idle", m["area_is_idle"]({}), False)
+
+
+def test_idle_clock_restarts_after_a_trip_home(m):
+    """A full pack sends the character home and back, which outlasts the limit.
+
+    Without a restart a PRODUCTIVE rune would be abandoned the instant it
+    returned, purely because the clock kept running during the trip.
+    """
+    original_log = m["log"]
+    original_debug = m["debug"]
+    try:
+        m["log"] = lambda *a, **k: None
+        m["debug"] = lambda *a, **k: None
+
+        # A sweep that produced something long ago, as if it had just come back
+        # from a slow drop-off run.
+        stale = m["time"].time() - (m["AREA_IDLE_TIMEOUT_MS"] / 1000.0) - 30
+        key = ("Lumberjacking", -1)
+        m["_lumber_sweep"][key] = {
+            "origin": (100, 200), "next": 3, "dead": set(), "spent": set(),
+            "cut": 5, "silent": 0, "last_yield": stale,
+        }
+        check("that state IS stale to begin with",
+              m["area_is_idle"](m["_lumber_sweep"][key]), True)
+
+        # Re-entering the sweep must restart the clock before it is tested.
+        m["note_area_yield"](m["_lumber_sweep"][key])
+        check("and re-entry clears it",
+              m["area_is_idle"](m["_lumber_sweep"][key]), False)
+    finally:
+        m["log"] = original_log
+        m["debug"] = original_debug
+        m["_lumber_sweep"].clear()
+
+
+def test_end_sweep_restarts_the_idle_clock(m):
+    """Finishing an area must not leave the next visit condemned."""
+    state = {"next": 4, "origin": (1, 2), "cut": 3, "silent": 1,
+             "spent": set([(0, 0)]), "dead": set([2]),
+             "last_yield": m["time"].time() - 9999}
+    m["end_sweep"](state)
+    check("idle clock restarted", m["area_is_idle"](state), False)
+    check("spent banks forgotten - wood grows back", state["spent"], set())
+    check("dead ground remembered - it stays bare", state["dead"], set([2]))
+    check("origin dropped so it is re-read", state["origin"], None)
+    check("walk restarts", state["next"], 0)
+
+def test_path_leg_has_an_explicit_timeout(m):
+    """Route.Timeout MUST be set. Unset means no limit, and PathFinding.Go then
+    blocks - which takes every other guard in the file out of play, because
+    they all run between calls to it. Three rounds of stuck reports came down
+    to this.
+    """
+    check("a leg timeout is configured", m["PATH_LEG_TIMEOUT_S"] > 0, True)
+    check("and it is short", m["PATH_LEG_TIMEOUT_S"] <= 10, True)
+
+    seen = {}
+
+    class RecordingPathFinding(object):
+        class Route(object):
+            pass
+
+        def Go(self, route):
+            seen["timeout"] = getattr(route, "Timeout", None)
+            seen["stop_if_stuck"] = getattr(route, "StopIfStuck", None)
+            return True
+
+    original = m["PathFinding"]
+    try:
+        m["PathFinding"] = RecordingPathFinding()
+        m["pathfind_to"](10, 20)
+        check("Go was given an explicit timeout",
+              seen.get("timeout"), m["PATH_LEG_TIMEOUT_S"])
+        check("never the -1 that means no limit",
+              seen.get("timeout") in (None, -1), False)
+        check("and still stops if stuck", seen.get("stop_if_stuck"), True)
+    finally:
+        m["PathFinding"] = original
+
+
+def test_impassable_ground_is_refused_without_pathfinding(m):
+    """The pathfinder routes into unexplored blackness. Ask the land first."""
+    player = m["Player"]
+    saved = player.Position
+    original_statics = m["Statics"]
+    original_pf = m["PathFinding"]
+    original_debug = m["debug"]
+
+    asked = {"paths": 0}
+
+    class VoidStatics(object):
+        def GetLandID(self, x, y, world):
+            return 0x0002 if x >= 104 else 0x0003
+
+        def GetLandFlag(self, land, flag):
+            return land == 0x0002 and flag == "Impassable"
+
+        def GetStaticsTileInfo(self, x, y, world):
+            return []
+
+    class CountingPathFinding(object):
+        class Route(object):
+            pass
+
+        def Go(self, route):
+            return True
+
+        def GetPath(self, x, y, ignoremob):
+            asked["paths"] += 1
+            return [(x, y)]        # claims a path to anywhere
+
+    try:
+        m["debug"] = lambda *a, **k: None
+        player.Position = StubPos(100, 100)
+        m["Statics"] = VoidStatics()
+        m["PathFinding"] = CountingPathFinding()
+
+        check("impassable land is not walkable", m["land_is_walkable"](105, 100),
+              False)
+        check("ordinary land is", m["land_is_walkable"](102, 100), True)
+
+        # The void is refused BEFORE the pathfinder is consulted, so its
+        # imaginary path is never even offered.
+        asked["paths"] = 0
+        check("void destination refused", m["reachable_spot"](105, 100, 0), None)
+        check("and the pathfinder was never asked", asked["paths"], 0)
+
+        # Real ground still goes through normally.
+        check("real ground accepted", m["reachable_spot"](102, 100, 0),
+              (102, 100))
+    finally:
+        m["Statics"] = original_statics
+        m["PathFinding"] = original_pf
+        m["debug"] = original_debug
+        player.Position = saved
+
+
+def test_rooted_on_one_tile_gives_up(m):
+    """Not moving at all, while trying to walk, is the failure - whatever the
+    pathfinder claims. This needs no theory about why."""
+    player = m["Player"]
+    saved = player.Position
+    try:
+        player.Position = StubPos(50, 50)
+        first = m["seconds_on_this_tile"]()
+        check("a fresh tile reads zero", first, 0.0)
+        check("staying put accumulates",
+              m["seconds_on_this_tile"]() >= 0.0, True)
+
+        # Moving resets it.
+        player.Position = StubPos(51, 50)
+        check("moving resets the clock", m["seconds_on_this_tile"](), 0.0)
+    finally:
+        player.Position = saved
+
+
+def test_stuck_config_is_ordered_sensibly(m):
+    """Each guard has to be able to fire before the one above it gives up."""
+    check("a leg is shorter than a spot",
+          m["PATH_LEG_TIMEOUT_S"] * 1000 < m["AREA_SPOT_TIMEOUT_MS"], True)
+    check("rooted-while-walking fires before the idle limit",
+          m["AREA_STUCK_TIMEOUT_MS"] < m["AREA_IDLE_TIMEOUT_MS"], True)
+
+def test_a_productive_spot_is_worked_until_depleted(m):
+    """Mining that is WORKING must not be cut off - deplete the bank, then move.
+
+    The 15s cap started life absolute, and that abandoned banks half-mined. A
+    swing that produces ore is not being stuck, so it pushes the clock out.
+    """
+    replies = {"n": 0}
+    original = {k: m[k] for k in
+                ("dig_once", "pack_has_room", "smelt", "log", "debug",
+                 "interruptible_pause")}
+    try:
+        # 30 productive swings, then the bank reports empty - a full bank.
+        def digging(shovel, timeout, mythril=None):
+            replies["n"] += 1
+            return "ok" if replies["n"] <= 30 else "empty"
+
+        m["dig_once"] = digging
+        m["pack_has_room"] = lambda *a: True
+        m["smelt"] = lambda *a: None
+        m["log"] = lambda *a, **k: None
+        m["debug"] = lambda *a, **k: None
+        m["interruptible_pause"] = lambda *a, **k: None
+
+        state = {"dug": 0, "silent": 0, "dead": set(), "spent": set(),
+                 "last_yield": m["time"].time()}
+        # A deadline that would have expired after the first swing if it were
+        # absolute. Every yield must push it out.
+        m["mine_spot"](None, 0, 25, state,
+                       m["time"].time() + (m["AREA_SPOT_TIMEOUT_MS"] / 1000.0))
+
+        check("worked the whole bank, not part of it", state["dug"], 30)
+        check("and stopped because it was EMPTY, not on the clock",
+              replies["n"], 31)
+        check("the bank was recorded as spent", len(state["spent"]), 1)
+    finally:
+        for k, v in original.items():
+            m[k] = v
+
+
+def test_swing_caps_clear_a_full_bank(m):
+    """The absolute backstop must sit above a full bank, or it truncates it."""
+    # Mining.cs: 10-34 per bank. Lumberjacking.cs: 20-45.
+    check("mining cap clears a 34-ore bank with misses to spare",
+          m["MINE_AREA_MAX_SWINGS"] >= 34 * 2, True)
+    check("lumber cap clears a 45-log bank with misses to spare",
+          m["LUMBER_AREA_MAX_SWINGS"] >= 45 * 2, True)
+
+
+def test_an_unproductive_spot_still_gives_up(m):
+    """The other half: moved, then no mining happened. That IS stuck."""
+    original = {k: m[k] for k in
+                ("dig_once", "pack_has_room", "smelt", "log", "debug",
+                 "interruptible_pause")}
+    try:
+        # Always answers, never yields - the clock is never pushed out.
+        m["dig_once"] = lambda shovel, timeout: "silent"
+        m["pack_has_room"] = lambda *a: True
+        m["smelt"] = lambda *a: None
+        m["log"] = lambda *a, **k: None
+        m["debug"] = lambda *a, **k: None
+        m["interruptible_pause"] = lambda *a, **k: None
+
+        state = {"dug": 0, "silent": 0, "dead": set(), "spent": set(),
+                 "last_yield": m["time"].time()}
+        out = m["mine_spot"](None, 0, 25, state, m["time"].time() - 1)
+        check("an unproductive spot is abandoned", out, "")
+        check("and it dug nothing", state["dug"], 0)
+    finally:
+        for k, v in original.items():
+            m[k] = v
+
+
+def test_lumber_spot_also_runs_to_depletion(m):
+    """Same rule on the wood side."""
+    replies = {"n": 0}
+    original = {k: m[k] for k in
+                ("chop_once", "pack_has_room", "log", "debug",
+                 "interruptible_pause")}
+    try:
+        def chopping(axe, timeout):
+            replies["n"] += 1
+            return "ok" if replies["n"] <= 40 else "empty"
+
+        m["chop_once"] = chopping
+        m["pack_has_room"] = lambda *a: True
+        m["log"] = lambda *a, **k: None
+        m["debug"] = lambda *a, **k: None
+        m["interruptible_pause"] = lambda *a, **k: None
+
+        state = {"cut": 0, "silent": 0, "dead": set(), "spent": set(),
+                 "last_yield": m["time"].time()}
+        m["work_spot"](None, 0, 9, state,
+                       m["time"].time() + (m["AREA_SPOT_TIMEOUT_MS"] / 1000.0))
+        check("chopped the whole bank", state["cut"], 40)
+        check("stopped on empty, not the clock", replies["n"], 41)
+    finally:
+        for k, v in original.items():
+            m[k] = v
+
+class SkipEntry(object):
+    def __init__(self, text, serial=0, name="", stamp=1.0):
+        self.Text = text
+        self.Serial = serial
+        self.Name = name
+        self.Timestamp = stamp
+
+
+def feed_journal(m, entries):
+    """Replace the journal reader with a fixed list, once."""
+    served = {"done": False}
+
+    def once():
+        if served["done"]:
+            return []
+        served["done"] = True
+        return entries
+    m["new_journal_entries"] = once
+
+
+def test_skip_only_from_the_running_character(m):
+    """Several dummy accounts run at once - each must skip only itself."""
+    original = {k: m[k] for k in ("new_journal_entries", "log", "debug")}
+    player = m["Player"]
+    try:
+        m["log"] = lambda *a, **k: None
+        m["debug"] = lambda *a, **k: None
+        m["_skip_pending"] = False
+
+        # Said by THIS character - matched on the journal entry's Serial.
+        feed_journal(m, [SkipEntry("skip", serial=player.Serial,
+                                   name=player.Name)])
+        check("own character skips", m["poll_skip"](), True)
+        check("and the flag is consumed once", m["take_skip"](), True)
+        check("only once", m["take_skip"](), False)
+
+        # Said by a DIFFERENT character - must not move this one.
+        m["_skip_pending"] = False
+        feed_journal(m, [SkipEntry("skip", serial=0x0BADF00D,
+                                   name="Mystic Gatherer")])
+        check("another character does not skip this one",
+              m["poll_skip"](), False)
+
+        # Global chat form, another player entirely.
+        m["_skip_pending"] = False
+        feed_journal(m, [SkipEntry("System: <Public> Fred Kruger: skip",
+                                   serial=0, name="System")])
+        check("global chat from someone else is ignored",
+              m["poll_skip"](), False)
+    finally:
+        for k, v in original.items():
+            m[k] = v
+        m["_skip_pending"] = False
+
+
+def test_skip_matches_the_whole_line_not_a_substring(m):
+    """"skip" is an ordinary word - it must not fire inside other text."""
+    original = {k: m[k] for k in ("new_journal_entries", "log", "debug")}
+    player = m["Player"]
+    try:
+        m["log"] = lambda *a, **k: None
+        m["debug"] = lambda *a, **k: None
+
+        for text, want in (
+                ("skip", True),
+                ("Skip", True),
+                ("SKIP", True),
+                ("skip.", True),
+                ("  skip  ", True),
+                ("skip this vein", False),
+                ("I will skip the next one", False),
+                ("skipping", False),
+                ("You cannot skip that", False),
+        ):
+            m["_skip_pending"] = False
+            feed_journal(m, [SkipEntry(text, serial=player.Serial,
+                                       name=player.Name)])
+            check("%-28r -> %s" % (text, want), m["poll_skip"](), want)
+    finally:
+        for k, v in original.items():
+            m[k] = v
+        m["_skip_pending"] = False
+
+
+def test_one_journal_pass_feeds_every_trigger(m):
+    """Reading the journal CONSUMES it, so there can only be one reader.
+
+    Two pollers each calling new_journal_entries would steal lines from each
+    other and both would miss things at random.
+    """
+    original = {k: m[k] for k in ("new_journal_entries", "log", "debug")}
+    player = m["Player"]
+    try:
+        m["log"] = lambda *a, **k: None
+        m["debug"] = lambda *a, **k: None
+        m["_skip_pending"] = False
+        m["_greyskull_pending"] = False
+
+        # Both triggers arrive in the SAME batch of lines.
+        feed_journal(m, [
+            SkipEntry("System: <Public> Fred Kruger: By The Power Of Greyskull!"),
+            SkipEntry("skip", serial=player.Serial, name=player.Name),
+        ])
+        m["scan_journal"]()
+        check("the call-out was seen", m["_greyskull_pending"], True)
+        check("and so was the skip, from the same pass",
+              m["_skip_pending"], True)
+    finally:
+        for k, v in original.items():
+            m[k] = v
+        m["_skip_pending"] = False
+        m["_greyskull_pending"] = False
+
+
+def test_skip_is_configured_for_separate_characters(m):
+    check("self-only is the default", m["SKIP_SELF_ONLY"], True)
+    check("skip is the phrase", [p.lower() for p in m["SKIP_PHRASES"]],
+          ["skip"])
+
+def test_stone_storage_has_the_same_options_as_the_other_keys(m):
+    """Granite needs a key like wood and ingots, or it goes to the ONE-WAY chest."""
+    for suffix in ("ENABLED", "WHERE", "SERIAL", "ID", "HUE", "RANGE", "NAMES"):
+        check("STONE_STORAGE_%s exists" % suffix,
+              ("STONE_STORAGE_%s" % suffix) in m, True)
+
+    check("stone storage graphic", m["STONE_STORAGE_ID"], 0xA54A)
+    check("any colour", m["STONE_STORAGE_HUE"], -1)
+    check("it carries name hints", bool(m["STONE_STORAGE_NAMES"]), True)
+
+
+def test_stone_storage_entry_is_built_from_the_settings(m):
+    """It shipped as an unnamed "Key (alt)" on this graphic - the same key all
+    along, single-clicked without anyone knowing what it was."""
+    entry = [k for k in m["RESTOCK_KEYS"] if k.get("label") == "Stone Storage"]
+    check("one stone storage entry", len(entry), 1)
+    entry = entry[0]
+    for field, setting in (("serial", "STONE_STORAGE_SERIAL"),
+                           ("id", "STONE_STORAGE_ID"),
+                           ("hue", "STONE_STORAGE_HUE"),
+                           ("where", "STONE_STORAGE_WHERE"),
+                           ("range", "STONE_STORAGE_RANGE"),
+                           ("names", "STONE_STORAGE_NAMES"),
+                           ("enabled", "STONE_STORAGE_ENABLED")):
+        check("%s tracks the setting" % field, entry.get(field), m[setting])
+
+    check("the anonymous Key (alt) is gone",
+          any(k.get("label") == "Key (alt)" for k in m["RESTOCK_KEYS"]), False)
+
+
+def test_granite_is_kept_out_of_the_one_way_chest(m):
+    """0x1779 is in PURGE_ID, so without a KEY_BACKED_IDS line every piece
+    mined would be swept into the chest even with the key in the pack."""
+    check("granite is swept by default", 0x1779 in m["PURGE_ID"], True)
+
+    backed = dict((spec["label"], spec["ids"]) for spec in m["KEY_BACKED_IDS"])
+    check("granite is claimed by the Stone Storage",
+          0x1779 in backed.get("Stone Storage", []), True)
+
+    # With the key in reach, granite must NOT be in the chest sweep.
+    original = m["keys_in_reach"]
+    try:
+        m["keys_in_reach"] = lambda wanted=None: set(["Stone Storage"])
+        ids, blocked, _here = m["chest_sweep_ids"]()
+        check("granite is held back", 0x1779 in ids, False)
+        check("and the reason is named", "Stone Storage" in blocked, True)
+
+        # With no key, it goes to the chest as before.
+        m["keys_in_reach"] = lambda wanted=None: set()
+        ids, blocked, _here = m["chest_sweep_ids"]()
+        check("without the key it is swept", 0x1779 in ids, True)
+    finally:
+        m["keys_in_reach"] = original
+
+
+def test_stone_storage_is_off_for_everyone_by_default(m):
+    """Only one character mines stone. The repo copy is the template."""
+    check("disabled in the shipped template", m["STONE_STORAGE_ENABLED"], False)
+    check("and carries no serial", m["STONE_STORAGE_SERIAL"], 0)
+
+    entry = [k for k in m["RESTOCK_KEYS"]
+             if k.get("label") == "Stone Storage"][0]
+    check("a disabled key is never looked for", m["find_restock"](entry), [])
+
+def test_every_key_with_work_gets_a_turn(m):
+    """Granite was stranded: the Ingot key freed the pack and the run ENDED.
+
+    refill_keys used to return the moment there was room, and the Stone
+    Storage is last in the list. Ingots are heavy, so the pack was always
+    freed before granite was ever offered to its key - and KEY_BACKED_IDS
+    (rightly) keeps granite out of the one-way chest too, so it simply
+    accumulated in the pack for ever.
+    """
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def refill_keys("):src.index("def smelt(")]
+
+    # The early return must be GUARDED by "is there still work", not by room
+    # alone. A bare `if pack_has_room(): return True` is the bug.
+    check("the early return is guarded by outstanding work",
+          "if pack_has_room() and not any_key_has_work():" in body, True)
+    check("and there is no unguarded room-only return",
+          "    if pack_has_room():\n        return True" in body, False)
+    check("it asks whether any key still has work",
+          "any_key_has_work()" in body, True)
+    check("and skips only keys with nothing of their own left",
+          "not key_has_work(label)" in body, True)
+
+
+def test_key_has_work_looks_only_at_its_own_resources(m):
+    """Each key answers for the graphics KEY_BACKED_IDS gives it."""
+    ITEMS.reset()
+    try:
+        check("nothing in the pack means no work",
+              m["any_key_has_work"](), False)
+
+        # A lump of granite belongs to the Stone Storage and to nobody else.
+        granite = StubWorldItem(0x40000010, 0x1779, 0x0000, "granite")
+        granite.Container = StubItem.Serial
+        granite.RootContainer = StubItem.Serial
+        ITEMS.register(granite, "pack")
+
+        check("the Stone Storage has work", m["key_has_work"]("Stone Storage"),
+              True)
+        check("the Ingot key does not", m["key_has_work"]("Ingot key"), False)
+        check("the Wood Storage does not",
+              m["key_has_work"]("Wood Storage"), False)
+        check("so something has work", m["any_key_has_work"](), True)
+    finally:
+        ITEMS.reset()
+
+
+def test_a_key_we_know_nothing_about_is_still_offered(m):
+    """Only keys with a KEY_BACKED_IDS entry can be skipped as 'done'."""
+    check("the Stone Storage is known", m["known_key"]("Stone Storage"), True)
+    check("the Ingot key is known", m["known_key"]("Ingot key"), True)
+    check("the Master key is not", m["known_key"]("Master key"), False)
+
+
+def test_each_key_can_have_its_own_menu_entry(m):
+    """A storage whose menu words it differently must be configurable.
+
+    Every key shared one RESTOCK_CONTEXT, so a Stone Storage whose entry is
+    not "Refill from stock" could never be told to take anything.
+    """
+    for suffix in ("WOOD_STORAGE_CONTEXT", "INGOT_KEY_CONTEXT",
+                   "STONE_STORAGE_CONTEXT"):
+        check("%s exists" % suffix, suffix in m, True)
+
+    for label, cfg in (("Wood Storage", "WOOD_STORAGE_CONTEXT"),
+                       ("Ingot key", "INGOT_KEY_CONTEXT"),
+                       ("Stone Storage", "STONE_STORAGE_CONTEXT")):
+        entry = [k for k in m["RESTOCK_KEYS"] if k.get("label") == label][0]
+        check("%s tracks its own context" % label,
+              entry.get("context"), m[cfg])
+
+    # An empty override falls back to the shared entry rather than matching
+    # nothing at all.
+    check("the shared entry is still there",
+          m["RESTOCK_CONTEXT"], ["Refill from stock"])
+
+
+def test_context_constants_are_declared_before_the_table(m):
+    """Module code runs top to bottom.
+
+    RESTOCK_KEYS reads these inside a literal, so they have to be above it -
+    the first version put them below and the script raised NameError on load.
+    Nothing in the test suite would have caught that; tools/check_undefined_names.py
+    now does.
+    """
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    for name in ("RESTOCK_CONTEXT", "WOOD_STORAGE_CONTEXT",
+                 "INGOT_KEY_CONTEXT", "STONE_STORAGE_CONTEXT"):
+        check("%s is declared before RESTOCK_KEYS" % name,
+              src.index("\n%s = " % name) < src.index("\nRESTOCK_KEYS = ["),
+              True)
+
+def test_the_whole_main_block_is_inside_the_handler(m):
+    """A Razor script that raises prints one line and stops - the traceback is
+    gone before it can be read. Nothing may escape uncaught."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    main_block = src[src.index('if __name__ == "__main__":'):]
+
+    check("the body opens with a try", "\n    try:\n" in main_block, True)
+    check("and ends with a handler",
+          "except Exception as _err:" in main_block, True)
+    check("SystemExit still gets through",
+          "except SystemExit:" in main_block, True)
+    check("the handler reports rather than swallowing",
+          "report_crash(_err)" in main_block, True)
+
+    # Nothing at the top level of the block outside the try - a statement at
+    # four spaces that is not part of the try would run unprotected.
+    body = main_block.split("\n", 1)[1]
+    stray = [ln for ln in body.split("\n")
+             if ln.startswith("    ") and not ln.startswith("        ")
+             and ln.strip() and not ln.strip().startswith("#")
+             and ln.strip() not in ("try:", "except SystemExit:",
+                                    "raise", "else:")
+             and not ln.strip().startswith("except ")]
+    check("nothing runs outside the handler", stray, [])
+
+
+def test_the_trail_keeps_the_last_lines_only(m):
+    """The breadcrumb trail must be bounded - it runs for hours."""
+    original = m["Misc"]
+    try:
+        class Quiet(object):
+            def SendMessage(self, *a):
+                pass
+        m["Misc"] = Quiet()
+        del m["_trail"][:]
+        for n in range(m["CRASH_TRAIL"] * 3):
+            m["log"]("line %d" % n)
+        check("the trail is capped", len(m["_trail"]), m["CRASH_TRAIL"])
+        check("and it keeps the NEWEST lines", m["_trail"][-1],
+              "line %d" % (m["CRASH_TRAIL"] * 3 - 1))
+    finally:
+        m["Misc"] = original
+        del m["_trail"][:]
+
+
+def test_crash_state_names_the_serials(m):
+    """The serials are the only thing that differs between the copies, so they
+    are the first suspect when one character crashes and the others do not."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def crash_state():"):src.index("def report_crash(")]
+    for name in ("WOOD_STORAGE_SERIAL", "INGOT_KEY_SERIAL",
+                 "STONE_STORAGE_SERIAL"):
+        check("%s is in the report" % name, name in body, True)
+    check("a serial that will not resolve is reported, not raised",
+          "reading it RAISED" in body, True)
+    check("and one that resolves shows what it is",
+          "id 0x%04X hue 0x%04X" in body, True)
+
+
+def test_crash_state_survives_a_broken_player(m):
+    """The reporter must not raise while reporting a crash."""
+    original = m["Player"]
+    try:
+        class Broken(object):
+            def __getattr__(self, name):
+                raise RuntimeError("client is gone")
+        m["Player"] = Broken()
+        rows = m["crash_state"]()
+        check("it still returned something", bool(rows), True)
+        check("and said the player could not be read",
+              any("could not be read" in r for r in rows), True)
+    finally:
+        m["Player"] = original
+
+class CountingMisc(object):
+    """Counts what actually reaches the client."""
+
+    def __init__(self):
+        self.sent = []
+
+    def SendMessage(self, text, hue=0, wait=False):
+        self.sent.append(text)
+
+    def Pause(self, *a):
+        pass
+
+
+def test_identical_lines_are_collapsed(m):
+    """Every log line is a packet INJECTED into the client.
+
+    MrGatherer's crash is ClassicUO's receive buffer overflowing in
+    Plugin.OnPluginRecv_new, and a burst of identical lines is the shape that
+    does it - pack_has_room() is a query called several times per key inside
+    refill_keys and announced itself every time.
+    """
+    original = m["Misc"]
+    counter = CountingMisc()
+    try:
+        m["Misc"] = counter
+        m["_last_line"].update({"text": "", "at": 0.0, "held": 0})
+        m["_rate"].update({"second": 0, "sent": 0})
+        del m["_trail"][:]
+
+        for _ in range(20):
+            m["log"]("Pack at 90% by WEIGHT: 445 of 495 stones - storing.")
+
+        check("twenty identical lines became one packet",
+              len([t for t in counter.sent if "Pack at 90%" in t]), 1)
+        check("but all twenty are in the crash trail",
+              len(m["_trail"]), 20)
+
+        # A different line reports how many were held.
+        m["log"]("something else")
+        check("the repeat count is reported",
+              any("repeated 19 more time" in t for t in counter.sent), True)
+    finally:
+        m["Misc"] = original
+        del m["_trail"][:]
+
+
+def test_a_flood_of_distinct_lines_is_capped(m):
+    """Dedupe does not help if every line is different - cap the rate too."""
+    original = m["Misc"]
+    counter = CountingMisc()
+    try:
+        m["Misc"] = counter
+        m["_last_line"].update({"text": "", "at": 0.0, "held": 0})
+        m["_rate"].update({"second": 0, "sent": 0})
+        del m["_trail"][:]
+
+        for n in range(200):
+            m["log"]("distinct line %d" % n)
+
+        cap = m["LOG_MAX_PER_SECOND"]
+        check("the client got no more than the cap",
+              len(counter.sent) <= cap + 2, True)
+        check("but every line is still in the trail for the crash report",
+              len(m["_trail"]), m["CRASH_TRAIL"])
+    finally:
+        m["Misc"] = original
+        del m["_trail"][:]
+
+
+def test_suppressing_a_line_never_hides_it_from_the_crash_report(m):
+    """The trail is the evidence - it must record what was suppressed."""
+    original = m["Misc"]
+    try:
+        m["Misc"] = CountingMisc()
+        m["_last_line"].update({"text": "", "at": 0.0, "held": 0})
+        m["_rate"].update({"second": 0, "sent": 0})
+        del m["_trail"][:]
+        for _ in range(10):
+            m["log"]("the line just before it died")
+        check("the trail kept every copy", len(m["_trail"]), 10)
+        check("and it is the right line", m["_trail"][-1],
+              "the line just before it died")
+    finally:
+        m["Misc"] = original
+        del m["_trail"][:]
+
+
+def test_rate_limit_is_configurable_and_sane(m):
+    check("a dedupe window is set", m["LOG_DEDUPE_MS"] > 0, True)
+    check("a per-second cap is set", m["LOG_MAX_PER_SECOND"] > 0, True)
+    check("the cap leaves room for normal logging",
+          m["LOG_MAX_PER_SECOND"] >= 8, True)
+
+def test_one_switch_turns_off_every_bulk_order(m):
+    """BOD_ENABLED = False must remove ALL bulk order work and nothing else."""
+    check("the switch exists and defaults on", m["BOD_ENABLED"], True)
+
+    original = m["BOD_ENABLED"]
+    try:
+        # With it ON, the BOD stops expand and the carpenter is served.
+        on = [v["label"] for v in m["all_vendors"]()]
+        check("BOD stops are expanded", any("@" in l for l in on), True)
+        check("the carpenter is served", "Carpenter" in on, True)
+
+        m["BOD_ENABLED"] = False
+        off = [v["label"] for v in m["all_vendors"]()]
+
+        check("no BOD stop survives", [l for l in off if "@" in l], [])
+        check("the carpenter goes with them", "Carpenter" in off, False)
+        check("nothing expands from BOD_LOCATIONS",
+              m["expand_bod_locations"](), [])
+
+        # ...and the two that are NOT bulk orders keep running.
+        check("Resource Orders still served", "Resource Orders" in off, True)
+        check("Taming Deeds still served", "Taming Deeds" in off, True)
+    finally:
+        m["BOD_ENABLED"] = original
+
+
+def test_the_carpenter_is_marked_as_a_bod_vendor(m):
+    """It lives in VENDORS rather than BOD_LOCATIONS, so it needs the flag or
+    the switch would miss it."""
+    carpenter = [v for v in m["VENDORS"] if v.get("label") == "Carpenter"]
+    check("the carpenter is in VENDORS", len(carpenter), 1)
+    check("and is flagged as a bulk order vendor",
+          carpenter[0].get("bod"), True)
+
+    for label in ("Resource Orders", "Taming Deeds"):
+        entry = [v for v in m["VENDORS"] if v.get("label") == label][0]
+        check("%s is NOT flagged bod" % label, entry.get("bod"), None)
+
+
+def test_filing_stops_with_the_switch(m):
+    """No book, no filing - and it must not complain about a missing book."""
+    original = m["BOD_ENABLED"]
+    original_log = m["log"]
+    said = []
+    try:
+        m["BOD_ENABLED"] = False
+        m["log"] = lambda text, *a, **k: said.append(text)
+        check("filing is a no-op", m["file_bulk_orders"](), 0)
+        check("and it says nothing about a missing book",
+              [t for t in said if "Bulk Order Book" in t], [])
+    finally:
+        m["BOD_ENABLED"] = original
+        m["log"] = original_log
+
+
+def test_no_dead_top_level_functions(m):
+    """Anything defined and never called is either wired up or removed.
+
+    TASKS holds harvest_mine and harvest_lumber by reference, so they count as
+    called even though no name in the file invokes them directly.
+    """
+    import ast as _ast
+    with open(SCRIPT, encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    defined = set(n.name for n in tree.body
+                  if isinstance(n, _ast.FunctionDef))
+    referenced = set()
+    for n in _ast.walk(tree):
+        if isinstance(n, _ast.Name) and isinstance(n.ctx, _ast.Load):
+            referenced.add(n.id)
+    check("every function is referenced somewhere",
+          sorted(defined - referenced), [])
+
+def test_movement_is_refused_when_the_player_is_gone(m):
+    """ClassicUO's Plugin.RequestMove has NO null check on World.Player:
+
+        internal static bool RequestMove(int dir, bool run)
+        {
+            return Client.Game.UO.World.Player.Walk((Direction)dir, run);
+        }
+
+    so asking to move during a recall takes the whole CLIENT down. The script
+    cannot fix that - only refuse to ask.
+    """
+    player = m["Player"]
+    saved_pos, saved_serial = player.Position, player.Serial
+    original_pf = m["PathFinding"]
+    original_debug = m["debug"]
+
+    asked = {"moves": 0}
+
+    class Recording(object):
+        class Route(object):
+            pass
+
+        def Go(self, route):
+            asked["moves"] += 1
+            return True
+
+        def GetPath(self, x, y, ignoremob):
+            return [(x, y)]
+
+    try:
+        m["debug"] = lambda *a, **k: None
+        m["PathFinding"] = Recording()
+
+        # Normal: it moves.
+        player.Position = StubPos(100, 100)
+        check("a real position moves", m["pathfind_to"](110, 100), True)
+        check("and it asked the client once", asked["moves"], 1)
+
+        # 0,0 is what an unloaded world reads as.
+        asked["moves"] = 0
+        player.Position = StubPos(0, 0)
+        check("0,0 refuses to move", m["pathfind_to"](110, 100), False)
+        check("the client was never asked", asked["moves"], 0)
+
+        # No serial - not in the world at all.
+        asked["moves"] = 0
+        player.Position = StubPos(100, 100)
+        player.Serial = 0
+        check("no serial refuses to move", m["pathfind_to"](110, 100), False)
+        check("still never asked", asked["moves"], 0)
+    finally:
+        m["PathFinding"] = original_pf
+        m["debug"] = original_debug
+        player.Position, player.Serial = saved_pos, saved_serial
+
+
+def test_player_ready_survives_a_dead_client(m):
+    """Reading Player may itself throw while the world is gone."""
+    original = m["Player"]
+    try:
+        class Gone(object):
+            def __getattr__(self, name):
+                raise RuntimeError("world is unloading")
+        m["Player"] = Gone()
+        check("a throwing Player is not ready", m["player_ready"](), False)
+    finally:
+        m["Player"] = original
+
+
+def test_recall_waits_for_the_world(m):
+    """Every recall must settle before anything walks.
+
+    This used to be a text check for "wait_for_player()" inside ar_recall -
+    which PASSED while the bug was live, because the call was sitting on the
+    mana-retry branch and the successful first cast returned straight past it.
+    The common path was the unguarded one. So: call the real function, on both
+    paths, and count the waits.
+    """
+    waited = {"n": 0}
+    saved = {k: m[k] for k in ("wait_for_player", "clear_journal",
+                               "travel_failed_for_mana", "ensure_mana",
+                               "openAR", "Gumps", "Misc", "log")}
+
+    class Silent(object):
+        def SendAction(self, gump_id, button):
+            pass
+
+    class Instant(object):
+        def Pause(self, ms):
+            pass
+
+    try:
+        m["wait_for_player"] = lambda *a, **k: waited.__setitem__("n", waited["n"] + 1) or True
+        m["clear_journal"] = lambda *a, **k: None
+        m["log"] = lambda *a, **k: None
+        m["Gumps"] = Silent()
+        m["Misc"] = Instant()
+        m["ensure_mana"] = lambda **k: True
+        m["openAR"] = lambda *a, **k: True
+
+        # The common case: the first cast works. This is the path that was
+        # unguarded, and it is the one that runs on virtually every recall.
+        m["travel_failed_for_mana"] = lambda *a, **k: False
+        check("a clean recall succeeds", m["ar_recall"](5, "Mining"), True)
+        check("and it waited for the world", waited["n"], 1)
+
+        # The rare case: refused for mana, recovered, cast again.
+        waited["n"] = 0
+        calls = {"n": 0}
+
+        def refuse_once(*a, **k):
+            calls["n"] += 1
+            return calls["n"] == 1
+
+        m["travel_failed_for_mana"] = refuse_once
+        check("a retried recall succeeds", m["ar_recall"](5, "Mining"), True)
+        check("and it waited exactly once", waited["n"], 1)
+
+        # Refused twice: it never travelled, so it must NOT wait or claim to.
+        waited["n"] = 0
+        m["travel_failed_for_mana"] = lambda *a, **k: True
+        check("a failed recall reports failure", m["ar_recall"](5, "Mining"), False)
+        check("and never waited", waited["n"], 0)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+    check("and the wait is bounded",
+          m["PLAYER_READY_TIMEOUT_MS"] > 0, True)
+
 def load_script():
     with open(SCRIPT, encoding="utf-8") as fh:
         source = fh.read()
@@ -719,6 +2363,7 @@ def load_script():
         "Misc": StubMisc(), "Player": StubPlayer(), "Items": ITEMS,
         "Gumps": StubGumps(), "Journal": JOURNAL, "Timer": StubTimer(),
         "Mobiles": MOBILES, "Target": None, "PathFinding": None,
+        "Statics": StubStatics(),
     }
     exec(compile(source, SCRIPT, "exec"), env)
     return env
@@ -983,6 +2628,20 @@ def test_chat_line_parsing(m):
         check("parse %r" % raw[:38], m["parse_chat_line"](raw), want)
 
 
+def heard(m):
+    """Did a NEW call-out arrive? Drives the real shared journal scan.
+
+    greyskull_heard() used to own the journal loop and consume it. It does not
+    any more: scan_journal is the single reader, because the cursor is consumed
+    by reading and two readers would steal lines from each other. Resetting the
+    flag before scanning reproduces the old one-shot semantics these tests were
+    written against.
+    """
+    m["_greyskull_pending"] = False
+    m["scan_journal"]()
+    return m["_greyskull_pending"]
+
+
 def test_greyskull_case_insensitive(m):
     """The reported bug: the old exact match missed any typed variation."""
     variants = [
@@ -995,7 +2654,7 @@ def test_greyskull_case_insensitive(m):
     for said in variants:
         reset_greyskull(m)
         JOURNAL.say(said)
-        check("hears %r" % said.strip()[:38], m["greyskull_heard"](), True)
+        check("hears %r" % said.strip()[:38], heard(m), True)
 
     for ignored in ["System: <Public> Fred Kruger: by the power of grayskull",
                     "System: <Public> Fred Kruger: power of greyskull",
@@ -1003,7 +2662,7 @@ def test_greyskull_case_insensitive(m):
                     "You have found some iron ore"]:
         reset_greyskull(m)
         JOURNAL.say(ignored)
-        check("ignores %r" % ignored[:38], m["greyskull_heard"](), False)
+        check("ignores %r" % ignored[:38], heard(m), False)
 
 
 def test_greyskull_anyone_can_call(m):
@@ -1014,21 +2673,21 @@ def test_greyskull_anyone_can_call(m):
         for who in ["Fred Kruger", "Alice", "Minerbot", "Some Random Person"]:
             reset_greyskull(m)
             JOURNAL.say("System: <Public> %s: By The Power Of Greyskull!" % who)
-            check("anyone: %s triggers it" % who, m["greyskull_heard"](), True)
+            check("anyone: %s triggers it" % who, heard(m), True)
 
         # Own character must work too, since IGNORE_SELF is off by default.
         reset_greyskull(m)
         JOURNAL.say("System: <Public> Minerbot: By The Power Of Greyskull!")
-        check("own call-out triggers it", m["greyskull_heard"](), True)
+        check("own call-out triggers it", heard(m), True)
 
         # An allow-list, when set, restricts it.
         m["GREYSKULL_ALLOWED_CALLERS"][:] = ["Fred Kruger"]
         reset_greyskull(m)
         JOURNAL.say(REAL_LINE)
-        check("allow-list admits Fred", m["greyskull_heard"](), True)
+        check("allow-list admits Fred", heard(m), True)
         reset_greyskull(m)
         JOURNAL.say("System: <Public> Mallory: By The Power Of Greyskull!")
-        check("allow-list rejects Mallory", m["greyskull_heard"](), False)
+        check("allow-list rejects Mallory", heard(m), False)
     finally:
         m["GREYSKULL_ALLOWED_CALLERS"][:] = original
 
@@ -1039,10 +2698,10 @@ def test_greyskull_channel_filter(m):
         m["GREYSKULL_REQUIRE_CHANNEL"] = "Public"
         reset_greyskull(m)
         JOURNAL.say(REAL_LINE)
-        check("channel filter admits Public", m["greyskull_heard"](), True)
+        check("channel filter admits Public", heard(m), True)
         reset_greyskull(m)
         JOURNAL.say("<Guild> Bob: By The Power Of Greyskull!")
-        check("channel filter rejects Guild", m["greyskull_heard"](), False)
+        check("channel filter rejects Guild", heard(m), False)
     finally:
         m["GREYSKULL_REQUIRE_CHANNEL"] = original
 
@@ -1051,12 +2710,12 @@ def test_greyskull_does_not_retrigger(m):
     """A single chant must fire once, not on every poll afterwards."""
     reset_greyskull(m)
     JOURNAL.say("by the power of greyskull!")
-    check("first poll hears it", m["greyskull_heard"](), True)
-    check("second poll does not", m["greyskull_heard"](), False)
-    check("third poll does not", m["greyskull_heard"](), False)
+    check("first poll hears it", heard(m), True)
+    check("second poll does not", heard(m), False)
+    check("third poll does not", heard(m), False)
 
     JOURNAL.say("by the power of greyskull!")
-    check("a new chant is heard again", m["greyskull_heard"](), True)
+    check("a new chant is heard again", heard(m), True)
 
 
 def test_greyskull_primes_cursor(m):
@@ -1064,9 +2723,9 @@ def test_greyskull_primes_cursor(m):
     reset_greyskull(m)
     JOURNAL.say("by the power of greyskull!")     # said before we start
     m["prime_journal_cursor"]()
-    check("old chant ignored after priming", m["greyskull_heard"](), False)
+    check("old chant ignored after priming", heard(m), False)
     JOURNAL.say("by the power of greyskull!")     # said after
-    check("new chant still heard", m["greyskull_heard"](), True)
+    check("new chant still heard", heard(m), True)
 
 
 def test_greyskull_poll_flag(m):
@@ -1464,14 +3123,215 @@ def test_wood_storage_config(m):
             if k.get("label") == "Wood Storage"]
     check("wood storage is configured", len(wood), 1)
     wood = wood[0]
-    check("wood storage serial", wood.get("serial"), WOOD_STORAGE_SERIAL)
+    # The REPO copy ships serial 0 on purpose - it goes to GitHub, and a real
+    # character's item serial has no business being published. Each live copy
+    # carries its own. So this tracks the setting rather than a literal.
+    check("wood storage serial tracks the setting",
+          wood.get("serial"), m["WOOD_STORAGE_SERIAL"])
+    check("the published copy carries no real serial",
+          m["WOOD_STORAGE_SERIAL"], 0)
     check("wood storage fallback id", wood.get("id"), 0x1BD9)
-    check("wood storage fallback hue", wood.get("hue"), 0x0058)
+    check("wood storage fallback hue is any", wood.get("hue"), -1)
     check("where is a valid choice",
           wood.get("where") in ("world", "pack"), True)
     check("where tracks WOOD_STORAGE_WHERE",
           wood.get("where"), m["WOOD_STORAGE_WHERE"])
 
+
+def test_keys_accept_any_hue(m):
+    """Both keys must be found whatever colour they are.
+
+    The wood storage hue used to be pinned to 0x0058, so a character whose key
+    was any other colour silently had no storage at all and their wood went to
+    the chest. Regression: both entries accept any hue.
+    """
+    for label in ("Wood Storage", "Ingot key"):
+        spec = [k for k in m["RESTOCK_KEYS"] if k.get("label") == label][0]
+        check("%s accepts any hue" % label, spec.get("hue"), -1)
+
+    # Hue was ALSO the only thing telling a key apart from anything else of the
+    # same graphic. Giving it up without a name check would be a downgrade, so
+    # both entries must carry name hints.
+    for label in ("Wood Storage", "Ingot key"):
+        spec = [k for k in m["RESTOCK_KEYS"] if k.get("label") == label][0]
+        check("%s has name hints" % label,
+              bool(spec.get("names")), True)
+
+
+def test_find_restock_any_hue(m):
+    """A key of an unexpected colour is still found."""
+    wood = [k for k in m["RESTOCK_KEYS"] if k.get("label") == "Wood Storage"][0]
+    spec = dict(wood)
+    spec["serial"] = 0
+    spec["where"] = "pack"
+
+    for hue in (0x0058, 0x0000, 0x0481, 0x08FD):
+        ITEMS.reset()
+        ITEMS.register(StubWorldItem(0x40001234, 0x1BD9, hue, "Wood Storage"),
+                       "pack")
+        check("wood storage found at hue 0x%04X" % hue,
+              [i.Serial for i in m["find_restock"](spec)], [0x40001234])
+
+    ITEMS.reset()
+
+
+def test_match_by_name_narrows_not_widens(m):
+    """The name check must narrow a graphic match, never lose the key.
+
+    With hue ignored, a stack of something sharing the graphic could be picked
+    instead of the key - so the name narrows. But a shard that sends no name
+    must not cost the key entirely, so an empty result falls back to the
+    unfiltered list.
+    """
+    spec = {"label": "Wood Storage", "id": 0x1BD9,
+            "names": ["wood storage", "key"]}
+
+    key = StubWorldItem(0x40000001, 0x1BD9, 0x0058, "Wood Storage")
+    other = StubWorldItem(0x40000002, 0x1BD9, 0x0000, "boards")
+
+    picked = m["match_by_name"](spec, [other, key])
+    check("name picks the key over the lookalike",
+          [i.Serial for i in picked], [0x40000001])
+
+    # Nothing matches -> hand back what we had rather than nothing at all.
+    picked = m["match_by_name"](spec, [other])
+    check("no name match falls back to the raw list",
+          [i.Serial for i in picked], [0x40000002])
+
+    # No hints configured -> no filtering at all.
+    picked = m["match_by_name"]({"label": "x", "names": []}, [other, key])
+    check("no hints means no narrowing", len(picked), 2)
+
+    check("empty candidate list stays empty", m["match_by_name"](spec, []), [])
+
+
+def test_lumber_steps_match_the_wood_bank(m):
+    """Spot spacing must match ServUO's bank, which is 4 wide and 3 tall.
+
+    The bank is what depletes - "not enough wood here" empties the whole block.
+    A step SMALLER than the bank puts the character back inside the block it
+    just emptied and the server repeats itself, which in game looked like the
+    script standing around doing nothing. Both axes were 3, so a third of the
+    sideways moves were dead on arrival.
+    """
+    check("x step is the bank width", m["LUMBER_AREA_STEP_X"], 4)
+    check("y step is the bank height", m["LUMBER_AREA_STEP_Y"], 3)
+    check("x step tracks the source value",
+          m["LUMBER_AREA_STEP_X"], m["LUMBER_BANK_W"])
+    check("y step tracks the source value",
+          m["LUMBER_AREA_STEP_Y"], m["LUMBER_BANK_H"])
+
+    # A step below the bank size is the bug this test exists to prevent.
+    check("x step is never below the bank width",
+          m["LUMBER_AREA_STEP_X"] >= m["LUMBER_BANK_W"], True)
+    check("y step is never below the bank height",
+          m["LUMBER_AREA_STEP_Y"] >= m["LUMBER_BANK_H"], True)
+
+
+def test_lumber_area_offsets(m):
+    """The box must cover what it claims, and be centred on the landing tile."""
+    xs = m["area_offsets"](m["LUMBER_AREA_SIZE"], m["LUMBER_AREA_STEP_X"])
+    ys = m["area_offsets"](m["LUMBER_AREA_SIZE"], m["LUMBER_AREA_STEP_Y"])
+    check("x offsets are centred on 0", xs, [-4, 0, 4])
+    check("y offsets are centred on 0", ys, [-3, 0, 3])
+    check("x offsets are symmetric", xs, [-o for o in reversed(xs)])
+    check("y offsets are symmetric", ys, [-o for o in reversed(ys)])
+
+    # Every tile in the 8x8 box must be within the server's 2-tile harvest
+    # range of some standing spot, or the sweep quietly misses part of the box.
+    # Widening the x step to 4 must NOT open a hole.
+    half = m["LUMBER_AREA_SIZE"] // 2
+    uncovered = []
+    for x in range(-half, half + 1):
+        for y in range(-half, half + 1):
+            if not any(max(abs(x - ox), abs(y - oy)) <= 2
+                       for ox in xs for oy in ys):
+                uncovered.append((x, y))
+    check("every tile in the box is still reachable from a spot", uncovered, [])
+
+    # Each spot must sit in its OWN bank, which is the whole point.
+    banks = set(m["bank_of"](x, y, m["LUMBER_BANK_W"], m["LUMBER_BANK_H"])
+                for x in xs for y in ys)
+    check("every spot is in a distinct wood bank", len(banks), len(xs) * len(ys))
+
+
+def test_lumber_area_spots(m):
+    """Walking order: the tile we are already on first, then no long jumps."""
+    spots = m["lumber_area_spots"]((100, 200))
+    check("nine standing spots", len(spots), 9)
+    check("landing tile is worked first", spots[0], (100, 200))
+    check("no spot is visited twice", len(set(spots)), len(spots))
+
+    half = m["LUMBER_AREA_SIZE"] // 2
+    outside = [s for s in spots
+               if abs(s[0] - 100) > half or abs(s[1] - 200) > half]
+    check("no spot falls outside the box", outside, [])
+
+    # No leg may be longer than one step, INCLUDING the one off the landing
+    # tile. A serpentine with the landing tile lifted out of it failed exactly
+    # here: the middle row jumped the full 6-tile width of the box.
+    legs = [max(abs(b[0] - a[0]), abs(b[1] - a[1]))
+            for a, b in zip(spots, spots[1:])]
+    longest = max(m["LUMBER_AREA_STEP_X"], m["LUMBER_AREA_STEP_Y"])
+    check("no leg is longer than one step",
+          [l for l in legs if l > longest], [])
+
+    # The order has to be identical every time or a sweep resumed after a trip
+    # home carries on at the wrong index.
+    check("spot order is stable", m["lumber_area_spots"]((100, 200)), spots)
+
+
+def test_lumber_single_matches_old_behaviour(m):
+    """LUMBER_AREA_ENABLED = False must behave exactly as the script used to."""
+    outcomes = {}
+
+    def fake_chop(axe, timeout):
+        return outcomes["reply"]
+
+    original = m["chop_once"]
+    try:
+        m["chop_once"] = fake_chop
+        for reply, want in (("ok", "ok"), ("broke", "ok"), ("full", "full"),
+                            ("empty", "next"), ("notree", "next"),
+                            ("silent", "next")):
+            outcomes["reply"] = reply
+            check("single spot: %s -> %s" % (reply, want),
+                  m["lumber_single"](None), want)
+    finally:
+        m["chop_once"] = original
+
+
+def test_lumber_sweep_key_tracks_waypoint(m):
+    """Sweep state is keyed by waypoint, not by where the player is standing.
+
+    The player walks away from the landing tile during a sweep, and a trip home
+    for a full pack re-enters from wherever the unload finished - so a position
+    key would start a fresh sweep every time and the same spots would be worked
+    over and over.
+    """
+    original_job = m["_current_job"]
+    try:
+        m["_current_job"] = {"name": "Lumberjacking"}
+        m["_waypoint"]["Lumberjacking"] = 4
+        check("key names the waypoint being worked",
+              m["sweep_key"](), ("Lumberjacking", 3))
+
+        m["_waypoint"]["Lumberjacking"] = 5
+        check("key moves with the waypoint",
+              m["sweep_key"](), ("Lumberjacking", 4))
+    finally:
+        m["_current_job"] = original_job
+        m["_waypoint"].pop("Lumberjacking", None)
+
+
+def test_lumber_area_has_no_unbounded_loop(m):
+    """Every sweep loop needs a bound. work_spot is the one that can run away."""
+    check("swings at one spot are capped",
+          m["LUMBER_AREA_MAX_SWINGS"] > 0, True)
+    check("moving to a spot has a timeout",
+          m["LUMBER_AREA_MOVE_TIMEOUT"] > 0, True)
+    check("the probe swing has a timeout",
+          m["LUMBER_AREA_PROBE_TIMEOUT"] > 0, True)
 
 def test_find_restock(m):
     """Serial first, then id/hue in the right place."""
@@ -1480,8 +3340,21 @@ def test_find_restock(m):
     ITEMS.register(storage, "world")
 
     wood = [k for k in m["RESTOCK_KEYS"] if k.get("label") == "Wood Storage"][0]
-    found = m["find_restock"](wood)
+
+    # Set one explicitly: the shipped default is 0, but a live copy has the
+    # character's own serial here and that path must keep working.
+    with_serial = dict(wood)
+    with_serial["serial"] = WOOD_STORAGE_SERIAL
+    found = m["find_restock"](with_serial)
     check("found by serial", [i.Serial for i in found], [WOOD_STORAGE_SERIAL])
+
+    # A serial IGNORES `where` - FindBySerial does not care where the item is.
+    # That is what lets a world-locked storage be found by a "pack" entry.
+    ground_only = dict(with_serial)
+    ground_only["where"] = "pack"
+    check("a serial beats the where setting",
+          [i.Serial for i in m["find_restock"](ground_only)],
+          [WOOD_STORAGE_SERIAL])
 
     # Serial gone (item replaced) - must fall back to id/hue, in whichever
     # place the spec says. Both directions are checked explicitly rather than
@@ -1523,6 +3396,14 @@ def test_refill_keys_uses_storage(m):
             StubWorldItem(WOOD_STORAGE_SERIAL, 0x1BD9, 0x0058, "Wood Storage"),
             "world")
         ITEMS.contents = "Contents: 120/125 items, 390/400 stones"   # full
+        # Locked down in the world, reached through a "pack" entry - which only
+        # works via the SERIAL lookup, since that ignores location. The shipped
+        # repo copy has no serial (it is published), so set one as a live copy
+        # would have.
+        wood_entry = [k for k in m["RESTOCK_KEYS"]
+                      if k.get("label") == "Wood Storage"][0]
+        saved_serial = wood_entry.get("serial")
+        wood_entry["serial"] = WOOD_STORAGE_SERIAL
 
         picked = install_menu(m, ["Open", "Refill from stock", "Rename"])
         # The pack frees up once the storage has taken the load.
@@ -1532,6 +3413,7 @@ def test_refill_keys_uses_storage(m):
         m["Misc"].ContextReply = freeing_reply
 
         ok = m["refill_keys"]()
+        wood_entry["serial"] = saved_serial
         check("refill picked the right entry", picked, ["Refill from stock"])
         check("refill reports success", ok, True)
 
@@ -1671,6 +3553,13 @@ def test_carried_key_skips_dropoff(m):
         remote.RootContainer = None
         ITEMS.register(remote, "world")
         ITEMS.contents = "Contents: 120/125 items, 390/400 stones"
+        # A world-locked storage is only reachable through a "pack" entry
+        # because the SERIAL lookup ignores location. The shipped default is 0,
+        # so set one for the duration the way a live copy has.
+        wood_entry = [k for k in m["RESTOCK_KEYS"]
+                      if k.get("label") == "Wood Storage"][0]
+        saved_serial = wood_entry.get("serial")
+        wood_entry["serial"] = WOOD_STORAGE_SERIAL
 
         picked = install_menu(m, ["Refill from stock"])
         check("world storage is not on the player",
@@ -1683,6 +3572,7 @@ def test_carried_key_skips_dropoff(m):
         picked = install_menu(m, ["Refill from stock"])
         m["Misc"].ContextReply = freeing_reply
         check("world storage used at the drop-off", m["refill_keys"](), True)
+        wood_entry["serial"] = saved_serial
     finally:
         m["Misc"] = original_misc
         m["wait_context"] = original_wait
@@ -1965,8 +3855,531 @@ def test_vendor_defaults(m):
         check("shipped %s has context" % label, bool(vendor.get("context")), True)
 
 
+def test_stop_button_is_not_a_crash(m):
+    """Razor's Stop aborts the thread; that must not write a crash report.
+
+    Every crash file on disk when this was written was one of these - five
+    reports, five presses of Stop, no real crashes. It also dumped a red
+    traceback over the journal, which is the thing being read after a run.
+    """
+    stop = m["is_stop_request"]
+    check("the IronPython thread abort is a stop",
+          stop(SystemError("Thread was being aborted.")), True)
+    check("case does not matter",
+          stop(SystemError("thread was being aborted")), True)
+    check("the .NET wording is a stop too",
+          stop(RuntimeError("System.Threading.ThreadAbortException: Thread abort")),
+          True)
+
+    # Real failures must still be reported - this is the half that matters.
+    check("a real error is not a stop",
+          stop(AttributeError("'NoneType' object has no attribute 'Walk'")), False)
+    check("an empty message is not a stop", stop(Exception("")), False)
+
+    class Hostile(object):
+        def __str__(self):
+            raise RuntimeError("cannot render")
+
+    check("an unprintable error is not a stop", stop(Hostile()), False)
+
+
+
+# ---------------------------------------------------------------------------
+# Mythril
+#
+# Observed 2026-08-22 on MrGatherer's mythril runes:
+#   * a swing takes ~8s, against 5s for ordinary rock
+#   * SUCCESS IS SILENT - the ore appears, nothing is said
+#   * failure says "You dig for a while but fail to find any mythril ore of
+#     suitable quality" - which begins with "You"
+#   * depletion says "There is no mythril ore here to mine" - which contains
+#     neither "no metal" nor "You"
+# ---------------------------------------------------------------------------
+
+def _mythril_dig(m, lines, weight_after=None, waypoint=150, enabled=True,
+                 waypoints=None):
+    """Run the REAL dig_once with a scripted journal and pack weight."""
+    saved = {k: m[k] for k in
+             ("Journal", "Target", "Player", "clear_journal", "clear_cursor",
+              "debug", "interruptible_pause", "note_yield", "journal_hit",
+              "MYTHRIL_ENABLED", "MYTHRIL_WAYPOINTS")}
+    said = list(lines)
+    weights = {"now": 100}
+
+    class J(object):
+        def Clear(self, *a, **k):
+            pass
+
+        def Search(self, text):
+            return any(text.lower() in (s or "").lower() for s in said)
+
+    class P(object):
+        Weight = 100
+        IsGhost = False
+
+    try:
+        m["MYTHRIL_ENABLED"] = enabled
+        m["MYTHRIL_WAYPOINTS"] = (list(range(147, 173)) if waypoints is None
+                                  else waypoints)
+        m["_waypoint"]["Mining"] = waypoint
+        m["Journal"] = J()
+        class T(object):
+            def __getattr__(self, name):
+                return lambda *a, **k: None
+
+        m["Target"] = T()
+        m["clear_journal"] = lambda *a, **k: None
+        m["clear_cursor"] = lambda *a, **k: True
+        m["debug"] = lambda *a, **k: None
+        m["note_yield"] = lambda *a, **k: None
+        m["journal_hit"] = lambda words: any(
+            w.lower() in (s or "").lower() for s in said for w in words)
+
+        player = P()
+        m["Player"] = player
+
+        def pause(ms):
+            # The ore lands part-way through the swing, silently.
+            if weight_after is not None:
+                player.Weight = weight_after
+
+        m["interruptible_pause"] = pause
+        return m["dig_once"]("shovel", 200)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_mythril_failure_is_not_scored_as_ore(m):
+    """The fail line begins with "You", so dig_once's broad catch-all would
+    call it ore recovered - inflating the sweep's ore count and keeping a
+    barren spot alive on a deadline it never earned."""
+    out = _mythril_dig(m, ["You dig for a while but fail to find any mythril "
+                           "ore of suitable quality."])
+    check("a mythril failure is a miss, not ok", out, "miss")
+
+    # The alternate spelling has to work too - the shard uses both.
+    out = _mythril_dig(m, ["You dig for a while but fail to find any mithril "
+                           "ore of suitable quality."])
+    check("the 'mithril' spelling too", out, "miss")
+
+
+def test_mythril_depletion_is_recognised(m):
+    """"There is no mythril ore here to mine" contains neither "no metal" nor
+    "You", so nothing in the ordinary tables matched it and it fell through to
+    "silent" - which reads as a dead spot rather than a spent one."""
+    out = _mythril_dig(m, ["There is no mythril ore here to mine."])
+    check("depletion is empty, not silent", out, "empty")
+
+
+def test_a_silent_mythril_success_is_seen_as_weight(m):
+    """Success says NOTHING. The ore simply appears, so the pack getting
+    heavier is the only evidence there is."""
+    out = _mythril_dig(m, [], weight_after=124)      # 2 ore = 24 stones
+    check("silent ore still counts as ok", out, "ok")
+
+
+def test_a_silent_swing_with_no_ore_is_still_silent(m):
+    out = _mythril_dig(m, [], weight_after=None)
+    check("nothing said and nothing gained", out, "silent")
+
+
+def test_weight_is_only_trusted_inside_a_mythril_zone(m):
+    """Elsewhere the server always speaks, and weight can move for reasons
+    that are not this swing. Trusting it everywhere would score phantom ore."""
+    out = _mythril_dig(m, [], weight_after=124, waypoint=5)
+    check("weight alone does not mean ore on ordinary rock", out, "silent")
+
+
+def test_the_zone_is_scoped_to_its_waypoints(m):
+    check("waypoint 147 is mythril",
+          _mythril_dig(m, ["no mythril ore here to mine"], waypoint=147),
+          "empty")
+    check("waypoint 172 is mythril",
+          _mythril_dig(m, ["no mythril ore here to mine"], waypoint=172),
+          "empty")
+
+    # 146 and 173 are ordinary rock. The depletion line is still understood -
+    # the strings are global - but the 8s timeout and the weight test are not
+    # applied, which is what "all others act as normal" means.
+    saved = (m["MYTHRIL_ENABLED"], m["MYTHRIL_WAYPOINTS"])
+    try:
+        m["MYTHRIL_ENABLED"] = True
+        m["MYTHRIL_WAYPOINTS"] = list(range(147, 173))
+        m["_waypoint"]["Mining"] = 146
+        check("146 is outside the zone", m["in_mythril_zone"](), False)
+        m["_waypoint"]["Mining"] = 173
+        check("173 is outside the zone", m["in_mythril_zone"](), False)
+        m["_waypoint"]["Mining"] = 160
+        check("160 is inside it", m["in_mythril_zone"](), True)
+    finally:
+        m["MYTHRIL_ENABLED"], m["MYTHRIL_WAYPOINTS"] = saved
+
+
+def test_mythril_is_off_unless_switched_on(m):
+    """Only one character mines it. Every other copy must behave exactly as it
+    did before, so the switch has to be off by default and the shipped repo
+    copy has to be generic."""
+    check("off in the repo copy", m["MYTHRIL_ENABLED"], False)
+    check("and no waypoints listed", m["MYTHRIL_WAYPOINTS"], [])
+
+    m2_saved = m["MYTHRIL_ENABLED"]
+    try:
+        m["MYTHRIL_ENABLED"] = False
+        m["MYTHRIL_WAYPOINTS"] = list(range(147, 173))
+        m["_waypoint"]["Mining"] = 160
+        check("a listed waypoint does nothing while disabled",
+              m["in_mythril_zone"](), False)
+    finally:
+        m["MYTHRIL_ENABLED"] = m2_saved
+        m["MYTHRIL_WAYPOINTS"] = []
+
+
+def test_the_swing_gets_longer_only_where_it_should(m):
+    saved = (m["MYTHRIL_ENABLED"], m["MYTHRIL_WAYPOINTS"])
+    try:
+        m["MYTHRIL_ENABLED"] = True
+        m["MYTHRIL_WAYPOINTS"] = list(range(147, 173))
+        m["_waypoint"]["Mining"] = 160
+        check("mythril gets the long timeout",
+              m["swing_timeout"](), m["MYTHRIL_SWING_TIMEOUT"])
+        m["_waypoint"]["Mining"] = 5
+        check("ordinary rock keeps the short one",
+              m["swing_timeout"](), m["MINE_SWING_TIMEOUT"])
+    finally:
+        m["MYTHRIL_ENABLED"], m["MYTHRIL_WAYPOINTS"] = saved
+
+    check("and the long one really is longer than a mythril swing",
+          m["MYTHRIL_SWING_TIMEOUT"] > 8000, True)
+
+
+def test_a_mythril_miss_does_not_count_as_ore(m):
+    """state["dug"] is "swings that gave ore". Counting an 8-second failure
+    there would have the sweep summary claim ore that never arrived."""
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "mine_spot")
+
+    branch = None
+    for node in _ast.walk(fn):
+        if isinstance(node, _ast.Compare) and \
+                any(getattr(c, "value", None) == "miss" for c in node.comparators):
+            branch = node
+    check("mine_spot handles a miss", branch is not None, True)
+
+    src = _ast.dump(fn)
+    check("and the miss branch exists alongside ok", "'miss'" in src, True)
+
+
+
+# ---------------------------------------------------------------------------
+# "move" - leave this spot, keep the rune
+#
+# "skip" throws the whole area away and recalls. "move" leaves only the spot
+# being worked and takes the next one in the same area; when that was the last
+# spot there is nothing to move to, so the sweep runs out and recalls, which is
+# the same thing skip does. That fallback is not special-cased anywhere - the
+# sweep loop simply ends.
+# ---------------------------------------------------------------------------
+
+class MoveEntry(object):
+    def __init__(self, text, name="", serial=0x1234):
+        self.Text = text
+        self.Name = name
+        self.Serial = serial
+
+
+def _say(m, text, mine=True):
+    """Feed one spoken line through the REAL detector."""
+    saved = {k: m[k] for k in ("Player", "debug", "_move_pending",
+                               "_skip_pending")}
+    try:
+        # The PLAYER is always Mr Gatherer. Only the SPEAKER changes - that is
+        # the whole point of the self-only rule, and naming both the same was
+        # a fixture bug that made the check look like it passed anyone.
+        class P(object):
+            Name = "Mr Gatherer"
+
+            def HeadMessage(self, *a, **k):
+                pass
+
+        m["Player"] = P()
+        m["debug"] = lambda *a, **k: None
+        entry = MoveEntry(text, name="Mr Gatherer" if mine else "Someone Else")
+        return m["is_move_line"](entry, text)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_move_is_matched_on_the_whole_line(m):
+    """"move" is an even more ordinary word than "skip". A substring match
+    would fire on half of what gets said near a mine."""
+    check("a bare move is heard", _say(m, "move"), True)
+    check("capitals do not matter", _say(m, "Move"), True)
+    check("trailing punctuation does not matter", _say(m, "move."), True)
+
+    for phrase in ("move over", "can you move", "I will move it",
+                   "remove", "movement", "don't move"):
+        check("%r is NOT a move command" % phrase, _say(m, phrase), False)
+
+
+def test_move_is_self_only(m):
+    check("said by this character", _say(m, "move", mine=True), True)
+    check("said by somebody else", _say(m, "move", mine=False), False)
+    check("and the switch exists", m["MOVE_SELF_ONLY"], True)
+
+
+def test_move_and_skip_are_different_words(m):
+    check("move is not skip", m["MOVE_PHRASES"] != m["SKIP_PHRASES"], True)
+    overlap = set(p.lower() for p in m["MOVE_PHRASES"]) & \
+        set(p.lower() for p in m["SKIP_PHRASES"])
+    check("and they do not overlap", overlap, set())
+
+
+def test_take_move_fires_once(m):
+    saved = m["_move_pending"]
+    try:
+        m["_move_pending"] = True
+        # scan_journal runs inside take_move; give it nothing new to read.
+        saved_scan = m["scan_journal"]
+        m["scan_journal"] = lambda: None
+        try:
+            check("first call takes it", m["take_move"](), True)
+            check("second call does not", m["take_move"](), False)
+        finally:
+            m["scan_journal"] = saved_scan
+    finally:
+        m["_move_pending"] = saved
+
+
+def test_a_recall_forgets_a_pending_move(m):
+    """A move said as the last spot ended refers to an area that is gone. Left
+    pending it would be spent on the first spot of the NEXT rune."""
+    saved = m["_move_pending"]
+    try:
+        m["_move_pending"] = True
+        m["forget_move"]()
+        saved_scan = m["scan_journal"]
+        m["scan_journal"] = lambda: None
+        try:
+            check("nothing left to take", m["take_move"](), False)
+        finally:
+            m["scan_journal"] = saved_scan
+    finally:
+        m["_move_pending"] = saved
+
+
+def test_move_leaves_the_spot_but_not_the_sweep(m):
+    """THE DIFFERENCE FROM SKIP, asserted structurally.
+
+    skip calls end_sweep and returns "next" - the whole area is abandoned.
+    move must do neither: it breaks the swing loop and lets the sweep advance
+    to the next spot on its own.
+    """
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+
+    for fname in ("mine_spot", "lumber_spot"):
+        fn = next((n for n in _ast.walk(tree)
+                   if isinstance(n, _ast.FunctionDef) and n.name == fname), None)
+        if fn is None:
+            continue
+        calls = [n for n in _ast.walk(fn)
+                 if isinstance(n, _ast.Call)
+                 and getattr(n.func, "id", None) == "take_move"]
+        check("%s honours move" % fname, len(calls) >= 1, True)
+
+        ends = [n for n in _ast.walk(fn)
+                if isinstance(n, _ast.Call)
+                and getattr(n.func, "id", None) == "end_sweep"]
+        check("%s does not end the sweep itself" % fname, ends, [])
+
+    # And the sweep must NOT consume it - that is the spot's job.
+    for fname in ("mine_sweep", "lumber_sweep"):
+        fn = next((n for n in _ast.walk(tree)
+                   if isinstance(n, _ast.FunctionDef) and n.name == fname), None)
+        if fn is None:
+            continue
+        calls = [n for n in _ast.walk(fn)
+                 if isinstance(n, _ast.Call)
+                 and getattr(n.func, "id", None) == "take_move"]
+        check("%s does not eat the move itself" % fname, calls, [])
+
+
+def test_the_walk_consumes_rather_than_polls(m):
+    """If the mid-walk check only POLLED, the same move would be spent again
+    on the next spot - one word, two spots skipped."""
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "walk_to")
+    names = set()
+    for node in _ast.walk(fn):
+        if isinstance(node, _ast.Call) and getattr(node.func, "id", None):
+            names.add(node.func.id)
+    check("the walk reacts to a move", "take_move" in names, True)
+    check("and it consumes it", "poll_move" not in names, True)
+
+
+
+# ---------------------------------------------------------------------------
+# The multi-minute stall on one spot
+#
+# Observed in game 2026-08-22: the character sat on a spot for several minutes
+# after "could not reach spot 2/14", answering nothing, saying nothing.
+#
+# Both existing guards are resettable BY DESIGN and both were defeated:
+#   * AREA_SPOT_TIMEOUT_MS is pushed out by every productive swing, and a
+#     mythril "miss" counts as productive - so on a spot that misses forever it
+#     never expires
+#   * AREA_IDLE_TIMEOUT_MS is only tested between spots, so a spot that never
+#     returns never lets it run
+# leaving MINE_AREA_MAX_SWINGS x the swing timeout as the only real bound:
+# 80 x 12s is sixteen minutes.
+# ---------------------------------------------------------------------------
+
+def test_one_spot_cannot_run_for_minutes(m):
+    cap_s = m["AREA_SPOT_HARD_CAP_MS"] / 1000.0
+    worst_mine = m["MINE_AREA_MAX_SWINGS"] * m["MINE_SWING_TIMEOUT"] / 1000.0
+    worst_myth = m["MINE_AREA_MAX_SWINGS"] * m["MYTHRIL_SWING_TIMEOUT"] / 1000.0
+
+    check("the swing count alone allowed minutes of ordinary mining",
+          worst_mine > 300, True)
+    check("and much worse in a mythril zone", worst_myth > 900, True)
+    check("the hard cap is far below both", cap_s < worst_mine, True)
+    check("but still long enough to work a real bank", cap_s >= 60, True)
+
+
+def test_the_hard_cap_is_never_extended(m):
+    """The whole point: `deadline` is pushed out by ore and by a mythril miss.
+    If the hard stop were pushed too it would be the same guard again."""
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+
+    for fname in ("mine_spot", "lumber_spot"):
+        fn = next((n for n in _ast.walk(tree)
+                   if isinstance(n, _ast.FunctionDef) and n.name == fname), None)
+        if fn is None:
+            continue
+
+        assigns = [n for n in _ast.walk(fn)
+                   if isinstance(n, _ast.Assign)
+                   and any(getattr(t, "id", None) == "hard_stop"
+                           for t in n.targets)]
+        check("%s sets a hard stop" % fname, len(assigns), 1)
+        check("%s sets it exactly once - never reset" % fname,
+              len(assigns) == 1, True)
+
+        # And it is actually tested.
+        names = set()
+        for node in _ast.walk(fn):
+            if isinstance(node, _ast.Name):
+                names.add(node.id)
+        check("%s tests the hard stop" % fname, "hard_stop" in names, True)
+
+        # The cap must come from the CONFIG, not a number baked in here.
+        # Checking the constant merely appears in the function is too weak -
+        # the log line mentions it too, so a hard_stop set to a hardcoded
+        # 999999 passed that check happily.
+        from_config = False
+        for node in assigns:
+            for sub in _ast.walk(node.value):
+                if isinstance(sub, _ast.Name)                         and sub.id == "AREA_SPOT_HARD_CAP_MS":
+                    from_config = True
+        check("%s takes the cap from AREA_SPOT_HARD_CAP_MS" % fname,
+              from_config, True)
+
+
+def test_a_long_spot_says_something(m):
+    """Minutes of silence is indistinguishable from a hung script - which is
+    exactly how this got reported."""
+    check("there is a progress interval", m["AREA_PROGRESS_MS"] >= 1000, True)
+    check("and it is well inside the hard cap",
+          m["AREA_PROGRESS_MS"] < m["AREA_SPOT_HARD_CAP_MS"], True)
+    # At least one progress line before the cap, or it is not a progress line.
+    check("so a capped spot reports at least once",
+          m["AREA_SPOT_HARD_CAP_MS"] // m["AREA_PROGRESS_MS"] >= 2, True)
+
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    for fname in ("mine_spot", "lumber_spot"):
+        fn = next((n for n in _ast.walk(tree)
+                   if isinstance(n, _ast.FunctionDef) and n.name == fname), None)
+        if fn is None:
+            continue
+        names = set(n.id for n in _ast.walk(fn) if isinstance(n, _ast.Name))
+        check("%s reports progress" % fname, "spoke_at" in names, True)
+
+
+def test_the_journal_is_always_scanned(m):
+    """poll_greyskull used to return early while a call-out was active, and
+    interruptible_pause's ONLY scan went through it - so for the whole
+    excursion nothing read the journal and a spoken "skip" or "move" was never
+    seen. The reading must not be conditional; only the answering."""
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "poll_greyskull")
+    body = fn.body
+    # The scan must come before any early return.
+    first_scan = None
+    first_return = None
+    for i, node in enumerate(body):
+        if first_scan is None and any(
+                isinstance(c, _ast.Call)
+                and getattr(c.func, "id", None) == "scan_journal"
+                for c in _ast.walk(node)):
+            first_scan = i
+        if first_return is None and any(isinstance(c, _ast.Return)
+                                        for c in _ast.walk(node)):
+            first_return = i
+    check("poll_greyskull scans", first_scan is not None, True)
+    check("and it scans BEFORE it can return",
+          first_scan is not None and (first_return is None
+                                      or first_scan <= first_return), True)
+
+    pause = next(n for n in _ast.walk(tree)
+                 if isinstance(n, _ast.FunctionDef)
+                 and n.name == "interruptible_pause")
+    called = set()
+    for node in _ast.walk(pause):
+        if isinstance(node, _ast.Call) and getattr(node.func, "id", None):
+            called.add(node.func.id)
+    check("the pause scans directly", "scan_journal" in called, True)
+
+
 def main():
     module = load_script()
+    test_stop_button_is_not_a_crash(module)
+    test_mythril_failure_is_not_scored_as_ore(module)
+    test_mythril_depletion_is_recognised(module)
+    test_a_silent_mythril_success_is_seen_as_weight(module)
+    test_a_silent_swing_with_no_ore_is_still_silent(module)
+    test_weight_is_only_trusted_inside_a_mythril_zone(module)
+    test_the_zone_is_scoped_to_its_waypoints(module)
+    test_mythril_is_off_unless_switched_on(module)
+    test_the_swing_gets_longer_only_where_it_should(module)
+    test_a_mythril_miss_does_not_count_as_ore(module)
+    test_move_is_matched_on_the_whole_line(module)
+    test_move_is_self_only(module)
+    test_move_and_skip_are_different_words(module)
+    test_take_move_fires_once(module)
+    test_a_recall_forgets_a_pending_move(module)
+    test_move_leaves_the_spot_but_not_the_sweep(module)
+    test_the_walk_consumes_rather_than_polls(module)
+    test_one_spot_cannot_run_for_minutes(module)
+    test_the_hard_cap_is_never_extended(module)
+    test_a_long_spot_says_something(module)
+    test_the_journal_is_always_scanned(module)
     test_page_info(module)
     test_dropoff_smelts_before_the_keys_get_first_refusal(module)
     test_ore_is_not_silently_strandable(module)
@@ -2032,6 +4445,79 @@ def main():
     test_axe_by_graphic(module)
     test_meditation_does_not_predisarm(module)
     test_axe_matching(module)
+    test_keys_accept_any_hue(module)
+    test_find_restock_any_hue(module)
+    test_match_by_name_narrows_not_widens(module)
+    test_lumber_steps_match_the_wood_bank(module)
+    test_lumber_area_offsets(module)
+    test_lumber_area_spots(module)
+    test_lumber_single_matches_old_behaviour(module)
+    test_lumber_sweep_key_tracks_waypoint(module)
+    test_lumber_area_has_no_unbounded_loop(module)
+    test_weight_reserve_replaces_the_fraction(module)
+    test_reserve_is_measured_not_guessed(module)
+    test_mining_step_is_the_ore_bank(module)
+    test_area_offsets_is_generic(module)
+    test_mineable_tiles_came_from_source(module)
+    test_spot_is_minable_checks_the_whole_reach(module)
+    test_mine_single_matches_old_behaviour(module)
+    test_mine_messages_separate_empty_from_barren(module)
+    test_vendor_round_counts_collections_not_visits(module)
+    test_unreachable_spot_is_never_walked_at(module)
+    test_long_way_round_is_refused(module)
+    test_spot_inside_rock_falls_back_to_a_neighbour(module)
+    test_walk_gives_up_when_it_stops_getting_closer(module)
+    test_walk_config_is_sane(module)
+    test_ingot_key_has_the_same_options_as_wood_storage(module)
+    test_ingot_key_entry_is_built_from_the_settings(module)
+    test_ingot_key_found_at_any_hue(module)
+    test_stone_storage_has_the_same_options_as_the_other_keys(module)
+    test_stone_storage_entry_is_built_from_the_settings(module)
+    test_granite_is_kept_out_of_the_one_way_chest(module)
+    test_stone_storage_is_off_for_everyone_by_default(module)
+    test_every_key_with_work_gets_a_turn(module)
+    test_the_whole_main_block_is_inside_the_handler(module)
+    test_the_trail_keeps_the_last_lines_only(module)
+    test_identical_lines_are_collapsed(module)
+    test_one_switch_turns_off_every_bulk_order(module)
+    test_movement_is_refused_when_the_player_is_gone(module)
+    test_player_ready_survives_a_dead_client(module)
+    test_recall_waits_for_the_world(module)
+    test_the_carpenter_is_marked_as_a_bod_vendor(module)
+    test_filing_stops_with_the_switch(module)
+    test_no_dead_top_level_functions(module)
+    test_a_flood_of_distinct_lines_is_capped(module)
+    test_suppressing_a_line_never_hides_it_from_the_crash_report(module)
+    test_rate_limit_is_configurable_and_sane(module)
+    test_crash_state_names_the_serials(module)
+    test_crash_state_survives_a_broken_player(module)
+    test_key_has_work_looks_only_at_its_own_resources(module)
+    test_a_key_we_know_nothing_about_is_still_offered(module)
+    test_each_key_can_have_its_own_menu_entry(module)
+    test_context_constants_are_declared_before_the_table(module)
+    test_store_at_ninety_percent(module)
+    test_reserve_still_backstops_a_heavy_yield(module)
+    test_bank_of_groups_tiles_the_way_the_server_does(module)
+    test_depleted_match_survives_the_apostrophe(module)
+    test_spot_cap_is_a_real_bound(module)
+    test_budget_shares_the_spot_deadline(module)
+    test_spot_deadline_stops_the_swing_loop(module)
+    test_mine_spot_honours_the_deadline_too(module)
+    test_idle_watchdog_abandons_a_barren_rune(module)
+    test_idle_clock_restarts_after_a_trip_home(module)
+    test_end_sweep_restarts_the_idle_clock(module)
+    test_path_leg_has_an_explicit_timeout(module)
+    test_impassable_ground_is_refused_without_pathfinding(module)
+    test_rooted_on_one_tile_gives_up(module)
+    test_stuck_config_is_ordered_sensibly(module)
+    test_a_productive_spot_is_worked_until_depleted(module)
+    test_swing_caps_clear_a_full_bank(module)
+    test_an_unproductive_spot_still_gives_up(module)
+    test_lumber_spot_also_runs_to_depletion(module)
+    test_skip_only_from_the_running_character(module)
+    test_skip_matches_the_whole_line_not_a_substring(module)
+    test_one_journal_pass_feeds_every_trigger(module)
+    test_skip_is_configured_for_separate_characters(module)
 
     print()
     if FAILURES:

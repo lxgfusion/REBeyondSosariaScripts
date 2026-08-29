@@ -42,6 +42,18 @@ import time
 Misc.Pause(5000)
 
 
+# Printed as the first line at startup. Bump it with every change that goes
+# out, so the journal says which copy Razor actually loaded - Razor caches the
+# loaded script even after the file on disk changes. If this line does not say
+# what you expect, hit Reload in the Scripting tab.
+#
+# This script has FOUR copies that differ on purpose (repo, main character,
+# MrGatherer, Mystic Gatherer). Give each a distinct SCRIPT_TAG so the banner
+# also says which copy is running, not just which version.
+SCRIPT_VERSION = "2026-08-22.19"
+SCRIPT_TAG = "repo"
+
+
 # #############################################################################
 # ##   DIAGNOSTIC MODE                                                       ##
 # #############################################################################
@@ -54,6 +66,38 @@ Misc.Pause(5000)
 # end - send that file back.
 DIAGNOSTIC_MODE = False
 DIAGNOSTIC_DUMP = os.path.join(os.environ.get("TEMP", "."), "harvest_diag.txt")
+
+# Crash reporting. A Razor script that raises prints one line and stops, and
+# the traceback is gone before you can read it - which is why "it crashes
+# sometimes" has been impossible to act on.
+#
+# Everything below the HELPERS banner is wrapped in a handler that writes the
+# FULL traceback, the last CRASH_TRAIL log lines, and the state that matters,
+# to this file AND to the journal. The file is per character, so several
+# running at once do not overwrite each other.
+CRASH_REPORT = True
+CRASH_TRAIL = 40
+
+# Collapse identical log lines repeated inside this window, and cap how many
+# lines a second may be sent at all.
+#
+# THIS IS NOT ABOUT TIDINESS. Misc.SendMessage is delivered by INJECTING a
+# packet into the client through the plugin receive path, so every log line is
+# network pressure on ClassicUO's receive buffer. MrGatherer's crash log is:
+#
+#   System.ArgumentException: Argument_DestinationTooShort
+#     ClassicUO.Network.CircularBuffer.Enqueue
+#     ClassicUO.Network.PacketHandlers.Append
+#     ClassicUO.Network.Plugin.OnPluginRecv_new
+#
+# - the plugin handing the client more than its buffer could take. A burst of
+# identical lines is the shape that does it: pack_has_room() is a QUERY called
+# several times per key inside refill_keys and once per swing in the sweeps,
+# and it announced itself every single time.
+#
+# Set LOG_DEDUPE_MS = 0 to see every line again.
+LOG_DEDUPE_MS = 4000
+LOG_MAX_PER_SECOND = 12
 
 
 # #############################################################################
@@ -162,37 +206,94 @@ DROPOFF_BETWEEN_JOBS = True
 #
 # Serial is used first; the id/hue below are the fallback if it is replaced.
 WOOD_STORAGE_WHERE = "pack"
-WOOD_STORAGE_SERIAL = 0x4290200A
+# ZERO in the repo copy ON PURPOSE - this is the copy that goes to GitHub, and
+# a real character's item serial has no business being published. Each live
+# copy carries its own character's serial, set by hand; do not copy one here.
+#
+# Zero is also a working default: the graphic plus any hue plus the name check
+# finds whichever wood storage is in that character's pack.
+WOOD_STORAGE_SERIAL = 0
 WOOD_STORAGE_ID = 0x1BD9         # graphic, used when the serial is gone
-WOOD_STORAGE_HUE = 0x0058        # its colour; -1 accepts any
+WOOD_STORAGE_HUE = -1            # -1 accepts ANY colour; see the note below
 WOOD_STORAGE_RANGE = 12          # tiles, only used when "world"
 
+# The hue used to be pinned to 0x0058, which meant a key of any other colour
+# was simply not found and the wood went to the chest instead. It is -1 now, so
+# colour is ignored - but hue was also the only thing separating the key from
+# an ordinary item of the same graphic, so NAMES takes over that job. An item
+# only counts as the storage if its name or tooltip contains one of these.
+#
+# Leave it [] to accept anything of the right graphic whatever it is called.
+WOOD_STORAGE_NAMES = ["wood storage", "storage", "key"]
+
 # -----------------------------------------------------------------------------
-# INGOT KEY - the mining equivalent of the Wood Storage.
+# INGOT KEY - the mining equivalent of the Wood Storage, and the same options.
 #
-# Same idea and the same "Refill from stock" entry: carry it and the ingots go
-# into it on the spot, instead of being carted to the drop chest.
+#   "world"  locked down somewhere at the drop-off house.
+#   "pack"   carried in your backpack.
 #
-# Inspected 2026-08-11: "Ingot Keys", serial 0x405B2105, ItemID 0x1BE8,
-# hue 0x0014, Blessed, carried in the pack.
+# As with the Wood Storage this only controls how it is SEARCHED FOR. Where it
+# actually is decides behaviour: found in your pack, the ingots go into it on
+# the spot and the character never travels to the drop-off. Carry the key and a
+# mining run goes start to finish in one trip - which matters more than it used
+# to, now that a rune is worked as a whole area rather than a single spot.
 #
-# PER CHARACTER, exactly like WOOD_STORAGE_SERIAL - each character has its own
-# key, so this serial is only right for the copy it ships in. The id/hue
-# fallback below is what keeps the other copies working when the serial is not
-# theirs; hue 0x0014 is this key's colour, set it to -1 if another character's
-# key is a different one.
+# Smelting happens first either way: the key takes INGOTS, not ore.
 #
-# False sends ingots to the drop chest as before.
+# ENABLED False sends ingots to the drop chest instead, as the original did.
 INGOT_KEY_ENABLED = True
+
+# Serial is used first; the id/hue below are the fallback if it is replaced.
 INGOT_KEY_WHERE = "pack"
-# Serial left EMPTY on purpose. Each character carries their own key, so a
-# serial here would be right for exactly one copy and would resolve to somebody
-# else's key in the others. The graphic with hue -1 finds whichever key is in
-# THIS character's pack. Inspected example: 0x405B2105, hue 0x0014.
+# Left EMPTY on purpose, exactly like WOOD_STORAGE_SERIAL. Each character
+# carries their OWN key, so a serial here would be right for one copy of this
+# script and would resolve to somebody else's key - or to nothing - in every
+# other. The graphic with any hue plus the name check below finds whichever
+# ingot key is in THIS character's pack, and needs no per-character editing.
+# Inspected 2026-08-11: "Ingot Keys", 0x405B2105, ItemID 0x1BE8, hue 0x0014,
+# Blessed, carried in the pack.
 INGOT_KEY_SERIAL = 0
 INGOT_KEY_ID = 0x1BE8
-INGOT_KEY_HUE = -1
-INGOT_KEY_RANGE = 12              # tiles, only used when "world"
+INGOT_KEY_HUE = -1               # -1 accepts ANY colour; see the note below
+INGOT_KEY_RANGE = 12             # tiles, only used when "world"
+
+# The same job WOOD_STORAGE_NAMES does. Hue used to be what told a key apart
+# from anything else sharing its graphic; with hue ignored so that a key of any
+# colour is found, the NAME takes that job over. An item only counts as the
+# ingot key if its name or tooltip contains one of these.
+#
+# Leave it [] to accept anything of the right graphic whatever it is called.
+INGOT_KEY_NAMES = ["ingot key", "ingot keys", "key"]
+
+# -----------------------------------------------------------------------------
+# STONE STORAGE - the granite equivalent, and the same options again.
+#
+# Granite is what mining gives you besides ore, and it is HEAVY. Without this
+# it goes to the drop chest, which is a ONE-WAY trip - see KEY_BACKED_IDS.
+#
+# Inspected 2026-08-18: "Stone Storage", ItemID 0xA54A, hue 0x0000, Blessed,
+# carried in the pack. The serial is per-character and is set live, not here -
+# this copy is published, so it ships zeroed like every other serial in it.
+#
+# This graphic was already in RESTOCK_KEYS as an unlabelled "Key (alt)" entry,
+# so it was being single-clicked without anyone knowing what it was - and
+# without granite being protected from the chest sweep.
+#
+# ONLY ONE CHARACTER MINES STONE. Everyone else ships ENABLED = False with no
+# serial: the key is theirs alone, and a graphic lookup on somebody else's
+# copy would find nothing anyway.
+STONE_STORAGE_ENABLED = False
+
+# Serial is used first; the id/hue below are the fallback if it is replaced.
+STONE_STORAGE_WHERE = "pack"
+STONE_STORAGE_SERIAL = 0
+STONE_STORAGE_ID = 0xA54A
+STONE_STORAGE_HUE = -1           # -1 accepts ANY colour
+STONE_STORAGE_RANGE = 12         # tiles, only used when "world"
+
+# The same job the other two NAMES lists do - with the hue ignored, the name
+# is what tells this key apart from anything else of its graphic.
+STONE_STORAGE_NAMES = ["stone storage", "storage", "key"]
 
 # Break off and move to the next rune if something hostile is close.
 #
@@ -229,6 +330,25 @@ HOSTILE_SKIP_LIMIT = 3
 # Run Scripts/diag_vendors.py beside an NPC for its real name and entries.
 # Set "enabled": False to skip a stop without deleting it.
 
+# =============================================================================
+# ONE SWITCH FOR ALL BULK ORDER DEEDS
+# =============================================================================
+# False turns off EVERYTHING to do with bulk orders and nothing else:
+#
+#   * every BOD_LOCATIONS x BOD_PROFESSIONS stop (smith, scribe, tailor,
+#     tinker, carpenter)
+#   * the "Carpenter" entry in VENDORS below, which is a BOD vendor that
+#     happens to live in this table rather than the BOD one
+#   * filing deeds into the Bulk Order Book, and the book's startup report
+#
+# Resource Orders and Taming Deeds are NOT bulk orders and keep running. They
+# are the two entries below without "bod": True.
+#
+# Turning this off is a real saving: the BOD tables expand to five stops, each
+# one a recall, a walk and a context menu, on every vendor round.
+BOD_ENABLED = True
+
+
 VENDORS = [
     {
         "enabled": True,
@@ -259,6 +379,9 @@ VENDORS = [
     # with inspected data, so it is the one that survived de-duplication.
     {
         "enabled": True,
+        # A BULK ORDER vendor, so BOD_ENABLED = False removes it with the rest
+        # even though it is listed here rather than in BOD_LOCATIONS.
+        "bod":     True,
         "label":   "Carpenter",
         "folder":  ['BOD'],
         "point":   'carpenter',          # rune at 1479, 1790
@@ -506,6 +629,17 @@ CONTEXT_TIMEOUT = 10000
 # on, does the round, and resumes the same lap at the same waypoint.
 VENDOR_INTERVAL_MS = 30 * 60 * 1000
 
+# Go home and store straight after a vendor round that actually collected
+# something. Resource orders, bulk order deeds and taming deeds are all handed
+# over at the NPC and then ride around in the pack for the rest of the lap -
+# taking up item slots, and at risk if the character dies. The drop-off already
+# knows where each of them goes (HOUSE_DEPOSITS for the order books, the BOD
+# book for bulk orders), so this just makes it happen at the right moment.
+#
+# Nothing was collected means no trip: a round where every NPC was still on
+# cooldown does not earn a recall home.
+DROPOFF_AFTER_VENDORS = True
+
 # ms to wait for an item or mobile TOOLTIP. Vendor titles and the backpack's
 # Contents line both come from tooltips, and reading one before it has arrived
 # gives an empty string rather than an error.
@@ -539,6 +673,43 @@ GREYSKULL_IGNORE_SELF = False
 # How long to stand at the circle once it has been reached, before going back
 # to work.
 GREYSKULL_HOLD_MS = 20000
+
+# =============================================================================
+# CONFIG - SKIP COMMAND
+# =============================================================================
+# Say one of these in game and the script abandons the spot it is working and
+# recalls to the next rune on the route. Useful when you can see it is stuck
+# somewhere the guards have not noticed yet, or when a rune has turned out to
+# be somewhere you would rather it did not stand.
+#
+# Matched on the WHOLE spoken line, not as a substring: "skip" is an ordinary
+# word and a vendor or another player saying it in passing must not send the
+# character off. Case and trailing punctuation are ignored, because a phrase a
+# human types varies in both every time.
+SKIP_PHRASES = ["skip"]
+
+# Only the character running THIS copy of the script may say it. Confirmed on
+# the journal entry's Serial, which is the speaker's mobile - names are not
+# unique and global chat puts "System" in the Name field.
+#
+# False lets anyone skip your character, which is almost never what you want.
+SKIP_SELF_ONLY = True
+
+# The smaller version of the same idea. "skip" abandons the WHOLE area and
+# recalls; "move" leaves only the spot being worked and walks to the next spot
+# in the same area - so a rune you are happy with does not have to be thrown
+# away because one tile in it is bad.
+#
+# When the spot being left was the LAST one in the area there is nothing to
+# move on to, so it falls through to the same thing skip does and recalls to
+# the next rune. That is not a special case in the code: the sweep loop simply
+# runs out of spots and returns "next" on its own.
+#
+# Matched the same way as SKIP_PHRASES - whole line, self only. "move" is an
+# even more ordinary word than "skip", so the whole-line rule matters more
+# here, not less.
+MOVE_PHRASES = ["move"]
+MOVE_SELF_ONLY = True
 
 # Where the call sends you: the runebook folder and the rune inside it.
 ARCANE_FOLDER = ['Arcane']
@@ -674,6 +845,10 @@ KEEP_INGOTS = 20
 KEY_BACKED_IDS = [
     {"label": "Wood Storage", "ids": [0x1BD7, 0x1BDD]},   # boards, logs
     {"label": "Ingot key",    "ids": [0x1BF2]},           # ingots
+    # Granite. 0x1779 is in PURGE_ID, so without this line every piece mined
+    # would be swept into the chest even with the Stone Storage in the pack -
+    # and the chest is one-way.
+    {"label": "Stone Storage", "ids": [0x1779]},          # granite
 ]
 
 # Storage containers and keys that swallow harvested resources. Each is
@@ -685,6 +860,19 @@ KEY_BACKED_IDS = [
 #   where    "pack"  - inside your backpack
 #            "world" - on the ground nearby, e.g. locked down in a house
 #   range    Tiles to search for "world" entries.
+RESTOCK_CONTEXT = ["Refill from stock"]
+
+# Per-key overrides, for a storage whose menu words it differently. Each is
+# tried BEFORE the shared RESTOCK_CONTEXT above, and an empty list just means
+# "use the shared one".
+#
+# Menu entries are matched exactly first and only then by a guarded substring,
+# because a context menu carries Buy, Sell, Bribe and Open Bankbox right next
+# to the entry you want.
+WOOD_STORAGE_CONTEXT = []
+INGOT_KEY_CONTEXT = []
+STONE_STORAGE_CONTEXT = []
+
 RESTOCK_KEYS = [
     {
         # Built from the WOOD_STORAGE_* settings at the top of the file.
@@ -692,8 +880,10 @@ RESTOCK_KEYS = [
         # RootContainer both None, Ground yes - so a backpack search, which is
         # what the original did, could never find it.
         "label": "Wood Storage",
+        "context": WOOD_STORAGE_CONTEXT,
         "serial": WOOD_STORAGE_SERIAL,
         "id": WOOD_STORAGE_ID, "hue": WOOD_STORAGE_HUE,
+        "names": WOOD_STORAGE_NAMES,
         "where": WOOD_STORAGE_WHERE, "range": WOOD_STORAGE_RANGE,
     },
     {"label": "Master key",  "id": 0x176B, "hue": 0x0481, "where": "pack"},
@@ -701,12 +891,25 @@ RESTOCK_KEYS = [
         # Built from the INGOT_KEY_* settings at the top of the file, the same
         # way the Wood Storage entry is.
         "label": "Ingot key",
+        "context": INGOT_KEY_CONTEXT,
         "enabled": INGOT_KEY_ENABLED,
         "serial": INGOT_KEY_SERIAL,
         "id": INGOT_KEY_ID, "hue": INGOT_KEY_HUE,
+        "names": INGOT_KEY_NAMES,
         "where": INGOT_KEY_WHERE, "range": INGOT_KEY_RANGE,
     },
-    {"label": "Key (alt)",   "id": 0xA54A, "hue": -1,     "where": "pack"},
+    {
+        # Built from the STONE_STORAGE_* settings at the top of the file. This
+        # shipped as an unnamed "Key (alt)" on the same graphic, which is what
+        # it always was.
+        "label": "Stone Storage",
+        "context": STONE_STORAGE_CONTEXT,
+        "enabled": STONE_STORAGE_ENABLED,
+        "serial": STONE_STORAGE_SERIAL,
+        "id": STONE_STORAGE_ID, "hue": STONE_STORAGE_HUE,
+        "names": STONE_STORAGE_NAMES,
+        "where": STONE_STORAGE_WHERE, "range": STONE_STORAGE_RANGE,
+    },
     # 0x2259 is the Bulk Order Book graphic. Carried books are handled by
     # BOD_BOOK_SERIAL below (deeds are dragged in); this entry is inherited from
     # the original script and only matches one sitting on the ground nearby.
@@ -716,10 +919,45 @@ RESTOCK_KEYS = [
 
 # Context entry that pushes the pack's resources into the storage. Matched the
 # same way as vendor entries: exact label first, then a guarded substring.
-RESTOCK_CONTEXT = ["Refill from stock"]
 
-# Pack is "full" past this fraction of item count or weight.
-PACK_THRESHOLD = 0.6
+# -----------------------------------------------------------------------------
+# WHEN THE PACK COUNTS AS FULL
+#
+# Harvesting runs until there is no longer room for one more yield, NOT until
+# some fraction of the pack is used. A fraction throws away everything above
+# it: at 0.6 a 495-stone character stored at 297 stones and left 198 on the
+# table, every single trip.
+#
+# So the rule is a RESERVE, in stones, measured against real carry weight
+# (Player.MaxWeight - Player.Weight). Keep harvesting while the free weight is
+# above the reserve; store when it is not.
+#
+# The reserve has to cover one more yield, and how heavy that is depends on the
+# resource - so it is not guessed. The script watches how much each swing
+# actually adds and keeps the largest it has seen, times a safety margin. The
+# floor below is only what it uses before it has seen anything.
+# Store once this fraction of carry weight is used. This is the rule that
+# decides when to stop and empty into the keys, and it is deliberately a plain
+# percentage because that is the thing that is easy to reason about in game:
+# 0.90 on a 495-stone character means storing at 445 stones.
+PACK_STORE_AT = 0.90
+
+# Backstop under the percentage. If ONE more yield would take the pack past its
+# limit, stop now even though the percentage has not been reached - going over
+# means the server refuses the ore and it is simply lost. The reserve is
+# measured, not guessed: see note_yield below.
+PACK_WEIGHT_RESERVE = 30          # stones, floor for the reserve
+PACK_RESERVE_SAFETY = 1.5         # multiplier on the heaviest observed swing
+
+# Ceiling on the learned reserve, so one freak measurement - picking up a full
+# chest, a pet handing something over - cannot park the reserve so high that
+# the character stores at half weight forever.
+PACK_RESERVE_MAX = 200            # stones
+
+# Pack is "full" past this fraction of ITEM COUNT. Weight is handled by the
+# reserve above; this is the separate problem of a pack full of gems, tools and
+# deeds while barely carrying any weight, which no key can fix.
+PACK_THRESHOLD = 0.9
 
 # A job may only start with the pack below this fraction. Anything heavier and
 # the next job gets unloaded first - measured in the real trace, mining handed
@@ -749,6 +987,161 @@ FORGE_ID = 0x0FB1
 # Every ore graphic, small piles through large. Ore is NOT in PURGE_ID: the
 # chest is for finished goods, so smelting is the only route out of the pack.
 ORE_ID = [0x19BA, 0x19B9, 0x19B8, 0x19B7]
+
+# ms for one swing to resolve. The server's mining MaxRange is 2 tiles.
+MINE_SWING_TIMEOUT = 5000
+
+# -----------------------------------------------------------------------------
+# MYTHRIL - this shard's own metal, and it does not behave like the others.
+#
+# Observed in game 2026-08-22 on the mythril runes:
+#
+#   * A swing takes about EIGHT seconds, against five for ordinary rock. At
+#     MINE_SWING_TIMEOUT the swing is still running when the timeout expires,
+#     so dig_once returns "silent", mine_spot breaks after one swing and the
+#     whole spot is abandoned. That alone is why these runes produce nothing.
+#
+#   * SUCCESS IS SILENT. There is no "You dig some ore" line at all - the ore
+#     simply appears in the pack. So a successful mythril swing cannot be
+#     recognised from the journal, and has to be seen as weight arriving.
+#
+#   * Failure DOES speak: "You dig for a while but fail to find any mythril
+#     ore of suitable quality." Note that starts with "You", so dig_once's
+#     broad catch-all would score it as ore recovered - which is why the
+#     mythril strings are tested BEFORE that catch-all.
+#
+#   * Depletion speaks too, but differently: "There is no mythril ore here to
+#     mine." That contains neither "no metal" nor "You", so nothing in the
+#     ordinary tables matches it and it also fell through to "silent".
+#
+#   * Ordinary ore still comes out of these spots as normal.
+#
+# WAYPOINTS ONLY. Nothing here applies anywhere else - a 12s timeout on
+# ordinary rock would make every normal swing three times slower to give up.
+# Numbers are the 1-based waypoint index the journal prints, the N in
+# "Mining waypoint N/M".
+MYTHRIL_ENABLED = False
+MYTHRIL_WAYPOINTS = []
+
+# Generous: the swing is ~8s and a laggy server is slower still. It only ever
+# applies inside MYTHRIL_WAYPOINTS, so being generous costs nothing elsewhere.
+MYTHRIL_SWING_TIMEOUT = 12000
+
+# How long to keep watching for silently-arriving ore after the server has said
+# nothing. Inspected: "2 ore", ItemID 0x19B9, hue 0x0057, tooltip line
+# "Mythril", 24 stones for two.
+MYTHRIL_ORE_ID = 0x19B9
+MYTHRIL_ORE_HUE = 0x0057
+
+# -----------------------------------------------------------------------------
+# MINING AREA SWEEP - move to the next patch of rock instead of recalling.
+#
+# A resource BANK is the unit that runs out. ServUO
+# Scripts/Services/Harvest/Mining.cs sets BankWidth = 8 and BankHeight = 8, so
+# once "there is no metal here" comes back, everything within that whole 8x8
+# block is spent and standing anywhere inside it is wasted effort. Eight tiles
+# is therefore the SHORTEST move that can reach fresh ore, which is why STEP
+# defaults to exactly that. (Lumber banks are only 4x3 - that is why the lumber
+# sweep steps 3 and this one steps 8.)
+#
+# RADIUS is how far out to look for the next patch, in tiles. 18 reaches two
+# banks in every direction.
+#
+# Spots are not walked blindly: each candidate is checked against the mountain,
+# cave and sand tile lists below FIRST, so the character only walks to ground
+# that can actually be mined.
+MINE_AREA_ENABLED = True
+MINE_AREA_RADIUS = 18
+MINE_BANK = 8                    # = Mining.cs BankWidth AND BankHeight
+MINE_AREA_STEP = MINE_BANK       # do not lower: a smaller step re-mines a
+                                 # bank that has already said it is empty
+
+# Include sand tiles as somewhere worth standing. Off by default: mining sand
+# needs the sand-mining skill/quest on most shards, and a shovel on sand just
+# reports failure over and over.
+MINE_AREA_INCLUDE_SAND = False
+
+# ms to reach one mining spot before giving up on it.
+MINE_AREA_MOVE_TIMEOUT = 12000
+
+# ms to wait for the reply to the first swing at a new spot.
+MINE_AREA_PROBE_TIMEOUT = 5000
+
+# Absolute backstop on swings at one spot. The real guard is the no-ore clock
+# above; this only stops a runaway loop.
+#
+# It must be comfortably ABOVE a full bank or it truncates depletion, which is
+# the thing it must not do. Mining.cs gives a bank 10-34 ore, one per swing,
+# and misses ("you loosen some rocks but fail") cost a swing without yielding -
+# so 34 is the floor, not the target. 80 leaves room for a bad run of misses.
+MINE_AREA_MAX_SWINGS = 80
+
+
+# -----------------------------------------------------------------------------
+# MINEABLE GROUND - which land and static tiles count as mountain, cave or sand.
+#
+# From ServUO Scripts/Services/Harvest/Mining.cs (m_MountainAndCaveTiles and
+# m_SandTiles), extracted by tools/extract_harvest_tiles.py. Regenerate with:
+#
+#     python tools/extract_harvest_tiles.py --fetch
+#
+# Do not hand-edit. A tile is checked as BOTH a land id and a static id,
+# because mountains come as either depending on the map.
+MOUNTAIN_AND_CAVE_TILES = frozenset([
+    0x00DC, 0x00DD, 0x00DE, 0x00DF, 0x00E0, 0x00E1, 0x00E2, 0x00E3, 0x00E4, 0x00E5,
+    0x00E6, 0x00E7, 0x00EC, 0x00ED, 0x00EE, 0x00EF, 0x00F0, 0x00F1, 0x00F2, 0x00F3,
+    0x00F4, 0x00F5, 0x00F6, 0x00F7, 0x00FC, 0x00FD, 0x00FE, 0x00FF, 0x0100, 0x0101,
+    0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107, 0x010C, 0x010D, 0x010E, 0x010F,
+    0x0110, 0x0111, 0x0112, 0x0113, 0x0114, 0x0115, 0x0116, 0x0117, 0x011E, 0x011F,
+    0x0120, 0x0121, 0x0122, 0x0123, 0x0124, 0x0125, 0x0126, 0x0127, 0x0128, 0x0129,
+    0x0141, 0x0142, 0x0143, 0x0144, 0x01D3, 0x01D4, 0x01D5, 0x01D6, 0x01D7, 0x01D8,
+    0x01D9, 0x01DA, 0x01DC, 0x01DD, 0x01DE, 0x01DF, 0x01E0, 0x01E1, 0x01E2, 0x01E3,
+    0x01E4, 0x01E5, 0x01E6, 0x01E7, 0x01EC, 0x01ED, 0x01EE, 0x01EF, 0x021F, 0x0220,
+    0x0221, 0x0222, 0x0223, 0x0224, 0x0225, 0x0226, 0x0227, 0x0228, 0x0229, 0x022A,
+    0x022B, 0x022C, 0x022D, 0x022E, 0x022F, 0x0230, 0x0231, 0x0232, 0x0233, 0x0234,
+    0x0235, 0x0236, 0x0237, 0x0238, 0x0239, 0x023A, 0x023B, 0x023C, 0x023D, 0x023E,
+    0x023F, 0x0240, 0x0241, 0x0242, 0x0243, 0x0245, 0x0246, 0x0247, 0x0248, 0x0249,
+    0x024A, 0x024B, 0x024C, 0x024D, 0x024E, 0x024F, 0x0250, 0x0251, 0x0252, 0x0253,
+    0x0254, 0x0255, 0x0256, 0x0257, 0x0258, 0x0259, 0x0262, 0x0263, 0x0264, 0x0265,
+    0x03F2, 0x06CD, 0x06CE, 0x06CF, 0x06D0, 0x06D1, 0x06D2, 0x06D3, 0x06D4, 0x06D5,
+    0x06D6, 0x06D7, 0x06D8, 0x06D9, 0x06DA, 0x06DB, 0x06DC, 0x06DD, 0x06EB, 0x06EC,
+    0x06ED, 0x06EE, 0x06EF, 0x06F0, 0x06F1, 0x06F2, 0x06F3, 0x06F4, 0x06F5, 0x06F6,
+    0x06F7, 0x06F8, 0x06F9, 0x06FA, 0x06FB, 0x06FC, 0x06FD, 0x06FE, 0x0709, 0x070A,
+    0x070B, 0x070C, 0x070D, 0x070E, 0x070F, 0x0710, 0x0711, 0x0713, 0x0714, 0x0715,
+    0x0716, 0x0717, 0x0718, 0x0719, 0x071A, 0x071B, 0x071C, 0x071D, 0x071E, 0x071F,
+    0x0720, 0x0727, 0x0728, 0x0729, 0x072A, 0x072B, 0x072C, 0x072D, 0x072E, 0x072F,
+    0x0730, 0x0731, 0x0732, 0x0733, 0x0734, 0x0735, 0x0736, 0x0737, 0x0738, 0x0739,
+    0x073A, 0x073B, 0x073C, 0x073D, 0x073E, 0x0745, 0x0746, 0x0747, 0x0748, 0x0749,
+    0x074A, 0x074B, 0x074C, 0x074D, 0x074E, 0x074F, 0x0750, 0x0751, 0x0752, 0x0753,
+    0x0754, 0x0755, 0x0756, 0x0757, 0x0758, 0x0759, 0x075A, 0x075B, 0x075C, 0x07BD,
+    0x07BE, 0x07BF, 0x07C0, 0x07C1, 0x07C2, 0x07C3, 0x07C4, 0x07C5, 0x07C6, 0x07C7,
+    0x07C8, 0x07C9, 0x07CA, 0x07CB, 0x07CC, 0x07CD, 0x07CE, 0x07CF, 0x07D0, 0x07D1,
+    0x07D2, 0x07D3, 0x07D4, 0x07EC, 0x07ED, 0x07EE, 0x07EF, 0x07F0, 0x07F1, 0x0834,
+    0x0835, 0x0836, 0x0837, 0x0838, 0x0839, 0x453B, 0x453C, 0x453D, 0x453E, 0x453F,
+    0x4540, 0x4541, 0x4542, 0x4543, 0x4544, 0x4545, 0x4546, 0x4547, 0x4548, 0x4549,
+    0x454A, 0x454B, 0x454C, 0x454D, 0x454E, 0x454F,
+])
+
+SAND_TILES = frozenset([
+    0x0016, 0x0017, 0x0018, 0x0019, 0x001A, 0x001B, 0x001C, 0x001D, 0x001E, 0x001F,
+    0x0020, 0x0021, 0x0022, 0x0023, 0x0024, 0x0025, 0x0026, 0x0027, 0x0028, 0x0029,
+    0x002A, 0x002B, 0x002C, 0x002D, 0x002E, 0x002F, 0x0030, 0x0031, 0x0032, 0x0033,
+    0x0034, 0x0035, 0x0036, 0x0037, 0x0038, 0x0039, 0x003A, 0x003B, 0x003C, 0x003D,
+    0x003E, 0x0044, 0x0045, 0x0046, 0x0047, 0x0048, 0x0049, 0x004A, 0x004B, 0x011E,
+    0x011F, 0x0120, 0x0121, 0x0122, 0x0123, 0x0124, 0x0125, 0x0126, 0x0127, 0x0128,
+    0x0129, 0x012A, 0x012B, 0x012C, 0x012D, 0x0192, 0x01A8, 0x01A9, 0x01AA, 0x01AB,
+    0x01B9, 0x01BA, 0x01BB, 0x01BC, 0x01BD, 0x01BE, 0x01BF, 0x01C0, 0x01C1, 0x01C2,
+    0x01C3, 0x01C4, 0x01C5, 0x01C6, 0x01C7, 0x01C8, 0x01C9, 0x01CA, 0x01CB, 0x01CC,
+    0x01CD, 0x01CE, 0x01CF, 0x01D0, 0x01D1, 0x0282, 0x0283, 0x0284, 0x0285, 0x028A,
+    0x028B, 0x028C, 0x028D, 0x028E, 0x028F, 0x0290, 0x0291, 0x0335, 0x0336, 0x0337,
+    0x0338, 0x0339, 0x033A, 0x033B, 0x033C, 0x0341, 0x0342, 0x0343, 0x0344, 0x034D,
+    0x034E, 0x034F, 0x0350, 0x0351, 0x0352, 0x0353, 0x0354, 0x0359, 0x035A, 0x035B,
+    0x035C, 0x03B7, 0x03B8, 0x03B9, 0x03BA, 0x03BB, 0x03BC, 0x03BD, 0x03BE, 0x03C7,
+    0x03C8, 0x03C9, 0x03CA, 0x05A7, 0x05A8, 0x05A9, 0x05AA, 0x05AB, 0x05AC, 0x05AD,
+    0x05AE, 0x05AF, 0x05B0, 0x05B1, 0x05B2, 0x064B, 0x064C, 0x064D, 0x064E, 0x064F,
+    0x0650, 0x0651, 0x0652, 0x0657, 0x0658, 0x0659, 0x065A, 0x0663, 0x0664, 0x0665,
+    0x0666, 0x0667, 0x0668, 0x0669, 0x066A, 0x066F, 0x0670, 0x0671, 0x0672,
+])
 
 
 # =============================================================================
@@ -784,6 +1177,182 @@ AXE_EXCLUDE = ["war"]
 # ms for one chop to resolve. The server's lumberjacking MaxRange is 2 tiles,
 # so a rune has to land within 2 of the tree.
 LUMBER_SWING_TIMEOUT = 6000
+
+# -----------------------------------------------------------------------------
+# LUMBER AREA SWEEP - work a whole patch at each rune, not just the one tree.
+#
+# A rune drops you beside one tree and the server's harvest range is 2 tiles,
+# so from a single standing spot that one tree is all you can ever reach. With
+# this on, the script walks a grid of standing spots around the landing point
+# and chops at each before recalling on, which is worth several trees per
+# recall instead of one.
+#
+# SIZE is the edge of the box in tiles, centred on where the rune lands - 8
+# means 4 tiles in every direction. STEP is the gap between standing spots:
+# the harvest range is 2, so a step of 4 just barely touches and a step of 3
+# overlaps, which is far more forgiving of trees the pathfinder cannot reach
+# head-on. Raising STEP walks less and misses more.
+#
+# 8 with a step of 3 gives 9 standing spots covering 5 tiles out in each
+# direction. Set ENABLED = False for the old one-spot behaviour.
+LUMBER_AREA_ENABLED = True
+LUMBER_AREA_SIZE = 8
+# Tiles between standing spots, PER AXIS, because a lumber bank is not square.
+#
+# ServUO Scripts/Services/Harvest/Lumberjacking.cs sets BankWidth = 4 and
+# BankHeight = 3. A bank is the unit that DEPLETES - "there's not enough wood
+# here" means that whole bank is spent - so a step smaller than the bank lands
+# the character back in the block they just emptied and the server says the
+# same thing again.
+#
+# This was set to 3 on both axes, which is why a depleted patch looked like the
+# script standing around doing nothing: a third of the sideways moves stayed
+# inside the same 4-wide bank and were dead on arrival.
+LUMBER_BANK_W = 4                # = Lumberjacking.cs BankWidth
+LUMBER_BANK_H = 3                # = Lumberjacking.cs BankHeight
+LUMBER_AREA_STEP_X = LUMBER_BANK_W
+LUMBER_AREA_STEP_Y = LUMBER_BANK_H
+
+# ms to reach one standing spot before giving up on it and trying the next.
+LUMBER_AREA_MOVE_TIMEOUT = 8000
+
+# How far off an intended standing spot still counts as arrived. The harvest
+# range is 2, so being a tile short reaches nearly the same trees - settling
+# there beats burning the whole move timeout on a tile the pathfinder cannot
+# stand on. Same idea as the taming script's approach fallback.
+LUMBER_AREA_ARRIVE_ACCEPT = 1
+
+# ms to wait for the server's reply to the FIRST swing at a new spot.
+#
+# A spot with no tree in reach normally answers at once with "You can't use an
+# axe on that". If your shard answers with silence instead, that spot costs a
+# full timeout every visit, so this is kept separate from LUMBER_SWING_TIMEOUT
+# and can be cut right down. The sweep reports how many spots went silent, so
+# the journal says whether this is worth touching at all.
+LUMBER_AREA_PROBE_TIMEOUT = 6000
+
+# Absolute backstop on chops at one spot, matching MINE_AREA_MAX_SWINGS. A
+# wood bank holds 20-45 (Lumberjacking.cs MinTotal/MaxTotal) and misses cost a
+# swing, so anything near 40 would abandon a full bank half-cut.
+LUMBER_AREA_MAX_SWINGS = 100
+
+# -----------------------------------------------------------------------------
+# WALKING BETWEEN SPOTS - shared by both sweeps.
+#
+# The standing grid is laid out by ARITHMETIC, so underground it regularly puts
+# the next spot inside a mountain or on the far side of one. Walking at those
+# just bounces off the rock until the move timeout, which is what left a
+# character shuffling against a cliff face instead of mining.
+#
+# So every spot is PATH-CHECKED before a step is taken. PathFinding.GetPath
+# runs the search without moving anyone, so asking costs nothing.
+
+# Refuse a spot whose path is more than this many times the direct distance.
+#
+# "Is there a path" is not on its own the right question. Inside a cave the
+# next ore bank is often 8 tiles away through solid rock with a perfectly real
+# 80-tile path around the outside of the mountain - and walking it leaves the
+# mine entirely, which is worse than skipping the spot. 3.0 allows a normal
+# detour around a wall and refuses a trip around the mountain.
+AREA_MAX_DETOUR = 3.0
+
+# Give up after this many moves that got no closer. Measured against the BEST
+# distance reached, not the previous one: a pathfinder bouncing off a wall
+# shuffles back and forth, so "did I move" says yes forever while "am I getting
+# closer" says no - and only the second is the truth.
+AREA_STALL_STEPS = 4
+
+# HARD CAP on the time spent at one standing spot - walking to it AND swinging
+# there. When it runs out the sweep moves to the next spot regardless of what
+# is happening.
+#
+# This is the backstop that guarantees the character keeps moving. Everything
+# else here is a diagnosis of a particular way of getting stuck; this one does
+# not care why. Before it existed a mining spot could hold the character for
+# MINE_AREA_MAX_SWINGS * MINE_SWING_TIMEOUT - 40 swings at 5s, over three
+# minutes - and a character wedged against a cave wall looked exactly like one
+# working a rich vein.
+#
+# NOTE this cuts off a PRODUCTIVE spot too. An 8x8 ore bank holds 10-34 ore
+# (Mining.cs MinTotal/MaxTotal), which is more than 15 seconds of swinging, so
+# some is left behind - the sweep comes back to it on the next visit. If the
+# journal shows spots being cut off while still yielding, this is the number to
+# raise.
+# Measured from the last swing that PRODUCED something, not from arriving. A
+# spot that is yielding keeps resetting it and is worked until the bank is
+# empty; only a spot producing nothing runs the clock down.
+#
+# This started as a hard cap and that was wrong: it cut productive spots off
+# part-way, so banks were abandoned half-mined. The right reading of "stuck" is
+# the one that matches what a person sees - the character moved, and then no
+# mining happened. Time spent actually mining is not stuck.
+AREA_SPOT_TIMEOUT_MS = 15000
+
+# HARD LIMIT on getting NOTHING. If no swing anywhere in the area has produced
+# anything for this long, abandon the rune and recall to the next one.
+#
+# The spot cap above bounds one spot; this bounds the whole visit. They are
+# different failures. A character wedged against a cave wall passes the spot
+# cap perfectly happily - it moves on every 15 seconds, to another spot behind
+# the same wall, and on a 25-spot mining grid that is six minutes of looking
+# busy and producing nothing. This is the one that says "you are not actually
+# harvesting, leave".
+#
+# The clock resets on every swing that yields, so a productive area is never
+# interrupted however long it takes.
+AREA_IDLE_TIMEOUT_MS = 45000
+
+# ABSOLUTE ceiling on one spot. NOTHING extends this - not ore, not a mythril
+# miss, not anything.
+#
+# Both guards above are resettable by design, and that is what let a character
+# sit on one tile for several minutes with neither of them firing:
+#
+#   * AREA_SPOT_TIMEOUT_MS is pushed out again by every productive swing, and
+#     a mythril "miss" counts as productive because eight seconds of digging
+#     IS work. On a spot that misses forever, it never expires.
+#   * AREA_IDLE_TIMEOUT_MS is only tested in the sweep, BETWEEN spots. A spot
+#     that never returns never gives it a turn.
+#
+# So the only real bound was MINE_AREA_MAX_SWINGS x the swing timeout: 80 x 5s
+# is nearly seven minutes, and 80 x 12s in a mythril zone is SIXTEEN. Observed
+# in game 2026-08-22 - the character stopped for minutes and answered neither
+# "move" nor "skip" quickly, because both are only read between swings.
+#
+# This one is measured from entering the spot and is never reset.
+AREA_SPOT_HARD_CAP_MS = 120000
+
+# Say something while a spot is still being worked, this often. A spot that
+# takes minutes in complete silence is indistinguishable from a hung script -
+# which is exactly how the stall above got reported as "nothing is happening".
+AREA_PROGRESS_MS = 30000
+
+# Seconds PathFinding.Go is allowed for ONE leg of a walk.
+#
+# THIS IS THE ONE THAT MATTERED. Route.Timeout was never set, and Razor's
+# related calls document their timeout as `-1` - no limit. PathFinding.Go
+# therefore blocks for as long as it likes, and while it is blocked NONE of the
+# guards above run: the spot cap, the idle watchdog and the stall detection are
+# all Python checks BETWEEN calls, and control never comes back to make them.
+# That is why a character could sit against a cave wall through three separate
+# rounds of "add a timeout" - every timeout added was on the wrong side of a
+# blocking call.
+#
+# Keep it short. It is one leg of a walk, not the whole journey; walk_to calls
+# it repeatedly and applies its own budget between legs.
+PATH_LEG_TIMEOUT_S = 5.0
+
+# Give up on a walk after this long on the EXACT same tile. Movement is the
+# thing being attempted, so not moving at all is the failure - unlike swinging,
+# where standing still is normal and AREA_IDLE_TIMEOUT_MS is the right test.
+AREA_STUCK_TIMEOUT_MS = 20000
+
+# How long to wait for the character to exist in the world before moving, and
+# how often to check. See player_ready() - ClassicUO's Plugin.RequestMove has
+# no null check on World.Player, so asking to move during a recall takes the
+# whole CLIENT down, not just the script.
+PLAYER_READY_TIMEOUT_MS = 15000
+PLAYER_READY_POLL_MS = 250
 
 
 # =============================================================================
@@ -901,7 +1470,12 @@ LUMBER_RETRY = [
     "You hack at the tree for a while",     # 500495, a failed swing - keep going
 ]
 LUMBER_DEPLETED = [
-    "There's not enough wood here to harvest",   # 500493
+    # 500493 is "There's not enough wood here to harvest." - matched WITHOUT
+    # the leading "There's" on purpose. Shards and clients differ on whether
+    # that apostrophe is ASCII ' or a typographic one, and a mismatch there
+    # fails silently: the line never matches, the swing times out instead, and
+    # every depleted spot costs a full timeout of standing still.
+    "not enough wood here",                 # 500493
 ]
 LUMBER_BAD_TARGET = [
     "You can't use an axe on that",         # 500489
@@ -917,17 +1491,52 @@ LUMBER_TOOL_BROKE = [
 LUMBER_ALL = (LUMBER_SUCCESS + LUMBER_RETRY + LUMBER_DEPLETED +
               LUMBER_BAD_TARGET + LUMBER_PACK_FULL + LUMBER_TOOL_BROKE)
 
-# Mining detection is left exactly as the working original: a broad "You" match
-# with "You can't mine there" and "no metal" as the negative cases. For
-# reference if it ever needs tightening, the verified ServUO strings are:
-#   503040 There is no metal here to mine.
-#   503041 You have moved too far away to continue mining.
-#   503042 Someone has gotten to the metal before you.
-#   503043 You loosen some rocks but fail to find any useable ore.
-#   501862 You can't mine there.      501863 You can't mine that.
-#   1010481 Your backpack is full, so the ore you mined is lost.
-#   1044038 You have worn out your tool!
-MINE_TOOL_BROKE = ["You have worn out your tool"]
+# Mining. The original matched a broad "You" with "You can't mine there" and
+# "no metal" as the negative cases, and that WORKED - it is still the last
+# resort in dig_once(). These specific strings are checked first only because
+# the area sweep has to tell two things apart that the broad match cannot:
+# "this bank is mined out, move one bank over" and "there is no rock here at
+# all, never walk back". Verified ServUO clilocs.
+MINE_SUCCESS = [
+    "You dig some",                         # the ore line
+    "You loosen some rocks but fail",       # 503043, a miss - keep swinging
+    "You put",
+]
+MINE_DEPLETED = [
+    "There is no metal here to mine",       # 503040
+    "no metal",                             # the original's broad negative
+    "Someone has gotten to the metal before you",   # 503042
+]
+MINE_BAD_TARGET = [
+    "You can't mine there",                 # 501862
+    "You can't mine that",                  # 501863
+    "You have moved too far away",          # 503041
+]
+MINE_PACK_FULL = [
+    "Your backpack is full",                # 1010481
+]
+MINE_TOOL_BROKE = ["You have worn out your tool"]       # 1044038
+
+# Mythril, from the journal 2026-08-22. Both spellings are matched because the
+# shard is not consistent about them and a missed match here reads as "silent".
+#
+# The FAIL line begins with "You", so it is tested before dig_once's broad
+# `Journal.Search("You")` catch-all - otherwise a failed mythril swing scores
+# as ore recovered.
+MINE_MYTHRIL_FAIL = [
+    "fail to find any mythril ore",
+    "fail to find any mithril ore",
+]
+# "There is no mythril ore here to mine." Contains neither "no metal" nor
+# "You", so none of the tables above match it.
+MINE_MYTHRIL_DEPLETED = [
+    "no mythril ore here to mine",
+    "no mithril ore here to mine",
+]
+
+MINE_ALL = (MINE_SUCCESS + MINE_DEPLETED + MINE_BAD_TARGET +
+            MINE_PACK_FULL + MINE_TOOL_BROKE +
+            MINE_MYTHRIL_FAIL + MINE_MYTHRIL_DEPLETED)
 
 
 # =============================================================================
@@ -940,6 +1549,12 @@ _passive_notice_shown = False
 _vendor_history = {}      # vendor label -> [unix times an order was collected]
 _vendor_ready_at = {}     # vendor label -> unix time it is worth asking again
 
+# Deeds actually handed over during the current vendor round. Counted here
+# rather than from visit_stop's return value, which reports True for an NPC
+# that answered "nothing yet" - a cooldown is a successful visit but not a
+# collection, and only a collection is worth a trip home.
+_collected_this_round = 0
+
 _routes = {}              # job name -> [(page, button, rune name)]
 _waypoint = {}            # job name -> next index into that route
 _lap_done = {}            # job name -> True once the route has wrapped
@@ -947,6 +1562,8 @@ _current_job = None
 
 _journal_cursor = 0.0
 _greyskull_pending = False
+_skip_pending = False
+_move_pending = False     # "move" - leave this spot, stay on this rune
 _greyskull_active = False
 
 _axe_serial = None        # the axe last used, so it can be recovered by serial
@@ -959,10 +1576,61 @@ _axe_serial = None        # the axe last used, so it can be recovered by serial
 _transcript = []
 
 
+# The last CRASH_TRAIL log lines. This is the breadcrumb trail: every log call
+# already sits at a point that meant something, so the tail of it says what the
+# script was doing when it died - which a bare traceback does not.
+_trail = []
+
+
+# What the last line was, when, and how many copies of it were held back.
+_last_line = {"text": "", "at": 0.0, "held": 0}
+# Wall-clock second we are counting in, and how many lines went out in it.
+_rate = {"second": 0, "sent": 0}
+
+
 def log(text, hue=HUE_INFO):
-    Misc.SendMessage("[Harvest] " + text, hue, False)
+    now = time.time()
+
+    # The crash trail and the diagnostic transcript record EVERY line, whether
+    # it reaches the client or not - suppressing a line must not blind the
+    # crash report.
     if DIAGNOSTIC_MODE:
         _transcript.append(text)
+    if CRASH_REPORT:
+        _trail.append(text)
+        if len(_trail) > CRASH_TRAIL:
+            del _trail[:len(_trail) - CRASH_TRAIL]
+
+    # Identical line, again, straight away: hold it.
+    if (LOG_DEDUPE_MS and text == _last_line["text"]
+            and (now - _last_line["at"]) * 1000.0 < LOG_DEDUPE_MS):
+        _last_line["held"] += 1
+        return
+
+    held = _last_line["held"]
+    _last_line["text"] = text
+    _last_line["at"] = now
+    _last_line["held"] = 0
+
+    # Hard cap per second, so no path can flood the client however novel each
+    # line is. The count is reported once the second turns over.
+    second = int(now)
+    if second != _rate["second"]:
+        dropped = _rate["sent"] - LOG_MAX_PER_SECOND
+        _rate["second"] = second
+        _rate["sent"] = 0
+        if dropped > 0:
+            Misc.SendMessage("[Harvest] (%d line(s) dropped - logging faster "
+                             "than the client can take)" % dropped,
+                             HUE_WARN, False)
+    _rate["sent"] += 1
+    if _rate["sent"] > LOG_MAX_PER_SECOND:
+        return
+
+    if held:
+        Misc.SendMessage("[Harvest] (previous line repeated %d more time(s))"
+                         % held, HUE_INFO, False)
+    Misc.SendMessage("[Harvest] " + text, hue, False)
 
 
 def debug(text, hue=HUE_INFO):
@@ -1113,47 +1781,172 @@ def channel_allowed(channel):
     return bool(channel) and want in channel.lower()
 
 
-def greyskull_heard():
+def said_by_me(entry, said):
+    """Did the character running THIS script say it?
+
+    The journal entry's Serial is the speaker's mobile, which is the only
+    reliable answer: names are not unique, and global chat arrives with
+    "System" in the Name field and the real speaker buried in the text. Name
+    matching is kept as a fallback for shards that do not fill Serial in.
+    """
+    try:
+        if int(getattr(entry, "Serial", 0) or 0) == int(Player.Serial):
+            return True
+    except Exception:
+        pass
+
+    me = (Player.Name or "").strip().lower()
+    if not me:
+        return False
+    if (getattr(entry, "Name", "") or "").strip().lower() == me:
+        return True
+    _channel, caller, _ = parse_chat_line(getattr(entry, "Text", "") or "")
+    return bool(caller) and me in caller.lower()
+
+
+def is_skip_line(entry, raw):
+    """True for a bare "skip" from whoever is allowed to say it.
+
+    Matched against the WHOLE spoken line rather than as a substring - "skip"
+    is an ordinary word, and a vendor or a passer-by using it must not send the
+    character off. Case and trailing punctuation are ignored.
+    """
+    _channel, _caller, said = parse_chat_line(raw)
+    spoken = (said or raw).strip().strip(".,!?;:'\"").lower()
+    if spoken not in [p.strip().lower() for p in SKIP_PHRASES if p.strip()]:
+        return False
+    if SKIP_SELF_ONLY and not said_by_me(entry, said):
+        debug("Skip ignored - not said by this character.")
+        return False
+    return True
+
+
+def is_move_line(entry, raw):
+    """True for a bare "move" from whoever is allowed to say it.
+
+    Same whole-line rule as is_skip_line, and for a stronger reason: "move" is
+    a word that turns up in ordinary conversation far more often than "skip"
+    does, so a substring match here would fire on half the things said near a
+    boat or a mine.
+    """
+    _channel, _caller, said = parse_chat_line(raw)
+    spoken = (said or raw).strip().strip(".,!?;:'\"").lower()
+    if spoken not in [p.strip().lower() for p in MOVE_PHRASES if p.strip()]:
+        return False
+    if MOVE_SELF_ONLY and not said_by_me(entry, said):
+        debug("Move ignored - not said by this character.")
+        return False
+    return True
+
+
+def scan_journal():
+    """One pass over the new journal lines, feeding EVERY passive trigger.
+
+    Reading the journal CONSUMES it - new_journal_entries advances the cursor -
+    so there can only ever be one reader. Two pollers each calling it would
+    steal lines from one another and both would miss things at random, which is
+    exactly the sort of fault that shows up once a week and cannot be
+    reproduced. Every trigger is checked here, on the same line, in one place.
+    """
+    global _greyskull_pending, _skip_pending, _move_pending
     for entry in new_journal_entries():
         raw = getattr(entry, "Text", "") or ""
         if not raw:
             continue
-        low = raw.lower()
-        matched = None
-        for phrase in GREYSKULL_PHRASES:
-            phrase = phrase.strip().lower()
-            if phrase and phrase in low:
-                matched = phrase
-                break
-        if matched is None:
-            continue
+        if not _greyskull_active and is_greyskull_line(raw):
+            _greyskull_pending = True
+        if is_skip_line(entry, raw):
+            log("SKIP heard - leaving this spot for the next rune.", HUE_GOOD)
+            Player.HeadMessage(HUE_GOOD, "Skipping...")
+            _skip_pending = True
+        elif is_move_line(entry, raw):
+            # elif: one line cannot be both, and skip is the bigger hammer.
+            log("MOVE heard - on to the next spot in this area.", HUE_GOOD)
+            Player.HeadMessage(HUE_GOOD, "Moving on...")
+            _move_pending = True
 
-        channel, caller, _said = parse_chat_line(raw)
-        if not channel_allowed(channel):
-            debug("Greyskull ignored - wrong channel (%s)." % (channel or "none"))
-            continue
-        if not caller_allowed(caller):
-            debug("Greyskull ignored - caller not allowed (%s)."
-                  % (caller or "unknown"))
-            continue
 
-        log("Greyskull called by %s%s." % (caller or "someone",
-                                           " in %s" % channel if channel else ""),
-            HUE_GOOD)
-        return True
-    return False
+def poll_skip():
+    """Raise the flag only. Safe from anywhere, including travel waits."""
+    scan_journal()
+    return _skip_pending
+
+
+def take_skip():
+    """Consume the flag. True once per time it was said."""
+    global _skip_pending
+    if not _skip_pending:
+        return False
+    _skip_pending = False
+    return True
+
+
+def take_move():
+    """Scan, then consume the move flag. True once per time it was said.
+
+    Unlike skip, there is no separate poller: a move is spent by whoever
+    leaves the spot, and nobody else needs to know it is pending. Scanning
+    here keeps it as safe to call from a travel wait as poll_skip is.
+    """
+    global _move_pending
+    scan_journal()
+    if not _move_pending:
+        return False
+    _move_pending = False
+    return True
+
+
+def forget_move():
+    """Drop a pending move. Called when the route recalls anyway, so a move
+    said just as a rune ended does not eat the first spot of the next one."""
+    global _move_pending
+    _move_pending = False
+
+
+def is_greyskull_line(raw):
+    """True for a call-out line from an allowed caller on an allowed channel.
+
+    One line at a time. This used to own the journal loop; it does not any
+    more, because the cursor can only be read once and every trigger has to
+    share that one pass. See scan_journal.
+    """
+    low = raw.lower()
+    matched = None
+    for phrase in GREYSKULL_PHRASES:
+        phrase = phrase.strip().lower()
+        if phrase and phrase in low:
+            matched = phrase
+            break
+    if matched is None:
+        return False
+
+    channel, caller, _said = parse_chat_line(raw)
+    if not channel_allowed(channel):
+        debug("Greyskull ignored - wrong channel (%s)." % (channel or "none"))
+        return False
+    if not caller_allowed(caller):
+        debug("Greyskull ignored - caller not allowed (%s)."
+              % (caller or "unknown"))
+        return False
+
+    log("Greyskull called by %s%s."
+        % (caller or "someone", " in %s" % channel if channel else ""),
+        HUE_GOOD)
+    return True
 
 
 def poll_greyskull():
-    """Raise the flag only. Safe to call from anywhere, including travel waits."""
-    global _greyskull_pending
+    """Raise the flag only. Safe to call from anywhere, including travel waits.
+
+    THE SCAN IS UNCONDITIONAL. It used to return early while a Greyskull call
+    was active - and since interruptible_pause's only scan went through here,
+    that meant nothing read the journal for the whole excursion, so a spoken
+    "skip" or "move" during one was never seen at all. Only the greyskull
+    ANSWER is suppressed while one is already running; the reading is not.
+    """
+    scan_journal()
     if _greyskull_active:
         return False
-    if _greyskull_pending:
-        return True
-    if greyskull_heard():
-        _greyskull_pending = True
-        log("Greyskull heard - responding at the next safe point.", HUE_GOOD)
     return _greyskull_pending
 
 
@@ -1164,7 +1957,10 @@ def interruptible_pause(total_ms, slice_ms=250):
         step = min(slice_ms, remaining)
         Misc.Pause(step)
         remaining -= step
-        poll_greyskull()
+        # Scan DIRECTLY rather than through poll_greyskull. One pass feeds
+        # every trigger - the call-out, "skip" and "move" - and routing it
+        # through a poller that can decline to scan is what hid them.
+        scan_journal()
 
 
 def checkGreyskull():
@@ -1537,7 +2333,7 @@ def ar_recall(button, what):
     Gumps.SendAction(AR_GUMPID, button)
     Misc.Pause(1000)
     if not travel_failed_for_mana():
-        return True
+        return arrived()
 
     log("Recall to %s refused for mana - recovering and retrying." % what,
         HUE_WARN)
@@ -1548,7 +2344,9 @@ def ar_recall(button, what):
         return False
     Gumps.SendAction(AR_GUMPID, button)
     Misc.Pause(1000)
-    return not travel_failed_for_mana()
+    if travel_failed_for_mana():
+        return False
+    return arrived()
 
 
 def goDest(dest=None):
@@ -1649,6 +2447,24 @@ def goNext(job):
             HUE_BAD)
         return False
 
+    # Said ONCE, the first time the mining route is known. MYTHRIL_WAYPOINTS is
+    # written in runebook positions, and a number past the end of the book is a
+    # silent no-op - the mythril runes would simply behave as ordinary rock and
+    # look exactly like this feature was never switched on.
+    if (job["name"] == "Mining" and MYTHRIL_ENABLED and MYTHRIL_WAYPOINTS
+            and not _mythril_checked):
+        _mythril_checked.append(True)
+        highest = max(MYTHRIL_WAYPOINTS)
+        if highest > len(routes):
+            log("MYTHRIL_WAYPOINTS goes up to %d but the Mining folder only "
+                "has %d rune(s) - everything past %d is ignored. Check the "
+                "numbers against the 'Mining waypoint N/M' lines."
+                % (highest, len(routes), len(routes)), HUE_BAD)
+        else:
+            log("Mythril: waypoints %s of %d, %ds per swing."
+                % (mythril_range_text(), len(routes),
+                   MYTHRIL_SWING_TIMEOUT / 1000), HUE_GOOD)
+
     index = _waypoint.get(job["name"], 0)
     if index >= len(routes):
         index = 0
@@ -1666,6 +2482,12 @@ def goNext(job):
     # actually progressing.
     log("%s waypoint %d/%d: %s"
         % (job["name"], index + 1, len(routes), name), HUE_INFO)
+
+    # A "move" said as the last spot was ending has nothing left to act on
+    # here - the area it referred to is gone. Left pending it would be spent
+    # on the first spot of the NEXT rune, which is not what was asked for.
+    forget_move()
+
     return ar_recall(button, name)
 
 
@@ -1749,8 +2571,56 @@ def pack_usage():
     return items, max_items, weight, max_weight
 
 
+# The heaviest single yield actually seen, per task. This is how the reserve
+# stops being a guess: ore and logs weigh different amounts, shards change item
+# weights, and a mining swing that hands over five ore is nothing like one that
+# hands over one. Watching it costs a subtraction per swing.
+_max_yield = {}
+
+
+def note_yield(task, gained):
+    """Record how much one swing added, in stones."""
+    if gained <= 0:
+        return
+    if gained > _max_yield.get(task, 0):
+        _max_yield[task] = gained
+        debug("%s: heaviest yield so far is %d stone(s) - reserve now %d."
+              % (task, gained, weight_reserve()))
+
+
+def weight_reserve():
+    """Stones of free carry weight to stop harvesting at.
+
+    Big enough for one more yield of the heaviest thing seen, with a margin.
+    Before anything has been measured this is just the configured floor.
+    """
+    seen = max(_max_yield.values()) if _max_yield else 0
+    reserve = max(PACK_WEIGHT_RESERVE, int(seen * PACK_RESERVE_SAFETY))
+    return min(reserve, PACK_RESERVE_MAX)
+
+
+def weight_headroom():
+    """(free stones, weight, max weight). Free is 0 when it cannot be read."""
+    _items, _max_items, weight, max_weight = pack_usage()
+    if not max_weight:
+        return 0, weight, max_weight
+    return max_weight - weight, weight, max_weight
+
+
 def pack_has_room(threshold=None):
     """True while there is room to keep harvesting.
+
+    Two different questions, answered two different ways:
+
+    WEIGHT is a reserve, not a fraction. Harvesting should run until there is
+    no room for one more yield - a fraction throws away everything above it,
+    and at 0.6 a 495-stone character stored at 297 and left 198 stones of
+    capacity unused on every single trip. `threshold` is still honoured when a
+    caller passes one explicitly, because the job hand-over genuinely does want
+    "start the next job under 15%", which is a fraction question.
+
+    ITEM COUNT stays a fraction. It is a different failure - a pack full of
+    gems, tools and deeds - and no key can fix it.
 
     An UNKNOWN measure never counts as full. Treating "I could not read it" as
     "the pack is full" is what had every character declaring a full pack at
@@ -1762,22 +2632,38 @@ def pack_has_room(threshold=None):
     reads its refusal out of the journal and returns "full". This is only for
     deciding whether unloading achieved anything.
     """
-    if threshold is None:
-        threshold = PACK_THRESHOLD
     items, max_items, weight, max_weight = pack_usage()
 
-    if max_weight and weight > max_weight * threshold:
-        debug("pack full by WEIGHT: %d of %d (limit %d)"
-              % (weight, max_weight, int(max_weight * threshold)), HUE_WARN)
+    if threshold is None:
+        # The rule: store once PACK_STORE_AT of carry weight is used.
+        if max_weight and weight >= max_weight * PACK_STORE_AT:
+            log("Pack at %d%% by WEIGHT: %d of %d stones - storing."
+                % (round(100.0 * weight / max_weight), weight, max_weight),
+                HUE_INFO)
+            return False
+        # Backstop: one more yield would go over the top even though the
+        # percentage has not been reached. Going over means the server refuses
+        # the resource outright and it is lost, so this stops short.
+        reserve = weight_reserve()
+        if max_weight and (max_weight - weight) <= reserve:
+            log("Pack full by WEIGHT: %d of %d stones, %d free, one more "
+                "yield needs %d." % (weight, max_weight, max_weight - weight,
+                                     reserve), HUE_INFO)
+            return False
+    elif max_weight and weight > max_weight * threshold:
+        debug("pack over %d%% by WEIGHT: %d of %d"
+              % (int(threshold * 100), weight, max_weight), HUE_WARN)
         return False
-    if max_items and items > max_items * threshold:
+
+    count_limit = PACK_THRESHOLD if threshold is None else threshold
+    if max_items and items > max_items * count_limit:
         # Said at WARNING level, not debug. A pack that is full on item count
         # while barely carrying any weight is the confusing case - it looks
         # like nothing is wrong - and the keys cannot help with it, because
         # what fills the count is gems, deeds and tools rather than resources.
         log("pack full by ITEM COUNT: %d of %d items (limit %d). Weight is "
             "only %d of %d, so the keys cannot fix this - it needs the chest."
-            % (items, max_items, int(max_items * threshold),
+            % (items, max_items, int(max_items * count_limit),
                weight, max_weight), HUE_WARN)
         return False
 
@@ -1970,7 +2856,41 @@ def find_restock(key):
     else:
         found = Items.FindAllByID(item_id, hue, Player.Backpack.Serial,
                                   False, False)
-    return list(found or [])
+    found = list(found or [])
+    return match_by_name(key, found)
+
+
+def match_by_name(key, found):
+    """Narrow an id/hue match down by name, now that hue is not doing it.
+
+    The hue used to be what told a key apart from anything else sharing its
+    graphic. With hue -1 that guard is gone, so the name takes over. It is a
+    NARROWING, never a widening: if the names reject everything, the unfiltered
+    list is handed back rather than the key going missing - a shard that does
+    not send a name must not cost you the key entirely.
+    """
+    names = [n.lower() for n in (key.get("names") or []) if n]
+    if not names or len(found) <= 0:
+        return found
+
+    matched = []
+    for item in found:
+        text = item_text(item)
+        if any(n in text for n in names):
+            matched.append(item)
+
+    if not matched:
+        if len(found) > 1:
+            log("%s: %d item(s) of graphic 0x%X but none named %s - using the "
+                "first anyway. Check %s_NAMES."
+                % (key.get("label", "?"), len(found), key.get("id", 0),
+                   "/".join(names), key.get("label", "?").upper()), HUE_WARN)
+        return found
+
+    if len(matched) < len(found):
+        debug("%s: %d of %d candidates matched by name."
+              % (key.get("label", "?"), len(matched), len(found)))
+    return matched
 
 
 def item_is_on_player(item):
@@ -1999,6 +2919,68 @@ def item_is_on_player(item):
         if holder is None:
             return False
         parent = holder.Container
+    return False
+
+
+def report_restock_keys():
+    """Say at startup which key each entry actually resolved to.
+
+    Colour is no longer part of the lookup, so this is the line that proves the
+    right item was picked - it names the serial, the graphic and the hue of
+    whatever was found, and says outright when an entry found nothing.
+    """
+    log("Storage keys:", HUE_INFO)
+    for key in RESTOCK_KEYS:
+        label = key.get("label", "?")
+        if not key.get("enabled", True):
+            log("  %-18s disabled" % label, HUE_INFO)
+            continue
+        found = find_restock(key)
+        if not found:
+            log("  %-18s NOT FOUND (graphic 0x%X, %s)"
+                % (label, key.get("id", 0), key.get("where", "pack")), HUE_WARN)
+            continue
+        item = found[0]
+        log("  %-18s 0x%X  graphic 0x%X  hue 0x%04X  %s%s"
+            % (label, item.Serial, item.ItemID, item.Hue,
+               safe_name(item) or "(no name)",
+               "" if len(found) == 1 else "   (+%d more)" % (len(found) - 1)),
+            HUE_GOOD)
+
+
+def known_key(label):
+    """Do we know which resources this key takes?"""
+    return any(spec["label"] == label for spec in KEY_BACKED_IDS)
+
+
+def key_has_work(label):
+    """Is anything this key takes still in the backpack?
+
+    A key that has already swallowed its resource does not need clicking
+    again; one that has not is the reason the pack is still holding granite.
+    """
+    backpack = Player.Backpack
+    if backpack is None:
+        return False
+    for spec in KEY_BACKED_IDS:
+        if spec["label"] != label:
+            continue
+        for item_id in spec["ids"]:
+            try:
+                found = Items.FindAllByID(item_id, -1, backpack.Serial,
+                                          False, False)
+            except Exception:
+                continue
+            if found:
+                return True
+    return False
+
+
+def any_key_has_work():
+    """Is any key-backed resource still sitting in the pack?"""
+    for spec in KEY_BACKED_IDS:
+        if key_has_work(spec["label"]):
+            return True
     return False
 
 
@@ -2054,7 +3036,15 @@ def refill_keys(on_player_only=False):
 
     True once the pack has room again.
     """
-    if pack_has_room():
+    # NOT "return True if the pack has room". Every key with something of its
+    # own still in the pack gets a turn.
+    #
+    # This used to stop at the first key that freed enough space, and the
+    # Stone Storage is last in the list. Ingots are heavy, so the Ingot key
+    # emptied the pack and the run ended - granite was never offered to its
+    # key at all. It then sat in the pack for ever, because KEY_BACKED_IDS
+    # (rightly) keeps it out of the one-way chest as well. Stranded either way.
+    if pack_has_room() and not any_key_has_work():
         return True
 
     used = False
@@ -2066,16 +3056,36 @@ def refill_keys(on_player_only=False):
                 debug("%s is not in the pack - leaving it for the drop-off."
                       % label)
                 continue
-            if context_select(item, RESTOCK_CONTEXT, label):
+            # Once there is room, only keys that still have their OWN resource
+            # in the pack are worth clicking. A key we know nothing about is
+            # offered anyway, exactly as before.
+            if pack_has_room() and known_key(label) and not key_has_work(label):
+                continue
+            wanted = list(key.get("context") or []) + list(RESTOCK_CONTEXT)
+            if context_select(item, wanted, label):
                 used = True
                 Misc.Pause(1200)
-                if pack_has_room():
+                if not key_has_work(label):
                     log("%s took the load%s." %
                         (label, " (carried - no trip home)" if carried else ""),
                         HUE_GOOD)
-                    return True
-    if not used and not on_player_only:
-        debug("No restock storage in reach.", HUE_WARN)
+                else:
+                    log("%s still has %s in the pack after restocking - check "
+                        "its menu entry (%s)."
+                        % (label, label.lower(), "/".join(wanted)), HUE_WARN)
+    if not used:
+        # This was silent before, and silence here looks exactly like a script
+        # that is working: the pack simply fills up and nothing says why.
+        labels = ", ".join(k.get("label", "?") for k in RESTOCK_KEYS
+                           if k.get("enabled", True))
+        log("NOTHING took the load - no storage %s. Tried: %s. Check the "
+            "'Storage keys:' lines printed at startup."
+            % ("in the pack" if on_player_only else "in reach", labels),
+            HUE_WARN)
+    elif not pack_has_room():
+        log("A key was used but the pack is STILL full - it may be full "
+            "itself, or the '%s' entry may be the wrong menu item."
+            % "/".join(RESTOCK_CONTEXT), HUE_WARN)
     return pack_has_room()
 
 
@@ -2283,6 +3293,9 @@ def file_bulk_orders():
     Runs after HOUSE_DEPOSITS so the taming and resource orders have already
     been taken out of the pack by "Refill from stock".
     """
+    if not BOD_ENABLED:
+        return 0
+
     book, how = find_bod_book()
     if book is None:
         log("No Bulk Order Book: %s." % how, HUE_BAD)
@@ -2633,8 +3646,10 @@ def vendor_wait_text(vendor):
 
 def note_vendor_collected(vendor):
     """Record a successful order against this NPC's window budget."""
+    global _collected_this_round
     _vendor_history.setdefault(vendor["label"], []).append(time.time())
     _vendor_ready_at.pop(vendor["label"], None)
+    _collected_this_round += 1
 
 
 def parse_reported_wait():
@@ -2677,6 +3692,9 @@ def expand_bod_locations():
     missing one is reported. A location using "*" marks them optional, so the
     professions that are not there are skipped without noise.
     """
+    if not BOD_ENABLED:
+        return []
+
     out = []
     for loc in BOD_LOCATIONS:
         if not loc.get("enabled", True):
@@ -2706,8 +3724,12 @@ def expand_bod_locations():
 
 
 def all_vendors():
-    """The plain VENDORS table plus everything the BOD tables expand to."""
-    return list(VENDORS) + expand_bod_locations()
+    """The plain VENDORS table plus everything the BOD tables expand to.
+
+    Entries marked "bod" drop out with BOD_ENABLED, wherever they are listed.
+    """
+    plain = [v for v in VENDORS if BOD_ENABLED or not v.get("bod")]
+    return plain + expand_bod_locations()
 
 
 def vendor_stops(vendors):
@@ -2805,12 +3827,6 @@ def serve_vendor(vendor):
     return ok
 
 
-def visit_vendor(vendor):
-    """Travel to one vendor and serve it. Kept for single-vendor callers."""
-    return visit_stop({"folder": vendor["folder"], "point": vendor["point"],
-                       "vendors": [vendor]})
-
-
 def validate_vendors(vendors=None):
     """Report the vendor table and reject unusable entries."""
     if vendors is None:
@@ -2846,6 +3862,9 @@ def validate_vendors(vendors=None):
 
 
 def vendor_round():
+    """Visit every vendor that is due. Returns how many deeds were collected."""
+    global _collected_this_round
+    _collected_this_round = 0
     stops = vendor_stops(validate_vendors(all_vendors()))
 
     due_stops = []
@@ -2875,6 +3894,10 @@ def vendor_round():
     # loose in the pack until the next drop-off. The book is carried.
     file_bulk_orders()
 
+    log("Vendor round collected %d deed(s)." % _collected_this_round,
+        HUE_GOOD if _collected_this_round else HUE_INFO)
+    return _collected_this_round
+
 
 # =============================================================================
 # HARVEST TASKS
@@ -2886,8 +3909,129 @@ def vendor_round():
 #   "stop"  cannot continue (no tool)
 # =============================================================================
 
+_mythril_checked = []     # one-shot latch for the route-length warning
+
+
+def mythril_range_text():
+    """"147-172" rather than twenty-six numbers, when they are contiguous."""
+    nums = sorted(set(int(n) for n in MYTHRIL_WAYPOINTS))
+    if not nums:
+        return "(none)"
+    if nums == list(range(nums[0], nums[-1] + 1)):
+        return "%d-%d" % (nums[0], nums[-1])
+    return ", ".join(str(n) for n in nums)
+
+
+def in_mythril_zone():
+    """Is the mining route currently on one of the mythril runes?
+
+    _waypoint holds the NEXT index, and goNext sets it to index + 1 right
+    before recalling - so it already equals the 1-based number printed in the
+    "Mining waypoint N/M" line, which is what MYTHRIL_WAYPOINTS is written in.
+    """
+    if not MYTHRIL_ENABLED or not MYTHRIL_WAYPOINTS:
+        return False
+    return _waypoint.get("Mining", 0) in MYTHRIL_WAYPOINTS
+
+
+def swing_timeout(mythril=None):
+    """How long one swing gets. Mythril takes about 8s against 5s for rock."""
+    if mythril is None:
+        mythril = in_mythril_zone()
+    return MYTHRIL_SWING_TIMEOUT if mythril else MINE_SWING_TIMEOUT
+
+
+def dig_once(shovel, timeout_ms, mythril=None):
+    """One swing at whatever rock is in reach. Returns what the SERVER said.
+
+      "ok"       ore came out, or the swing missed and is worth repeating
+      "miss"     the swing finished and produced nothing - mythril only, where
+                 that is normal and must not read as "this spot is dead"
+      "empty"    this 8x8 bank is mined out
+      "notrock"  nothing mineable in reach at all
+      "full"     the pack would not take it
+      "broke"    the shovel wore out
+      "silent"   no reply inside the timeout
+
+    The original script matched a bare "You" and treated "You can't mine there"
+    and "no metal" as the negative cases, and that crude test WORKED - so it is
+    still here as the last resort. The specific strings are checked first only
+    because the sweep needs to tell "this bank is empty, move one bank over"
+    apart from "there is no rock here at all, never come back".
+    """
+    if mythril is None:
+        mythril = in_mythril_zone()
+
+    before = 0
+    try:
+        before = int(Player.Weight or 0)
+    except Exception:
+        pass
+
+    clear_journal(MINE_ALL)
+    Journal.Clear("You")
+    if not clear_cursor():
+        debug("Target cursor would not clear before mining.", HUE_WARN)
+    Target.TargetResource(shovel, 0)
+
+    deadline = time.time() + timeout_ms / 1000.0
+    while time.time() < deadline:
+        if journal_hit(MINE_TOOL_BROKE):
+            return "broke"
+        if journal_hit(MINE_PACK_FULL):
+            return "full"
+        if journal_hit(MINE_BAD_TARGET):
+            return "notrock"
+
+        # MYTHRIL FIRST, and specifically before the "You" catch-all below:
+        # the failure line begins with "You", so the catch-all would score a
+        # failed mythril swing as ore recovered and keep the spot alive on a
+        # deadline it never earned.
+        if journal_hit(MINE_MYTHRIL_DEPLETED):
+            return "empty"
+        if journal_hit(MINE_MYTHRIL_FAIL):
+            return "miss"
+
+        if journal_hit(MINE_DEPLETED):
+            return "empty"
+        if journal_hit(MINE_SUCCESS):
+            note_yield("mine", weight_gain(before))
+            return "ok"
+
+        # A SUCCESSFUL MYTHRIL SWING SAYS NOTHING AT ALL - the ore just turns
+        # up. So the pack getting heavier is the only evidence there is, and
+        # without this the swing runs to the timeout and reports "silent".
+        # Only trusted in a mythril zone: elsewhere the server always speaks,
+        # and weight can move for reasons that are not this swing.
+        if mythril and weight_gain(before) > 0:
+            note_yield("mine", weight_gain(before))
+            return "ok"
+
+        if Journal.Search("You"):
+            # The original catch-all. Anything else the server says starting
+            # with "You" is a swing that happened.
+            note_yield("mine", weight_gain(before))
+            return "ok"
+        interruptible_pause(100)
+
+    # Last look before giving up. The ore can land in the same tick the
+    # timeout expires, and calling that "silent" throws the swing away.
+    if mythril and weight_gain(before) > 0:
+        note_yield("mine", weight_gain(before))
+        return "ok"
+    return "silent"
+
+
+def weight_gain(before):
+    """Stones added since `before`. Negative readings are noise, not a yield."""
+    try:
+        return max(0, int(Player.Weight or 0) - int(before or 0))
+    except Exception:
+        return 0
+
+
 def harvest_mine():
-    """Mining. Detection logic kept as the working original."""
+    """Mining. Works out from the rune a bank at a time, not one spot."""
     if not pack_has_room():
         return "full"
 
@@ -2900,35 +4044,770 @@ def harvest_mine():
             log("Still no shovel.", HUE_BAD)
             return "stop"
 
-    Journal.Clear("You")
-    Journal.Clear("No Metal")
-    clear_cursor()
-    Target.TargetResource(shovel, 0)
+    if not MINE_AREA_ENABLED:
+        return mine_single(shovel)
+    return mine_sweep(shovel)
 
-    result = "next"
-    Timer.Create("harvest mine timeout", 5000)
-    while Timer.Check("harvest mine timeout"):
-        if journal_hit(MINE_TOOL_BROKE):
+
+def mine_single(shovel):
+    """The original one-spot behaviour, kept for MINE_AREA_ENABLED = False."""
+    outcome = dig_once(shovel, swing_timeout())
+    smelt()
+    if outcome == "broke":
+        log("Shovel worn out - making another.", HUE_WARN)
+        make_shovel()
+        return "ok"
+    if outcome == "full":
+        return "full"
+    if outcome == "ok":
+        return "ok"
+    return "next"
+
+
+def mineable_tile(x, y):
+    """Is the tile at (x, y) mountain, cave or (optionally) sand?
+
+    Checked as BOTH a land id and a static id. Mountains are land tiles on the
+    overworld and statics inside dungeons, so asking only one of the two misses
+    half the mines - and it misses them silently, as an empty candidate list.
+    """
+    tiles = MOUNTAIN_AND_CAVE_TILES
+    try:
+        world = Player.Map
+        if Statics.GetLandID(x, y, world) in tiles:
+            return True
+        if MINE_AREA_INCLUDE_SAND and Statics.GetLandID(x, y, world) in SAND_TILES:
+            return True
+        for info in Statics.GetStaticsTileInfo(x, y, world) or []:
+            static = getattr(info, "StaticID", None)
+            if static in tiles:
+                return True
+            if MINE_AREA_INCLUDE_SAND and static in SAND_TILES:
+                return True
+    except Exception:
+        # A tile lookup that throws must not stop the sweep - fall back to
+        # "worth a try", which costs one probe swing and no more.
+        return True
+    return False
+
+
+def spot_is_minable(x, y, reach=2):
+    """Is there anything to mine within harvest range of standing at (x, y)?
+
+    `reach` is the server's MaxRange for mining - 2, from Mining.cs. Checking
+    the whole reachable square rather than the tile underfoot matters: you
+    stand on cave FLOOR and mine the wall beside you, so the tile you are on is
+    usually not itself a mountain tile.
+    """
+    for dx in range(-reach, reach + 1):
+        for dy in range(-reach, reach + 1):
+            if mineable_tile(x + dx, y + dy):
+                return True
+    return False
+
+
+def mine_area_spots(origin):
+    """Candidate mining spots around the landing point, nearest first.
+
+    Only spots with mineable ground in reach are returned, so the character
+    never walks 16 tiles to stand in an empty field. The landing tile is always
+    first and is never filtered out - the rune was put there for a reason, and
+    the server is the better judge of it than a tile list.
+    """
+    spots = area_spots(origin, MINE_AREA_RADIUS * 2, MINE_AREA_STEP)
+    keep = [spots[0]]
+    for spot in spots[1:]:
+        if spot_is_minable(spot[0], spot[1]):
+            keep.append(spot)
+    return keep
+
+
+def mine_sweep(shovel):
+    """Work the current rock, then move a bank at a time to the next.
+
+    Answers on the job runner's own terms - "ok" to be called again at this
+    same waypoint, "next" when there is nothing left within MINE_AREA_RADIUS.
+    """
+    key = sweep_key()
+    state = _mine_sweep.get(key)
+
+    if state is None or state.get("origin") is None:
+        origin = (Player.Position.X, Player.Position.Y)
+        spots = mine_area_spots(origin)
+        state = {"origin": origin, "spots": spots, "next": 0, "dead": set(),
+                 "spent": set(), "dug": 0, "silent": 0,
+                 "last_yield": time.time()}
+        _mine_sweep[key] = state
+        log("Mining area: %d spot(s) with mineable ground within %d tiles of "
+            "%d,%d, %d apart." % (len(spots), MINE_AREA_RADIUS,
+                                  origin[0], origin[1], MINE_AREA_STEP),
+            HUE_STEP)
+        if len(spots) == 1:
+            log("  Only the landing tile looks mineable. If this rune is in a "
+                "mine, MINE_AREA_INCLUDE_SAND or the tile lists may need a "
+                "look - run with DEBUG on and report it.", HUE_WARN)
+    else:
+        spots = state["spots"]
+        # Same as the lumber sweep: a trip home outlasts the idle limit, so the
+        # clock restarts on re-entry rather than condemning the rune.
+        note_area_yield(state)
+
+    while state["next"] < len(spots):
+        if poll_greyskull():
+            return "ok"
+        if hostiles_near():
+            log("Mining area: something hostile turned up at spot %d/%d - "
+                "leaving the rest." % (state["next"] + 1, len(spots)), HUE_WARN)
+            end_sweep(state)
+            return "next"
+
+        if take_skip():
+            log("Skipping the rest of this patch - on to the next rune.",
+                HUE_GOOD)
+            end_sweep(state)
+            return "next"
+
+        if area_is_idle(state):
+            log("Mining area: nothing mined here in %ds - giving up on this "
+                "rune and moving on. (%d of %d spots tried.)"
+                % (AREA_IDLE_TIMEOUT_MS / 1000, state["next"], len(spots)),
+                HUE_WARN)
+            end_sweep(state)
+            return "next"
+
+        index = state["next"]
+        spot = spots[index]
+
+        if index in state["dead"]:
+            state["next"] += 1
+            continue
+
+        if bank_of(spot[0], spot[1], MINE_BANK, MINE_BANK) in state["spent"]:
+            debug("Mining area: spot %d/%d is in a bank already emptied - "
+                  "skipping." % (index + 1, len(spots)))
+            state["next"] += 1
+            continue
+
+        spot_deadline = time.time() + AREA_SPOT_TIMEOUT_MS / 1000.0
+
+        if index > 0 and not walk_to(spot[0], spot[1],
+                                     budget_ms(spot_deadline,
+                                               MINE_AREA_MOVE_TIMEOUT)):
+            debug("Mining area: could not reach spot %d/%d at %d,%d."
+                  % (index + 1, len(spots), spot[0], spot[1]), HUE_WARN)
+            state["dead"].add(index)
+            state["next"] += 1
+            continue
+
+        outcome = mine_spot(shovel, index, len(spots), state, spot_deadline)
+        if outcome in ("full", "stop"):
+            return outcome
+        state["next"] += 1
+
+    log("Mining area done: %d swing%s gave ore, %d spot%s walked, %d barren%s."
+        % (state["dug"], "" if state["dug"] == 1 else "s",
+           state["next"], "" if state["next"] == 1 else "s",
+           len(state["dead"]),
+           "" if not state["silent"]
+           else ", %d silent (see MINE_AREA_PROBE_TIMEOUT)" % state["silent"]),
+        HUE_GOOD)
+    end_sweep(state)
+    state["spots"] = None
+    return "next"
+
+
+def mine_spot(shovel, index, total, state, deadline=None):
+    """Dig at one spot until the bank is empty. "" / "full" / "stop"."""
+    swings = 0
+    got = 0
+
+    # Measured from arrival and NEVER extended - see AREA_SPOT_HARD_CAP_MS.
+    # `deadline` is the soft one and every productive swing pushes it out,
+    # which is correct and is also why it cannot be the only bound.
+    started = time.time()
+    hard_stop = started + AREA_SPOT_HARD_CAP_MS / 1000.0
+    spoke_at = started
+
+    while swings < MINE_AREA_MAX_SWINGS:
+        now = time.time()
+        if now >= hard_stop:
+            log("Mining area: %ds on spot %d/%d (%d swing(s), %d gave ore) - "
+                "that is the hard cap, moving on."
+                % (AREA_SPOT_HARD_CAP_MS / 1000, index + 1, total, swings, got),
+                HUE_WARN)
+            break
+        if now - spoke_at >= AREA_PROGRESS_MS / 1000.0:
+            spoke_at = now
+            log("Mining area: still on spot %d/%d - %d swing(s), %d gave ore, "
+                "%ds so far." % (index + 1, total, swings, got, now - started))
+        if poll_skip():
+            break
+        if take_move():
+            # Leave THIS spot only. The sweep advances to the next one; if
+            # this was the last, the sweep runs out and recalls by itself.
+            log("Mining area: moving on from spot %d/%d." % (index + 1, total))
+            break
+        if deadline is not None and time.time() >= deadline:
+            log("Mining area: no ore from spot %d/%d in %ds - moving on."
+                % (index + 1, total, AREA_SPOT_TIMEOUT_MS / 1000), HUE_WARN)
+            break
+        if not pack_has_room():
+            return "full"
+
+        mythril = in_mythril_zone()
+        if mythril:
+            # The probe timeout is tuned for a 5s swing and would cut an 8s
+            # mythril swing off before it finished - which is the whole reason
+            # these runes looked barren.
+            timeout = MYTHRIL_SWING_TIMEOUT
+        else:
+            timeout = (MINE_AREA_PROBE_TIMEOUT if swings == 0
+                       else MINE_SWING_TIMEOUT)
+        outcome = dig_once(shovel, timeout, mythril=mythril)
+        swings += 1
+
+        if outcome == "ok":
+            got += 1
+            state["dug"] += 1
+            note_area_yield(state)
+            # Producing ore is not being stuck. Push the deadline out so the
+            # bank is worked until the server says it is empty.
+            if deadline is not None:
+                deadline = time.time() + AREA_SPOT_TIMEOUT_MS / 1000.0
+        elif outcome == "miss":
+            # A mythril swing that finished and found nothing. That is the
+            # NORMAL case there, not a dead spot - so keep swinging, and push
+            # the deadline out because eight seconds of digging is real work.
+            # Deliberately NOT counted in state["dug"]: that number is "swings
+            # that gave ore" and the sweep summary would otherwise claim ore
+            # that never arrived.
+            if deadline is not None:
+                deadline = time.time() + AREA_SPOT_TIMEOUT_MS / 1000.0
+        elif outcome == "full":
+            return "full"
+        elif outcome == "broke":
             log("Shovel worn out - making another.", HUE_WARN)
             make_shovel()
-            result = "ok"
+            shovel = find_shovel()
+            if shovel is None:
+                log("Still no shovel.", HUE_BAD)
+                return "stop"
+            continue
+        elif outcome == "empty":
+            # The 8x8 bank is spent. Nothing else in it is worth a swing.
+            state["spent"].add(bank_of(Player.Position.X, Player.Position.Y,
+                                       MINE_BANK, MINE_BANK))
             break
-        if Journal.Search("You"):
-            result = "next" if Journal.Search("You can't mine there") else "ok"
+        elif outcome == "notrock":
+            if swings == 1:
+                state["dead"].add(index)
             break
-        if Journal.Search("no metal"):
-            Journal.Clear("no metal")
-            result = "next"
+        elif outcome == "silent":
+            if swings == 1:
+                state["silent"] += 1
+                debug("Mining area: spot %d/%d said nothing at all."
+                      % (index + 1, total), HUE_WARN)
             break
-        interruptible_pause(100)
 
-    Journal.Clear("You")
+        interruptible_pause(HARVEST_PAUSE)
+
+    if got:
+        debug("Mining area: spot %d/%d gave ore on %d swing(s)."
+              % (index + 1, total, got))
+    # Smelt where we stand. Ore is what fills the pack, and the forge is
+    # carried - so turning it into ingots here is what keeps the sweep going
+    # instead of ending it on a full pack.
     smelt()
-    return result
+    return ""
+
+
+def chop_once(axe, timeout_ms):
+    """One swing at whatever wood is in reach of where you are standing.
+
+    Returns what the SERVER said, not what the job runner should do - the
+    caller maps that, because a sweep and a single spot want different things
+    out of the same answers:
+
+      "ok"      wood came out, or the swing missed and is worth repeating
+      "empty"   this tile is harvested out
+      "notree"  nothing choppable in reach at all
+      "full"    the pack would not take it
+      "broke"   the axe broke
+      "silent"  no reply inside the timeout
+    """
+    before = 0
+    try:
+        before = int(Player.Weight or 0)
+    except Exception:
+        pass
+
+    clear_journal(LUMBER_ALL)
+    if not clear_cursor():
+        debug("Target cursor would not clear before chopping.", HUE_WARN)
+    Target.TargetResource(axe, "wood")
+
+    deadline = time.time() + timeout_ms / 1000.0
+    while time.time() < deadline:
+        if journal_hit(LUMBER_TOOL_BROKE):
+            return "broke"
+        if journal_hit(LUMBER_PACK_FULL):
+            return "full"
+        if journal_hit(LUMBER_DEPLETED):
+            return "empty"
+        if journal_hit(LUMBER_BAD_TARGET):
+            return "notree"
+        if journal_hit(LUMBER_SUCCESS) or journal_hit(LUMBER_RETRY):
+            note_yield("lumber", weight_gain(before))
+            return "ok"
+        interruptible_pause(100)
+    return "silent"
+
+
+def area_offsets(size, step):
+    """Standing-spot offsets along one axis, centred on 0.
+
+    `size` is the whole edge of the box, so half of it is the reach in each
+    direction; `step` is how far apart the spots sit. 8 and 3 give -3, 0, 3;
+    36 and 8 give -16, -8, 0, 8, 16.
+    """
+    half = max(0, int(size) // 2)
+    step = max(1, int(step))
+    count = half // step
+    return [k * step for k in range(-count, count + 1)]
+
+
+def bank_of(x, y, width, height):
+    """Which resource bank a tile belongs to.
+
+    The bank is the unit the SERVER depletes: "there's not enough wood here"
+    means every tile in that block is spent, not just the one targeted. Knowing
+    the block lets the sweep walk straight past the rest of it instead of
+    swinging at each tile in turn and being told the same thing every time.
+    """
+    return (int(x) // int(width), int(y) // int(height))
+
+
+def spot_gap(a, b):
+    """Tiles between two spots, the way UO measures range."""
+    return max(abs(a[0] - b[0]), abs(a[1] - b[1]))
+
+
+def lumber_area_spots(origin):
+    """Every standing spot in the box, in walking order.
+
+    The landing tile comes first - we are already on it, so that costs no
+    walking and it keeps the tree the rune was placed for as the first thing
+    cut, exactly as before this sweep existed.
+
+    The rest are ordered nearest-first from wherever the walk has reached. A
+    plain serpentine looks tidier but is wrong here: lifting the landing tile
+    out of the middle of it leaves a hole, and the row it came from then jumps
+    the full width of the box - 6 tiles on the default settings, which is two
+    wasted walks per visit. Nearest-first has no hole to fall into and keeps
+    every leg down to one LUMBER_AREA_STEP.
+    """
+    return area_spots(origin, LUMBER_AREA_SIZE,
+                      LUMBER_AREA_STEP_X, LUMBER_AREA_STEP_Y)
+
+
+def area_spots(origin, size, step_x, step_y=None):
+    """The generic version. See lumber_area_spots for why the order is this.
+
+    The two axes step separately because resource banks are not square: mining
+    banks are 8x8, but lumber banks are 4 wide and only 3 tall.
+    """
+    if step_y is None:
+        step_y = step_x
+    ox, oy = origin
+    xs = area_offsets(size, step_x)
+    ys = area_offsets(size, step_y)
+    grid = [(ox + dx, oy + dy) for dy in ys for dx in xs]
+
+    spots = [origin]
+    left = [s for s in grid if s != origin]
+    here = origin
+    while left:
+        # Ties broken by straight-line distance then by position, so the order
+        # is the same every visit - a sweep resumed after a trip home has to
+        # pick up the list it left off in.
+        left.sort(key=lambda s: (spot_gap(here, s),
+                                 abs(s[0] - here[0]) + abs(s[1] - here[1]),
+                                 s[1], s[0]))
+        here = left.pop(0)
+        spots.append(here)
+    return spots
+
+
+def player_ready():
+    """Is the character actually IN the world right now?
+
+    This exists because of a real ClassicUO bug. Its plugin entry point for
+    movement has no null check:
+
+        internal static bool RequestMove(int dir, bool run)
+        {
+            return Client.Game.UO.World.Player.Walk((Direction)dir, run);
+        }
+
+    - src/ClassicUO.Client/Network/Plugin.cs. The method right below it,
+    GetPlayerPosition, DOES check `World.Player != null` first; RequestMove
+    simply does not. So any plugin asking to move while the player object is
+    momentarily gone takes the whole client down with
+
+        System.NullReferenceException at ClassicUO.Network.Plugin.RequestMove
+
+    World.Player is null across recalls, gate travel and world reloads, and
+    this script recalls constantly and starts walking the moment it lands.
+    That is the crash.
+
+    It cannot be fixed from here - only avoided, by not asking to move until
+    the character is really there.
+    """
+    try:
+        if Player is None or int(Player.Serial or 0) == 0:
+            return False
+        spot = Player.Position
+        if spot is None:
+            return False
+        # 0,0 is what an unloaded world reads as, not a real place to stand.
+        return not (int(spot.X or 0) == 0 and int(spot.Y or 0) == 0)
+    except Exception:
+        return False
+
+
+def wait_for_player(timeout_ms=PLAYER_READY_TIMEOUT_MS):
+    """Block until the character is in the world again, or give up.
+
+    Called after every recall. Walking into the gap between "the recall fired"
+    and "the world finished loading" is what crashes the client.
+    """
+    deadline = time.time() + timeout_ms / 1000.0
+    while time.time() < deadline:
+        if player_ready():
+            return True
+        Misc.Pause(PLAYER_READY_POLL_MS)
+    log("The character is still not in the world after %dms - not moving."
+        % timeout_ms, HUE_WARN)
+    return False
+
+
+def arrived():
+    """Call this on EVERY path out of a recall that actually travelled.
+
+    Always returns True - "the recall happened" - after blocking for the world
+    to come back. It exists as its own function because the wait used to live
+    on one branch of ar_recall and the successful first cast returned straight
+    past it, so the guard covered only the rare mana-retry. That is the common
+    case left unprotected, which is exactly the case that crashes.
+
+    See player_ready() for why walking too early kills the client.
+    """
+    wait_for_player()
+    return True
+
+
+def pathfind_to(x, y):
+    """Walk one leg towards a tile.
+
+    Route.Timeout is set EXPLICITLY. Left unset it means no limit, and
+    PathFinding.Go then blocks for as long as it wants - taking every guard in
+    this file out of play, because they all run between calls to this function.
+    A short leg timeout is what lets those guards exist at all.
+    """
+    # NEVER ask to move when the player object may be gone - see player_ready.
+    if not player_ready():
+        debug("Not in the world yet - holding off the move.", HUE_WARN)
+        return False
+
+    route = PathFinding.Route()
+    route.X = x
+    route.Y = y
+    route.MaxRetry = 2
+    route.StopIfStuck = True
+    route.IgnoreMobile = True
+    route.UseResync = True
+    route.DebugMessage = False
+
+    # Setting an attribute Razor's Route does not have raises, and this one is
+    # NEW and unverified in game. A .NET-backed object also rejects a value of
+    # the wrong type outright. Neither is worth taking the whole script down
+    # for - without the timeout the guards are weaker, not broken.
+    try:
+        route.Timeout = PATH_LEG_TIMEOUT_S
+    except Exception as err:
+        global _timeout_warned
+        if not _timeout_warned:
+            _timeout_warned = True
+            log("PathFinding.Route has no usable Timeout on this build (%s). "
+                "Walking still works, but a stuck walk relies on the position "
+                "watchdog rather than the leg timeout." % err, HUE_WARN)
+
+    try:
+        return PathFinding.Go(route)
+    except Exception as err:
+        # A pathfinder that throws must not end the run. It happens against
+        # bad destinations, and the caller already treats "did not get there"
+        # as an ordinary outcome.
+        debug("PathFinding.Go failed for %d,%d: %s" % (x, y, err), HUE_WARN)
+        return False
+
+
+def land_is_walkable(x, y):
+    """Is (x, y) real ground, or the black nothing beyond the map edge?
+
+    The pathfinder will happily route THROUGH unexplored blackness - it reports
+    a way that does not exist, the character walks into it and stops. Asking
+    the land tile whether it is impassable is the cheap way to refuse those
+    before committing to the walk.
+
+    Unknown answers count as walkable: this is here to reject the obviously
+    impossible, not to second-guess terrain the client does know about.
+    """
+    try:
+        land = Statics.GetLandID(int(x), int(y), Player.Map)
+        if land is None:
+            return True
+        if Statics.GetLandFlag(land, "Impassable"):
+            return False
+    except Exception:
+        return True
+    return True
+
+
+# The tile the character was last seen on, and when. Movement is the only
+# thing that proves a walk is working; a stuck one keeps issuing steps forever.
+_timeout_warned = False
+_stand_tile = None
+_stand_since = 0.0
+
+
+def seconds_on_this_tile():
+    """How long the character has been on the exact same tile."""
+    global _stand_tile, _stand_since
+    here = (Player.Position.X, Player.Position.Y)
+    now = time.time()
+    if here != _stand_tile:
+        _stand_tile = here
+        _stand_since = now
+        return 0.0
+    return now - _stand_since
+
+
+def tile_gap(x, y):
+    """Tiles from the player to (x, y), the way UO measures range."""
+    return max(abs(Player.Position.X - x), abs(Player.Position.Y - y))
+
+
+def area_is_idle(state):
+    """True once nothing has been harvested for AREA_IDLE_TIMEOUT_MS.
+
+    Measured from the last swing that actually produced something, not from
+    the start of the sweep, so a slow but productive area is never cut off.
+    """
+    last = state.get("last_yield")
+    if not last:
+        return False
+    return (time.time() - last) * 1000.0 >= AREA_IDLE_TIMEOUT_MS
+
+
+def note_area_yield(state):
+    """Reset the idle clock. Called for every swing that produced something."""
+    state["last_yield"] = time.time()
+
+
+def budget_ms(deadline, most_ms):
+    """Milliseconds left before `deadline`, capped at `most_ms`.
+
+    Walking shares the spot's 15-second budget with swinging rather than having
+    its own. Without this the two add up and the cap does not actually cap
+    anything - the whole point is that the character is moving on 15 seconds
+    after it commits to a spot, whatever it spent them doing.
+
+    Never returns zero: a walk given no time at all reads as an instant
+    failure, which would mark a perfectly good spot dead.
+    """
+    left = int((deadline - time.time()) * 1000.0)
+    return max(500, min(int(most_ms), left))
+
+
+def path_to(x, y):
+    """The walkable path to a tile, or None if there is not one.
+
+    PathFinding.GetPath runs the search WITHOUT moving the character, so this
+    is the cheap question to ask before committing to a walk. Mobiles are
+    ignored: something standing in the way is a moment's problem, not a reason
+    to write the spot off.
+    """
+    try:
+        path = PathFinding.GetPath(int(x), int(y), True)
+    except Exception:
+        return None
+    if not path:
+        return None
+    try:
+        return list(path)
+    except Exception:
+        return None
+
+
+def reachable_spot(x, y, accept=None):
+    """A tile at or near (x, y) that can actually be walked to, or None.
+
+    Two separate ways a spot can be unreachable, both of them normal
+    underground:
+
+      * The spot itself is INSIDE the rock. The standing grid is arithmetic,
+        so in a cave a good number of spots land in a wall. A tile beside it
+        is usually open floor, which is why the accept radius is searched too
+        rather than the spot being written off.
+
+      * There is no sane way through. The next ore bank is 8 tiles off through
+        solid mountain and the only path is 80 tiles around the outside. That
+        is a REAL path, which is why "did GetPath return something" is not on
+        its own the right question - anything past AREA_MAX_DETOUR times the
+        direct distance is refused, because walking it leaves the mine.
+    """
+    if accept is None:
+        accept = LUMBER_AREA_ARRIVE_ACCEPT
+
+    candidates = [(int(x), int(y))]
+    for radius in range(1, max(0, int(accept)) + 1):
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                if max(abs(dx), abs(dy)) == radius:
+                    candidates.append((int(x) + dx, int(y) + dy))
+
+    for cx, cy in candidates:
+        # Refuse the black nothing before asking the pathfinder, because the
+        # pathfinder will cheerfully route into it.
+        if not land_is_walkable(cx, cy):
+            continue
+        direct = tile_gap(cx, cy)
+        path = path_to(cx, cy)
+        if not path:
+            continue
+        if direct and len(path) > direct * AREA_MAX_DETOUR:
+            debug("Path to %d,%d is %d steps for %d tiles - that is round the "
+                  "mountain, not through it. Skipping."
+                  % (cx, cy, len(path), direct))
+            continue
+        return (cx, cy)
+    return None
+
+
+def walk_to(x, y, timeout_ms=None, accept=None):
+    """Walk to a tile, settling for `accept` tiles short of it.
+
+    The destination is PATH-CHECKED before a single step is taken. Underground
+    the standing grid regularly puts the next spot on the far side of a
+    mountain wall, and walking at it just bounces off the rock until the
+    timeout expires - which is what left a character shuffling against a cliff
+    face instead of mining.
+
+    PathFinding.Go also fails outright against a tile something is standing on,
+    and a tree or a rock stops it a tile out, so "close enough" has to be an
+    accepted outcome or every awkward spot costs the whole timeout.
+    """
+    if timeout_ms is None:
+        timeout_ms = LUMBER_AREA_MOVE_TIMEOUT
+    if accept is None:
+        accept = LUMBER_AREA_ARRIVE_ACCEPT
+
+    if tile_gap(x, y) <= accept:
+        return True
+
+    goal = reachable_spot(x, y, accept)
+    if goal is None:
+        debug("No way through to %d,%d - not attempting it." % (x, y))
+        return False
+    x, y = goal
+
+    deadline = time.time() + timeout_ms / 1000.0
+    best = None
+    stalled = 0
+    last = None
+    stuck = 0
+
+    while time.time() < deadline:
+        if poll_skip():
+            debug("Skip heard mid-walk - stopping.")
+            return False
+        if take_move():
+            # Consumed, not polled. Leaving it set would have the move spent a
+            # second time on the next spot - one word, two spots skipped.
+            # A walk that returns False marks this spot dead and moves on,
+            # which is exactly what was asked for.
+            debug("Move heard mid-walk - abandoning this spot.")
+            return False
+        gap = tile_gap(x, y)
+        if gap <= accept:
+            return True
+
+        # Progress is measured against the BEST distance reached, not the
+        # previous one. A pathfinder working along a wall shuffles back and
+        # forth, so "did I move" answers yes forever while "am I getting
+        # closer" answers no - and only the second one is the truth.
+        if best is None or gap < best:
+            best = gap
+            stalled = 0
+        else:
+            stalled += 1
+            if stalled >= AREA_STALL_STEPS:
+                debug("Stopped getting closer to %d,%d - stuck at %d tiles."
+                      % (x, y, gap))
+                return gap <= accept
+
+        pathfind_to(x, y)
+
+        # Rooted to one tile for this long while TRYING to walk means stuck,
+        # whatever the pathfinder claims. This is the check that catches a
+        # character wedged against terrain: it needs no theory about why.
+        if seconds_on_this_tile() * 1000.0 >= AREA_STUCK_TIMEOUT_MS:
+            log("Stuck on %d,%d for %ds while walking to %d,%d - giving up on "
+                "that spot." % (Player.Position.X, Player.Position.Y,
+                                AREA_STUCK_TIMEOUT_MS / 1000, x, y), HUE_WARN)
+            return False
+
+        here = (Player.Position.X, Player.Position.Y)
+        if here == last:
+            stuck += 1
+            if stuck >= 2:
+                return tile_gap(x, y) <= accept
+        else:
+            stuck = 0
+            last = here
+        interruptible_pause(200)
+
+    return tile_gap(x, y) <= accept
+
+
+# Sweep progress, keyed by (job name, waypoint index) rather than by position -
+# the player walks away from the landing tile during a sweep, and a trip home
+# for a full pack re-enters this function from wherever the unload left them.
+#
+# "dead" remembers the spots that answered "nothing choppable here", which is a
+# property of the ground and will not change. A spot that was merely harvested
+# out is NOT remembered: that grows back, and skipping it forever would quietly
+# shrink the route.
+_lumber_sweep = {}
+_mine_sweep = {}
+
+
+def sweep_key():
+    """Identify the waypoint being worked, not the tile being stood on."""
+    job = _current_job if isinstance(_current_job, dict) else {}
+    name = job.get("name", "lumber")
+    return (name, _waypoint.get(name, 0) - 1)
+
+
+def forget_sweeps():
+    """Drop all sweep memory, both jobs."""
+    _lumber_sweep.clear()
+    _mine_sweep.clear()
 
 
 def harvest_lumber():
-    """Lumberjacking."""
+    """Lumberjacking. Works the whole area around the rune, not one tree."""
     if not pack_has_room():
         return "full"
 
@@ -2937,28 +4816,244 @@ def harvest_lumber():
         log("No axe or hatchet found in hand or pack.", HUE_BAD)
         return "stop"
 
-    clear_journal(LUMBER_ALL)
-    clear_cursor()
-    Target.TargetResource(axe, "wood")
+    if not LUMBER_AREA_ENABLED:
+        return lumber_single(axe)
+    return lumber_sweep(axe)
 
-    deadline = time.time() + LUMBER_SWING_TIMEOUT / 1000.0
-    while time.time() < deadline:
-        if journal_hit(LUMBER_TOOL_BROKE):
-            log("Axe broke - looking for another.", HUE_WARN)
-            return "ok"
-        if journal_hit(LUMBER_PACK_FULL):
-            return "full"
-        if journal_hit(LUMBER_DEPLETED):
-            return "next"
-        if journal_hit(LUMBER_BAD_TARGET):
-            debug("Not a usable tree here.")
-            return "next"
-        if journal_hit(LUMBER_SUCCESS) or journal_hit(LUMBER_RETRY):
-            return "ok"
-        interruptible_pause(150)
 
-    debug("Chop timed out - moving on.")
+def lumber_single(axe):
+    """The original one-spot behaviour, kept for LUMBER_AREA_ENABLED = False."""
+    outcome = chop_once(axe, LUMBER_SWING_TIMEOUT)
+    if outcome == "broke":
+        log("Axe broke - looking for another.", HUE_WARN)
+        return "ok"
+    if outcome == "full":
+        return "full"
+    if outcome == "ok":
+        return "ok"
+    if outcome == "notree":
+        debug("Not a usable tree here.")
+    elif outcome == "silent":
+        debug("Chop timed out - moving on.")
     return "next"
+
+
+def lumber_sweep(axe):
+    """Walk the box around the landing tile, chopping at every standing spot.
+
+    Answers on the job runner's own terms:
+      "ok"    stopped part-way - come back to this same waypoint and carry on
+      "next"  the whole area is worked out, recall onwards
+      "full"  the pack is full
+      "stop"  no axe left
+    """
+    key = sweep_key()
+    state = _lumber_sweep.get(key)
+
+    if state is None or state.get("origin") is None:
+        origin = (Player.Position.X, Player.Position.Y)
+        state = {"origin": origin, "next": 0, "dead": set(), "spent": set(),
+                 "cut": 0, "silent": 0, "last_yield": time.time()}
+        _lumber_sweep[key] = state
+        spots = lumber_area_spots(origin)
+        log("Lumber area: %d standing spot(s) in a %dx%d box around %d,%d."
+            % (len(spots), LUMBER_AREA_SIZE, LUMBER_AREA_SIZE,
+               origin[0], origin[1]), HUE_STEP)
+    else:
+        spots = lumber_area_spots(state["origin"])
+        # Restart the idle clock on every re-entry. A full pack sends the
+        # character home and back, which takes far longer than the idle limit -
+        # without this a PRODUCTIVE rune would be abandoned the moment it
+        # returned, purely because the clock kept running during the trip.
+        note_area_yield(state)
+        if state["next"]:
+            debug("Lumber area: resuming at spot %d/%d."
+                  % (state["next"] + 1, len(spots)))
+
+    while state["next"] < len(spots):
+        # Polled, never acted on. This runs from inside walking, and the
+        # call-out response travels; the job runner acts on the flag once we
+        # have handed control back to it.
+        if poll_greyskull():
+            return "ok"
+        if hostiles_near():
+            log("Lumber area: something hostile turned up at spot %d/%d - "
+                "leaving the rest of this patch."
+                % (state["next"] + 1, len(spots)), HUE_WARN)
+            end_sweep(state)
+            return "next"
+
+        if take_skip():
+            log("Skipping the rest of this patch - on to the next rune.",
+                HUE_GOOD)
+            end_sweep(state)
+            return "next"
+
+        if area_is_idle(state):
+            log("Lumber area: nothing harvested here in %ds - giving up on "
+                "this rune and moving on. (%d of %d spots tried.)"
+                % (AREA_IDLE_TIMEOUT_MS / 1000, state["next"], len(spots)),
+                HUE_WARN)
+            end_sweep(state)
+            return "next"
+
+        index = state["next"]
+        spot = spots[index]
+
+        if index in state["dead"]:
+            state["next"] += 1
+            continue
+
+        # The server already said this block is empty. Walking into it to be
+        # told again is exactly the standing-around this sweep was meant to
+        # avoid - a lumber bank is 4x3, so several spots can share one.
+        if bank_of(spot[0], spot[1],
+                   LUMBER_BANK_W, LUMBER_BANK_H) in state["spent"]:
+            debug("Lumber area: spot %d/%d is in a bank already emptied - "
+                  "skipping." % (index + 1, len(spots)))
+            state["next"] += 1
+            continue
+
+        # One budget covers walking there AND working it, so a spot can never
+        # hold the character longer than this however it goes wrong.
+        spot_deadline = time.time() + AREA_SPOT_TIMEOUT_MS / 1000.0
+
+        if index > 0 and not walk_to(spot[0], spot[1],
+                                     budget_ms(spot_deadline,
+                                               LUMBER_AREA_MOVE_TIMEOUT)):
+            debug("Lumber area: could not reach spot %d/%d at %d,%d."
+                  % (index + 1, len(spots), spot[0], spot[1]), HUE_WARN)
+            state["dead"].add(index)
+            state["next"] += 1
+            continue
+
+        outcome = work_spot(axe, index, len(spots), state, spot_deadline)
+
+        if outcome == "full":
+            return "full"
+        if outcome == "stop":
+            return "stop"
+
+        state["next"] += 1
+
+    log("Lumber area done: %d swing%s gave wood, %d spot%s walked, %d barren%s."
+        % (state["cut"], "" if state["cut"] == 1 else "s",
+           state["next"], "" if state["next"] == 1 else "s",
+           len(state["dead"]),
+           "" if not state["silent"]
+           else ", %d silent (see LUMBER_AREA_PROBE_TIMEOUT)" % state["silent"]),
+        HUE_GOOD)
+    end_sweep(state)
+    return "next"
+
+
+def end_sweep(state):
+    """Close a sweep off, however it ended.
+
+    The dead-spot memory is KEPT - barren ground stays barren, and skipping it
+    is the whole point of remembering. Everything else restarts, and the origin
+    is dropped so it is re-read on arrival: a rune can be moved, and the next
+    recall may not land on the same tile.
+    """
+    state["next"] = 0
+    state["origin"] = None
+    for counter in ("cut", "dug", "silent"):
+        if counter in state:
+            state[counter] = 0
+    # Spent banks are forgotten between visits - a bank refills. "dead" is NOT
+    # forgotten: ground with no tree or rock on it stays that way.
+    if "spent" in state:
+        state["spent"] = set()
+    # The idle clock restarts with the next visit, or the sweep would give up
+    # instantly on arriving somewhere after a long trip home.
+    state["last_yield"] = time.time()
+
+
+def work_spot(axe, index, total, state, deadline=None):
+    """Chop at one standing spot until it stops giving.
+
+    Returns "" when the spot is done, or "full" / "stop" for the caller.
+    """
+    swings = 0
+    got = 0
+
+    started = time.time()
+    hard_stop = started + AREA_SPOT_HARD_CAP_MS / 1000.0
+    spoke_at = started
+
+    while swings < LUMBER_AREA_MAX_SWINGS:
+        now = time.time()
+        if now >= hard_stop:
+            log("Lumber area: %ds on spot %d/%d (%d swing(s), %d gave wood) - "
+                "that is the hard cap, moving on."
+                % (AREA_SPOT_HARD_CAP_MS / 1000, index + 1, total, swings, got),
+                HUE_WARN)
+            break
+        if now - spoke_at >= AREA_PROGRESS_MS / 1000.0:
+            spoke_at = now
+            log("Lumber area: still on spot %d/%d - %d swing(s), %d gave wood, "
+                "%ds so far." % (index + 1, total, swings, got, now - started))
+        if poll_skip():
+            break
+        if take_move():
+            log("Lumber area: moving on from spot %d/%d." % (index + 1, total))
+            break
+        if deadline is not None and time.time() >= deadline:
+            log("Lumber area: no wood from spot %d/%d in %ds - moving on."
+                % (index + 1, total, AREA_SPOT_TIMEOUT_MS / 1000), HUE_WARN)
+            break
+        if not pack_has_room():
+            return "full"
+
+        # The first swing at a spot is the probe - it answers "is there
+        # anything here at all", and it is the one that costs a full timeout
+        # on a shard that replies with silence.
+        timeout = LUMBER_AREA_PROBE_TIMEOUT if swings == 0 else LUMBER_SWING_TIMEOUT
+        outcome = chop_once(axe, timeout)
+        swings += 1
+
+        if outcome == "ok":
+            got += 1
+            state["cut"] += 1
+            note_area_yield(state)
+            # Producing wood is not being stuck - see mine_spot.
+            if deadline is not None:
+                deadline = time.time() + AREA_SPOT_TIMEOUT_MS / 1000.0
+        elif outcome == "full":
+            return "full"
+        elif outcome == "broke":
+            log("Axe broke - looking for another.", HUE_WARN)
+            axe = find_axe()
+            if axe is None:
+                log("No axe or hatchet left.", HUE_BAD)
+                return "stop"
+            continue
+        elif outcome == "empty":
+            # That whole 4x3 bank is spent, not just this tile. Recorded from
+            # where we are ACTUALLY standing, which may be a tile off the
+            # intended spot.
+            state["spent"].add(bank_of(Player.Position.X, Player.Position.Y,
+                                       LUMBER_BANK_W, LUMBER_BANK_H))
+            break
+        elif outcome == "notree":
+            if swings == 1:
+                # Nothing choppable in reach, and that stays true next visit.
+                # Remembered so later trips walk straight past it.
+                state["dead"].add(index)
+            break
+        elif outcome == "silent":
+            if swings == 1:
+                state["silent"] += 1
+                debug("Lumber area: spot %d/%d said nothing at all."
+                      % (index + 1, total), HUE_WARN)
+            break
+
+        interruptible_pause(HARVEST_PAUSE)
+
+    if got:
+        debug("Lumber area: spot %d/%d gave wood on %d swing(s)."
+              % (index + 1, total, got))
+    return ""
 
 
 TASKS = {
@@ -3078,6 +5173,12 @@ def run_job(job, resume=False):
             hostile_skips = 0
 
         result = task()
+
+        if take_skip():
+            log("%s: skipping to the next rune." % name, HUE_GOOD)
+            need_waypoint = True
+            interruptible_pause(HARVEST_PAUSE)
+            continue
 
         if result == "full":
             # Smelt, then let anything carried take the load. Only if the pack
@@ -3276,91 +5377,290 @@ def diagnostic_run(jobs):
 # MAIN
 # =============================================================================
 
+def crash_state():
+    """Everything worth knowing about where the script was when it died."""
+    rows = []
+
+    def add(label, value):
+        rows.append("  %-22s %s" % (label, value))
+
+    add("script", "%s [%s]" % (SCRIPT_VERSION, SCRIPT_TAG))
+    try:
+        add("character", "%s, serial 0x%X" % (Player.Name, Player.Serial))
+        add("position", "%d,%d  map %s"
+            % (Player.Position.X, Player.Position.Y, Player.Map))
+        add("weight", "%d of %d" % (Player.Weight, Player.MaxWeight))
+        add("ghost", Player.IsGhost)
+    except Exception as err:
+        add("player", "could not be read: %r" % (err,))
+
+    try:
+        job = _current_job if isinstance(_current_job, dict) else {}
+        name = job.get("name", "(none)")
+        routes = _routes.get(name) or []
+        add("job", "%s, waypoint %s of %d"
+            % (name, _waypoint.get(name, "?"), len(routes)))
+    except Exception as err:
+        add("job", "could not be read: %r" % (err,))
+
+    # The serials are the ONLY thing that differs between the copies, so they
+    # are the first suspect when one character crashes and the others do not.
+    for label, serial in (("WOOD_STORAGE_SERIAL", WOOD_STORAGE_SERIAL),
+                          ("INGOT_KEY_SERIAL", INGOT_KEY_SERIAL),
+                          ("STONE_STORAGE_SERIAL", STONE_STORAGE_SERIAL)):
+        if not serial:
+            add(label, "0 (graphic lookup)")
+            continue
+        try:
+            item = Items.FindBySerial(serial)
+            if item is None:
+                add(label, "0x%X -> NOT FOUND" % serial)
+            else:
+                add(label, "0x%X -> id 0x%04X hue 0x%04X %r"
+                    % (serial, int(item.ItemID), int(item.Hue),
+                       safe_name(item)))
+        except Exception as err:
+            add(label, "0x%X -> reading it RAISED %r" % (serial, err))
+
+    return rows
+
+
+def is_stop_request(err):
+    """Did the user press Stop, rather than the script actually failing?
+
+    Razor stops a script by aborting its thread. IronPython surfaces that
+    .NET ThreadAbortException to Python as
+
+        SystemError: Thread was being aborted.
+
+    which is an ordinary Exception subclass, so a blanket `except Exception`
+    catches it and writes a CRASHED report for a completely normal stop. Every
+    crash file on disk at the time this was written was one of these - five
+    reports, five presses of the Stop button, no real crashes at all. Worse,
+    it dumps a red traceback over the journal you were about to read.
+
+    Matched on the message rather than the type: the exception reaches Python
+    as SystemError here, but the type is an implementation detail of the
+    IronPython build and the message is what Razor's users actually see.
+    """
+    try:
+        text = str(err).lower()
+    except Exception:
+        return False
+    return "thread was being aborted" in text or "thread abort" in text
+
+
+def report_crash(err):
+    """Write the traceback, the breadcrumb trail and the state, and say where.
+
+    Both to the journal and to a file, because the journal scrolls and a crash
+    that happens while you are not watching is exactly the one that matters.
+    """
+    try:
+        import traceback
+        tb = traceback.format_exc()
+    except Exception:
+        tb = "%r (traceback module unavailable)" % (err,)
+
+    lines = ["=" * 70,
+             "harvest_runner CRASHED",
+             "=" * 70,
+             ""]
+    lines.extend(crash_state())
+    lines.append("")
+    lines.append("Last %d log line(s), oldest first:" % len(_trail))
+    lines.extend("    %s" % t for t in _trail)
+    lines.append("")
+    lines.append(tb)
+
+    for line in lines[:8]:
+        log(line, HUE_BAD)
+    log("...full report follows in the file.", HUE_BAD)
+    for line in tb.strip().splitlines():
+        log(line, HUE_BAD)
+
+    path = ""
+    try:
+        who = "".join(c for c in (Player.Name or "unknown")
+                      if c.isalnum() or c in "-_") or "unknown"
+        path = os.path.join(os.environ.get("TEMP", "."),
+                            "harvest_crash_%s.txt" % who)
+        with open(path, "a") as handle:
+            handle.write(os.linesep.join(lines) + os.linesep + os.linesep)
+        log("Crash report appended to %s - send that file." % path, HUE_BAD)
+    except Exception as write_err:
+        log("Could not write the crash file (%r). The traceback above is all "
+            "there is - copy it out of the journal." % (write_err,), HUE_BAD)
+
+
 if __name__ == "__main__":
-    log("Starting.", HUE_GOOD)
-    if Player.GetSkillValue("Meditation") <= 0:
-        log("No Meditation skill - mana recovery will be passive only.", HUE_WARN)
+    # EVERYTHING is inside this handler. A Razor script that raises prints one
+    # line and stops, and the traceback is gone before it can be read - which
+    # is why "it crashes sometimes" was impossible to act on. This writes the
+    # traceback, the last CRASH_TRAIL log lines and the state to a file named
+    # after the character.
+    try:
+        log("harvest_runner v%s [%s]" % (SCRIPT_VERSION, SCRIPT_TAG), HUE_STEP)
+        if Player.GetSkillValue("Meditation") <= 0:
+            log("No Meditation skill - mana recovery will be passive only.", HUE_WARN)
 
-    log("Jobs:", HUE_INFO)
-    jobs = active_jobs()
-    if not jobs:
-        log("No usable jobs configured. Edit JOBS at the top.", HUE_BAD)
-        raise SystemExit
+        log("Jobs:", HUE_INFO)
+        jobs = active_jobs()
+        if not jobs:
+            log("No usable jobs configured. Edit JOBS at the top.", HUE_BAD)
+            raise SystemExit
 
-    log("Vendor round:", HUE_INFO)
-    _usable = validate_vendors(all_vendors())
-    _stops = vendor_stops(_usable)
-    log("  -> %d stop(s), %d NPC request(s) per round."
-        % (len(_stops), len(_usable)), HUE_GOOD)
-    for _stop in _stops:
-        log("     %s/%s : %s"
-            % ("/".join(_stop["folder"]) or "(root)", _stop["point"],
-               ", ".join(v["label"] for v in _stop["vendors"])), HUE_INFO)
+        log("Vendor round:", HUE_INFO)
+        _usable = validate_vendors(all_vendors())
+        _stops = vendor_stops(_usable)
+        log("  -> %d stop(s), %d NPC request(s) per round."
+            % (len(_stops), len(_usable)), HUE_GOOD)
+        for _stop in _stops:
+            log("     %s/%s : %s"
+                % ("/".join(_stop["folder"]) or "(root)", _stop["point"],
+                   ", ".join(v["label"] for v in _stop["vendors"])), HUE_INFO)
 
-    log("House deposits at %s (via %s):"
-        % (DROP_POINT, ", ".join(HOUSE_DEPOSIT_CONTEXT)), HUE_INFO)
-    for spec in HOUSE_DEPOSITS:
-        state = "" if spec.get("enabled", True) else "  (disabled)"
-        log("  %-18s book 0x%X%s"
-            % (spec.get("label", "?"), spec.get("serial", 0), state), HUE_INFO)
+        log("House deposits at %s (via %s):"
+            % (DROP_POINT, ", ".join(HOUSE_DEPOSIT_CONTEXT)), HUE_INFO)
+        for spec in HOUSE_DEPOSITS:
+            state = "" if spec.get("enabled", True) else "  (disabled)"
+            log("  %-18s book 0x%X%s"
+                % (spec.get("label", "?"), spec.get("serial", 0), state), HUE_INFO)
 
-    bod_book, how = find_bod_book()
-    if bod_book is None:
-        log("Bulk Order Book: NOT FOUND (%s) - deeds will pile up in your pack."
-            % how, HUE_BAD)
-    else:
-        count = deeds_in_book(bod_book)
-        log("Bulk Order Book: 0x%X, %s deed(s) in it (%s)."
-            % (bod_book.Serial, "?" if count is None else count, how), HUE_GOOD)
+        if not BOD_ENABLED:
+            log("Bulk orders: OFF. No BOD stops, no filing, no book. Resource "
+                "Orders and Taming Deeds are unaffected.", HUE_WARN)
+        else:
+            bod_book, how = find_bod_book()
+            if bod_book is None:
+                log("Bulk Order Book: NOT FOUND (%s) - deeds will pile up in "
+                    "your pack." % how, HUE_BAD)
+            else:
+                count = deeds_in_book(bod_book)
+                log("Bulk Order Book: 0x%X, %s deed(s) in it (%s)."
+                    % (bod_book.Serial, "?" if count is None else count, how),
+                    HUE_GOOD)
 
-    log("Listening for: %s" % ", ".join(GREYSKULL_PHRASES), HUE_INFO)
+        report_restock_keys()
 
-    Journal.Clear()
-    prime_journal_cursor()
-    Timer.Create("harvest vendors", VENDOR_INTERVAL_MS)
-    Timer.Create("harvest drop", DROP_INTERVAL_MS)
+        if LUMBER_AREA_ENABLED:
+            log("Lumber area: %dx%d box, %d standing spot(s) per rune, %dx%d "
+                "apart (= the wood bank)."
+                % (LUMBER_AREA_SIZE, LUMBER_AREA_SIZE,
+                   len(area_offsets(LUMBER_AREA_SIZE, LUMBER_AREA_STEP_X))
+                   * len(area_offsets(LUMBER_AREA_SIZE, LUMBER_AREA_STEP_Y)),
+                   LUMBER_AREA_STEP_X, LUMBER_AREA_STEP_Y), HUE_INFO)
+        else:
+            log("Lumber area: OFF - one spot per rune.", HUE_INFO)
 
-    if DIAGNOSTIC_MODE:
-        diagnostic_run(jobs)
-        raise SystemExit
+        if MINE_AREA_ENABLED:
+            log("Mining area: %d tiles out, spots %d apart (= the 8x8 ore bank), "
+                "up to %d per rune."
+                % (MINE_AREA_RADIUS, MINE_AREA_STEP,
+                   len(area_offsets(MINE_AREA_RADIUS * 2, MINE_AREA_STEP)) ** 2),
+                HUE_INFO)
+            log("  Mineable ground: %d mountain/cave tiles%s."
+                % (len(MOUNTAIN_AND_CAVE_TILES),
+                   ", plus %d sand" % len(SAND_TILES)
+                   if MINE_AREA_INCLUDE_SAND else ""), HUE_INFO)
+        else:
+            log("Mining area: OFF - one spot per rune.", HUE_INFO)
 
-    job_index = 0
-    resume_job = False
+        log("Stuck guards: %ds per spot, %ds rooted while walking, %ds producing "
+            "nothing abandons the rune. Path legs cut off at %ss."
+            % (AREA_SPOT_TIMEOUT_MS / 1000, AREA_STUCK_TIMEOUT_MS / 1000,
+               AREA_IDLE_TIMEOUT_MS / 1000, PATH_LEG_TIMEOUT_S), HUE_INFO)
 
-    while not Player.IsGhost:
-        if checkGreyskull():
-            continue
+        _free, _w, _mw = weight_headroom()
+        log("Pack: %d of %d stones, %d free. Storing at %d%% (%d stones), or "
+            "sooner if one more yield would go over."
+            % (_w, _mw, _free, round(PACK_STORE_AT * 100),
+               int(_mw * PACK_STORE_AT)), HUE_INFO)
+        if DROPOFF_AFTER_VENDORS:
+            log("Deeds are stored at home right after any vendor round that "
+                "collects.", HUE_INFO)
 
-        job = jobs[job_index]
-        outcome = run_job(job, resume=resume_job)
+        log("Listening for: %s" % ", ".join(GREYSKULL_PHRASES), HUE_INFO)
+        log('Say "%s" as %s to skip to the next rune%s.'
+            % ("/".join(SKIP_PHRASES), Player.Name or "this character",
+               " (this character only)" if SKIP_SELF_ONLY else ""), HUE_INFO)
+        log('Say "%s" to leave just this spot and take the next one in the '
+            'same area - or recall, if it was the last%s.'
+            % ("/".join(MOVE_PHRASES),
+               " (this character only)" if MOVE_SELF_ONLY else ""), HUE_INFO)
+
+        # Razor keeps a script loaded between runs, so this state can outlive
+        # a Reload - and resuming last run's sweep position would put the
+        # character back at a spot it is nowhere near.
+        forget_sweeps()
+
+        Journal.Clear()
+        prime_journal_cursor()
+        Timer.Create("harvest vendors", VENDOR_INTERVAL_MS)
+        Timer.Create("harvest drop", DROP_INTERVAL_MS)
+
+        if DIAGNOSTIC_MODE:
+            diagnostic_run(jobs)
+            raise SystemExit
+
+        job_index = 0
         resume_job = False
-        log("%s finished: %s" % (job["name"], outcome), HUE_INFO)
 
-        # These do not end the job - come back to the same lap, same waypoint.
-        if outcome == "vendors":
-            vendor_round()
-            Timer.Create("harvest vendors", VENDOR_INTERVAL_MS)
-            resume_job = True
-            continue
-        if outcome == "interrupted":
-            resume_job = True
-            continue
+        while not Player.IsGhost:
+            if checkGreyskull():
+                continue
 
-        if outcome == "stop":
-            smelt()
-            dropoff()
+            job = jobs[job_index]
+            outcome = run_job(job, resume=resume_job)
+            resume_job = False
+            log("%s finished: %s" % (job["name"], outcome), HUE_INFO)
 
-        if JOB_ROTATION != "never" and len(jobs) > 1:
-            # Hand the next job an empty pack. Ore left over from mining is
-            # dead weight the wood storage will not take.
-            if DROPOFF_BETWEEN_JOBS and not pack_has_room(PACK_HANDOVER_LEVEL):
-                log("Unloading before switching jobs.", HUE_INFO)
-                if not unload_in_place(PACK_HANDOVER_LEVEL):
+            # These do not end the job - come back to the same lap, same waypoint.
+            if outcome == "vendors":
+                collected = vendor_round()
+                Timer.Create("harvest vendors", VENDOR_INTERVAL_MS)
+                if DROPOFF_AFTER_VENDORS and collected:
+                    log("Storing %d collected deed(s) before going back to work."
+                        % collected, HUE_INFO)
                     dropoff()
-            job_index = (job_index + 1) % len(jobs)
-            _lap_done[job["name"]] = False
+                    Timer.Create("harvest drop", DROP_INTERVAL_MS)
+                resume_job = True
+                continue
+            if outcome == "interrupted":
+                resume_job = True
+                continue
 
-    log("You are dead. Stopping.", HUE_BAD)
-    while Player.IsGhost:
-        Misc.Beep()
-        Misc.Pause(1500)
+            if outcome == "stop":
+                smelt()
+                dropoff()
+
+            if JOB_ROTATION != "never" and len(jobs) > 1:
+                # Hand the next job an empty pack. Ore left over from mining is
+                # dead weight the wood storage will not take.
+                if DROPOFF_BETWEEN_JOBS and not pack_has_room(PACK_HANDOVER_LEVEL):
+                    log("Unloading before switching jobs.", HUE_INFO)
+                    if not unload_in_place(PACK_HANDOVER_LEVEL):
+                        dropoff()
+                job_index = (job_index + 1) % len(jobs)
+                _lap_done[job["name"]] = False
+
+        log("You are dead. Stopping.", HUE_BAD)
+        while Player.IsGhost:
+            Misc.Beep()
+            Misc.Pause(1500)
+
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        log("Stopped.", HUE_INFO)
+        raise
+    except Exception as _err:
+        # Pressing Stop is not a crash. Let it through untouched so it does not
+        # append a bogus report or bury the journal under a red traceback.
+        if is_stop_request(_err):
+            log("Stopped.", HUE_INFO)
+            raise
+        if CRASH_REPORT:
+            report_crash(_err)
+        else:
+            raise
