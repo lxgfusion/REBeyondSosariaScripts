@@ -89,7 +89,7 @@ import time
 # line in the journal says which copy is actually loaded - two separate
 # debugging rounds were spent on a bug that was already fixed on disk but not
 # in the Scripts folder.
-SCRIPT_VERSION = "2026-08-22.43"
+SCRIPT_VERSION = "2026-08-21.41"
 
 
 # =============================================================================
@@ -295,7 +295,7 @@ KEEP_PER_TYPE = 0
 # THIS IS NO LONGER THE ONLY CEILING. Pack space is checked too, and whichever
 # is smaller wins - see PACK_ITEM_LIMIT. Raising this alone will not overfill
 # the pack.
-MAX_ORDERS_PER_RUN = 15
+MAX_ORDERS_PER_RUN = 40
 
 # Orders to fill for ONE resource before moving on to the next.
 #
@@ -338,7 +338,7 @@ PACK_ITEM_LIMIT = 375
 
 # Item slots never used, so a hand-in cannot fail on a pack that is exactly
 # full. Deeds are withdrawn one at a time and each takes one slot.
-PACK_ITEM_SAFETY = 5
+PACK_ITEM_SAFETY = 30
 
 # Pages of the filtered list to search per resource before giving up. Each page
 # is 15 rows.
@@ -369,24 +369,6 @@ MAX_REWIND_PRESSES = 4
 # looked skipped. This is only a sanity ceiling - the per-resource budget
 # (stock minus KEEP_PER_TYPE) is what actually protects the chest.
 MAX_ORDER_SIZE = 25000
-
-# ---------------------------------------------------------------------------
-# WHICH of a resource's orders to take
-# ---------------------------------------------------------------------------
-# Taking the SMALLEST first fills more orders from the same stock: an order
-# counts the same whether it wanted 1,460 or 24,000, so spending the cheap ones
-# first is strictly more orders per ingot. That is the whole point when the
-# score is a count of orders handed in.
-#
-#   "smallest"  sort the list by Amt To Gather and take the first row. The
-#               SERVER does the sorting - see ORDERS_SORT_AMOUNT_BUTTON - so
-#               this costs one button press, not a second pass over the pages.
-#               If the sort is unavailable it degrades to the smallest on the
-#               page in hand rather than failing.
-#   "page"      the smallest that fits on the first page that has any, with no
-#               sorting at all.
-#   "first"     the first that fits, in list order. What this did before.
-ORDER_PICK = "smallest"
 
 # Fill passes per deed, as a FLOOR. One target usually does the whole amount;
 # the extra passes cover a shard that consumes one stack at a time.
@@ -473,17 +455,6 @@ ORDERS_FILTER_SUBMIT = 12       # its submit button
 # find orders the book already counts as finished.
 ORDERS_COMPLETED_ENTRY = 4
 ORDERS_COMPLETED_SUBMIT = 52
-
-# The arrow under the "Amt To Gather" column header, which sorts the list by
-# amount. Captured from Razor's Enhanced Gump Inspector on 2026-08-22 - its
-# response log showed Gump ID 0xB2F21F1A, Gump Button 21, with the Name filter
-# ("Bark Fragment") restated in Text ID 0 and the reply coming back as the same
-# filtered list, Displayed: 3. So the filter survives the sort.
-#
-# NOT probed, and not to be guessed at: button 2 on this gump is Purge and 3 is
-# Fill from backpack. Set to 0 to turn sorting off, in which case the runner
-# falls back to taking the smallest order it can see on one page.
-ORDERS_SORT_AMOUNT_BUTTON = 21
 
 # =============================================================================
 # CONFIG - PULLING FINISHED ORDERS OUT OF THE BOOK
@@ -2589,98 +2560,24 @@ def pull_completed_orders():
     return pulled
 
 
-def page_amounts(anchor, exact):
-    """The amounts of this resource's rows on the page in hand, in order.
-
-    Used to tell which way the list just sorted. Rows of other resources and
-    the amt-0 header row are ignored - they would make an ascending list look
-    unsorted.
-    """
-    out = []
-    for row in parse_order_rows(gump_lines(ORDERS_GUMP), anchor):
-        amount = row["amount"]
-        if not amount:
-            continue
-        if not exact.match(row["name"].strip()):
-            continue
-        out.append(amount)
-    return out
-
-
-def sort_by_amount(term, anchor, exact):
-    """Put the filtered list in ASCENDING Amt To Gather order. True if sorted.
-
-    The column header sorts, and the button id came from Razor's Enhanced Gump
-    Inspector rather than from probing - its response log shows the exact id
-    for each click, which is the source of truth CLAUDE.md points at for
-    exactly this. Captured 2026-08-22 on gump 0xB2F21F1A: pressing the arrow
-    under "Amt To Gather" sends button 21, and the reply comes back as the same
-    filtered list, so the Name filter SURVIVES the sort.
-
-    THE DIRECTION IS NOT ASSUMED. One press may sort either way, and which one
-    it lands on is not worth guessing when the list itself can be read: press,
-    look at the amounts, and press again if they came back descending. If two
-    presses cannot produce an ascending page, sorting is reported as
-    unavailable and the caller falls back to picking the smallest it can see.
-    """
-    if not ORDERS_SORT_AMOUNT_BUTTON:
-        return False
-    for _attempt in (1, 2):
-        if not orders_action(ORDERS_SORT_AMOUNT_BUTTON, term):
-            log("The list closed while sorting %r by amount." % term, HUE_WARN)
-            return False
-        # Sorting may or may not reset the page; make sure of it either way,
-        # or the first row read is not the smallest of the whole result.
-        if not rewind_to_first_page(term):
-            return False
-        seen = page_amounts(anchor, exact)
-        if len(seen) < 2:
-            return True         # nothing on the page can contradict it
-        if seen == sorted(seen):
-            return True
-    log("%r would not sort ascending - taking the smallest in view instead. "
-        "If this keeps happening, ORDERS_SORT_AMOUNT_BUTTON may be wrong for "
-        "your build." % term, HUE_WARN)
-    return False
-
-
 def find_first_order(resource, budget, refilter=True):
-    """The order for `resource` to take next, or None.
+    """The first order for `resource` that fits `budget`, or None.
 
-    Returns {"button", "name", "amount", "term"} and LEAVES THE GUMP ON THAT
-    PAGE, so the caller presses the button straight away with no navigation in
-    between.
+    Returns {"button", "name", "amount"} and LEAVES THE GUMP ON THAT PAGE, so
+    the caller presses the button straight away with no navigation in between.
 
-    THAT IS THE RULE EVERYTHING HERE IS BUILT AROUND. An earlier version
-    scanned every page, returned a shortlist tagged with page numbers, and
-    walked back to each one with Previous/Next. The list is live - other
-    players fill these orders while you read them - so by the time it navigated
-    back the page had reflowed and the remembered button pressed a DIFFERENT
-    order.
-
-    SMALLEST FIRST fills more orders from the same stock, because an order
-    counts the same whether it wanted 1,460 or 24,000. The list is SORTED by
-    amount to get that (see sort_by_amount) rather than searched for it: once
-    the server has put the smallest first, the ordinary first-fit scan below
-    picks it up on page 1 and presses it there, obeying the rule above with no
-    extra passes and no remembered buttons.
+    That is deliberate. An earlier version scanned every page, returned a
+    shortlist tagged with page numbers, and walked back to each one with
+    Previous/Next. The list is live - other players fill these orders while you
+    read them - so by the time it navigated back, the page contents could have
+    shifted and the remembered button pointed at a different order. Re-opening
+    the book to start a second order also cleared the Name filter, which made
+    the remembered page numbers meaningless.
 
     The row's amount is still only a shortlist filter: the real requirement is
     read off the deed once it is out of the book.
     """
     term = resource
-
-    # Rows are anchored on the filter term, which is what the book matched on,
-    # so the count lines up with the buttons even when a page also holds
-    # another resource's orders.
-    anchor = term.strip().lower()
-
-    # Selection is EXACT, because the filter is a substring match and
-    # "Iron Ingots" is inside "Shadow Iron Ingots" - an Iron search was
-    # accepting Shadow Iron rows, withdrawing one, and then throwing the deed
-    # away at the deed_matches_resource check.
-    exact = re.compile(r"^%ss?$" % re.escape(anchor.rstrip("s")), re.I)
-
     if refilter:
         if not orders_action(ORDERS_FILTER_SUBMIT, term):
             log("The list closed while filtering for %r." % term, HUE_BAD)
@@ -2696,6 +2593,17 @@ def find_first_order(resource, budget, refilter=True):
     if not rewind_to_first_page(term):
         return None
 
+    # Rows are anchored on the filter term, which is what the book matched on,
+    # so the count lines up with the buttons even when a page also holds
+    # another resource's orders.
+    anchor = term.strip().lower()
+
+    # Selection is EXACT, because the filter is a substring match and
+    # "Iron Ingots" is inside "Shadow Iron Ingots" - an Iron search was
+    # accepting Shadow Iron rows, withdrawing one, and then throwing the deed
+    # away at the deed_matches_resource check.
+    exact = re.compile(r"^%ss?$" % re.escape(anchor.rstrip("s")), re.I)
+
     # A name that is not the book's own returns an empty list, which otherwise
     # looks exactly like "this resource has no orders right now". The book calls
     # Shadow Iron "Shadow Ingots"; that mismatch cost a debugging round.
@@ -2705,13 +2613,6 @@ def find_first_order(resource, budget, refilter=True):
             "book's name is different - run diag_resource_orders.py, which "
             "prints the names it really uses." % term, HUE_WARN)
         return None
-
-    # Smallest first. When this works the first acceptable row IS the smallest
-    # in the whole result; when it does not, `sorted_ok` is False and the scan
-    # below settles for the smallest on the page instead.
-    sorted_ok = False
-    if ORDER_PICK == "smallest":
-        sorted_ok = sort_by_amount(term, anchor, exact)
 
     # A name that is a substring of another resource's brings that one back too
     # - "Copper Ingots" also matches every "Dull Copper Ingots" row. Those are
@@ -2724,17 +2625,6 @@ def find_first_order(resource, budget, refilter=True):
             % (term, ", ".join(collisions), pages_to_scan))
 
     rejected = 0
-    # Why matching rows were turned down. These used to be discarded in
-    # COMPLETE SILENCE by a single `amount > budget or amount > MAX_ORDER_SIZE`
-    # continue, so a resource whose every order is simply too big reported
-    # "took nothing" with its full stock and spendable budget printed beside it
-    # - which points squarely at the budget, the one thing that is fine. The
-    # config comment on MAX_ORDER_SIZE records this happening once already:
-    # at 5000 it "rejected almost every one of them and the resource looked
-    # skipped". Silence is what made it cost a debugging round both times.
-    too_big = []            # over MAX_ORDER_SIZE - raise the cap to take these
-    over_budget = []        # more than the chest can spend right now
-    matched = 0             # rows that really are this resource
     for page in range(1, pages_to_scan + 1):
         strings = gump_lines(ORDERS_GUMP)
         rows = parse_order_rows(strings, anchor)
@@ -2748,7 +2638,6 @@ def find_first_order(resource, budget, refilter=True):
                 "%s x%s" % (r["name"][:18], r["amount"]) for r in rows[:8]))
             log("  buttons: %s" % ", ".join(str(b) for b in buttons[:8]))
         else:
-            page_pick = None
             for row, button in zip(rows, buttons):
                 amount = row["amount"]
                 if not amount:
@@ -2756,28 +2645,10 @@ def find_first_order(resource, budget, refilter=True):
                 if not exact.match(row["name"].strip()):
                     rejected += 1
                     continue          # another resource the filter let in
-                matched += 1
-                # Split, because the two need OPPOSITE fixes: too big means
-                # raise MAX_ORDER_SIZE, over budget means gather more stock.
-                if amount > MAX_ORDER_SIZE:
-                    too_big.append(amount)
+                if amount > budget or amount > MAX_ORDER_SIZE:
                     continue
-                if amount > budget:
-                    over_budget.append(amount)
-                    continue
-
-                candidate = {"button": button, "name": row["name"],
-                             "amount": amount, "term": term}
-                if sorted_ok or ORDER_PICK == "first":
-                    # Sorted ascending, so the first acceptable row is the
-                    # smallest there is. Nothing later can beat it.
-                    return candidate
-                if page_pick is None or amount < page_pick["amount"]:
-                    page_pick = candidate
-
-            if page_pick is not None:
-                # Unsorted: the best this page holds, pressed on this page.
-                return page_pick
+                return {"button": button, "name": row["name"],
+                        "amount": amount, "term": term}
 
         current, total = page_counter(strings)
         if total is None or current is None or current >= total:
@@ -2794,25 +2665,6 @@ def find_first_order(resource, budget, refilter=True):
 
     if rejected:
         log("%r: %d row(s) belonged to another resource" % (term, rejected))
-
-    # NAME THE REASON. "took nothing" on its own is indistinguishable between
-    # "the book has no orders for this" and "every order it has is too big",
-    # and those need completely different actions.
-    if too_big or over_budget:
-        bits = []
-        if too_big:
-            bits.append("%d over MAX_ORDER_SIZE (%d), smallest of them %d - "
-                        "RAISE MAX_ORDER_SIZE to take these"
-                        % (len(too_big), MAX_ORDER_SIZE, min(too_big)))
-        if over_budget:
-            bits.append("%d over the %d spendable, smallest of them %d"
-                        % (len(over_budget), budget, min(over_budget)))
-        log("%s: %d matching order(s) in the book, NONE takeable - %s."
-            % (term, matched, "; ".join(bits)), HUE_WARN)
-    elif matched == 0:
-        log("%s: the filter returned %s but no row is named exactly %r."
-            % (term, "%d row(s) of other resources" % rejected if rejected
-               else "nothing", term), HUE_WARN)
     return None
 
 

@@ -671,25 +671,31 @@ def test_every_live_scale_identifies_as_its_colour(m):
               m["resource_of"](stack), colour)
 
 
-def test_blue_scales_stays_unmapped_rather_than_guessed(m):
-    """There were no blue scales in the chest to look at.
+def test_blue_scales_is_the_sea_serpent_hue(m):
+    """Blue orders are filled with SEA SERPENT scales, 0x08B0.
 
-    An unlisted hue must identify as NOTHING. Guessing blue - from ServUO or
-    from the gap in the sequence - would pour whichever colour it really is
-    into a blue order, and that cannot be undone.
+    Confirmed in game 2026-08-20. The stack comes off a different creature
+    than the dragon colours, which is why an earlier note here said not to map
+    it - that note was wrong about this one, and right about Medusa.
     """
-    check("Blue Scales is still a book resource",
-          any(r["name"] == "Blue Scales" for r in m["RESOURCES"]), True)
-    check("but it has no hue mapped", "Blue Scales" in m["SCALE_HUES"], False)
+    check("Blue Scales is mapped", m["SCALE_HUES"].get("Blue Scales"), 0x08B0)
 
-    entry = [r for r in m["RESOURCES"] if r["name"] == "Blue Scales"][0]
-    check("so it cannot match a graphic", entry.get("id"), 0)
+    stack = FakeItem("900 sea serpent scales", 900, 0x26B4, 0x08B0,
+                     serial=0x40909111)
+    check("a sea serpent stack fills blue orders",
+          m["resource_of"](stack), "Blue Scales")
 
-    # And a scale hue nobody has mapped stays invisible.
-    unknown = FakeItem("500 dragon scales", 500, 0x26B4, 0x0999,
-                       serial=0x40908FFF)
-    check("an unmapped scale hue identifies as nothing",
-          m["resource_of"](unknown), None)
+    # Medusa keeps its own entries and must never be treated as blue.
+    check("Dark Medusa Scales is its own resource",
+          any(r["name"] == "Dark Medusa Scales" for r in m["RESOURCES"]), True)
+    check("Light Medusa Scales too",
+          any(r["name"] == "Light Medusa Scales" for r in m["RESOURCES"]), True)
+    check("0x08AF is NOT mapped to any scale colour",
+          0x08AF in m["SCALE_HUES"].values(), False)
+    medusa = FakeItem("120 medusa scales", 120, 0x26B4, 0x08AF,
+                      serial=0x40909222)
+    check("a medusa stack is not claimed as blue",
+          m["resource_of"](medusa) == "Blue Scales", False)
 
 
 def test_an_unmapped_scale_hue_is_reported_with_a_stack_to_look_at(m):
@@ -730,10 +736,9 @@ def test_the_book_wants_six_colours(m):
         check("%s is a book resource" % colour, colour in scales, True)
 
     mapped = m["SCALE_HUES"]
-    check("five of the six are mapped", sorted(mapped),
-          ["Black Scales", "Green Scales", "Red Scales", "White Scales",
-           "Yellow Scales"])
-    check("Blue is the one with no stock", "Blue Scales" in mapped, False)
+    check("all six are mapped now", sorted(mapped),
+          ["Black Scales", "Blue Scales", "Green Scales", "Red Scales",
+           "White Scales", "Yellow Scales"])
 
 
 def test_an_unmapped_scale_is_claimed_by_nobody(m):
@@ -2920,6 +2925,614 @@ def test_the_scan_rewinds_to_page_one_after_filtering(m):
     check("the rewind is bounded", m["MAX_REWIND_PRESSES"] >= 1, True)
     check("no unbounded while in the rewind",
           any(isinstance(n, ast.While) for n in ast.walk(rewinder)), False)
+
+
+
+# ---------------------------------------------------------------------------
+# Pack space
+# ---------------------------------------------------------------------------
+
+class FakePack(object):
+    """A backpack whose tooltip carries ServUO's Contents line.
+
+    Container.GetProperties adds cliloc 1073841 with TotalItems, MaxItems and
+    TotalWeight, and TotalItems is RECURSIVE - UpdateTotals does
+    m_TotalItems += item.TotalItems + 1 - so everything sitting in a sub-bag
+    counts against the same number.
+    """
+
+    def __init__(self, lines, serial=0x41D40F58):
+        self.tooltip = list(lines)
+        self.Serial = serial
+
+
+def _with_pack(m, lines):
+    """Point the module's Player/Items at a backpack with this tooltip."""
+    pack = FakePack(lines) if lines is not None else None
+
+    class P(_Stub):
+        Backpack = pack
+
+    class I(_Stub):
+        def WaitForProps(self, item, timeout):
+            return True
+
+        def GetPropStringList(self, item):
+            return list(getattr(item, "tooltip", []))
+
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    m["Player"] = P()
+    m["Items"] = I()
+    return pack
+
+
+def test_pack_count_comes_from_the_tooltip(m):
+    saved_p, saved_i = m["Player"], m["Items"]
+    try:
+        _with_pack(m, ["Backpack", "Contents: 300/375 items, 4210/60000 stones"])
+        check("used and max read off the tooltip",
+              m["pack_item_count"](), (300, 375))
+        check("headroom is max - used - safety",
+              m["pack_headroom"](), 375 - 300 - m["PACK_ITEM_SAFETY"])
+
+        # A different character with a different pack must get their own
+        # number, not the configured one. That is the whole point of reading it.
+        _with_pack(m, ["Contents: 10/125 items, 5/60000 stones"])
+        check("a 125-item pack is respected", m["pack_item_count"](), (10, 125))
+        check("and its headroom is its own",
+              m["pack_headroom"](), 125 - 10 - m["PACK_ITEM_SAFETY"])
+    finally:
+        m["Player"], m["Items"] = saved_p, saved_i
+
+
+def test_an_unreadable_pack_is_unknown_not_empty(m):
+    """Zeroes mean "could not tell".
+
+    Treating that as an empty pack would let the run withdraw into a pack that
+    is actually full; treating it as a FULL pack would stop a healthy run dead.
+    It must be neither.
+    """
+    saved_p, saved_i = m["Player"], m["Items"]
+    try:
+        _with_pack(m, ["Backpack", "Weight: 4210 stones"])   # no Contents line
+        check("no Contents line reads as unknown",
+              m["pack_item_count"](), (0, 0))
+        check("headroom is None, not 0", m["pack_headroom"](), None)
+
+        cap, why = m["orders_this_lap"]()
+        check("an unknown pack falls back to MAX_ORDERS_PER_RUN",
+              cap, m["MAX_ORDERS_PER_RUN"])
+        check("and it says so", "UNKNOWN" in why, True)
+
+        _with_pack(m, None)          # no backpack at all
+        check("no backpack is unknown too", m["pack_item_count"](), (0, 0))
+    finally:
+        m["Player"], m["Items"] = saved_p, saved_i
+
+
+def test_the_smaller_ceiling_wins(m):
+    saved_p, saved_i = m["Player"], m["Items"]
+    try:
+        # Nearly full: pack space binds, well under MAX_ORDERS_PER_RUN.
+        _with_pack(m, ["Contents: 368/375 items, 1/60000 stones"])
+        cap, why = m["orders_this_lap"]()
+        check("a nearly full pack caps the lap", cap, 375 - 368 - 5)
+        check("and names pack space as the reason", "pack" in why.lower(), True)
+        check("the cap is under MAX_ORDERS_PER_RUN",
+              cap < m["MAX_ORDERS_PER_RUN"], True)
+
+        # Plenty of room: MAX_ORDERS_PER_RUN binds instead.
+        _with_pack(m, ["Contents: 12/375 items, 1/60000 stones"])
+        cap, why = m["orders_this_lap"]()
+        check("an empty pack defers to MAX_ORDERS_PER_RUN",
+              cap, m["MAX_ORDERS_PER_RUN"])
+
+        # Exactly full, and one short - never negative, never a withdrawal.
+        _with_pack(m, ["Contents: 375/375 items, 1/60000 stones"])
+        check("a full pack has no room", m["pack_headroom"](), 0)
+        check("a full pack caps at zero", m["orders_this_lap"]()[0], 0)
+        _with_pack(m, ["Contents: 374/375 items, 1/60000 stones"])
+        check("the safety margin is honoured, not overrun",
+              m["pack_headroom"](), 0)
+    finally:
+        m["Player"], m["Items"] = saved_p, saved_i
+
+
+def test_the_safety_margin_is_real(m):
+    check("some slots are always kept free", m["PACK_ITEM_SAFETY"] >= 1, True)
+    check("the fallback limit is a real number", m["PACK_ITEM_LIMIT"] >= 1, True)
+
+
+# ---------------------------------------------------------------------------
+# Burst filling - and the .20 starvation guard
+# ---------------------------------------------------------------------------
+
+def test_a_burst_is_bounded(m):
+    """THE .20 REGRESSION GUARD.
+
+    Version .20 worked each resource to exhaustion and was reverted: the first
+    few resources ate the whole lap and Iron Ingots, at position 9, was never
+    reached with 60,000 iron in the chest. The burst exists to get the gump
+    saving WITHOUT that, so it must be bounded by construction.
+    """
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "fill_orders")
+
+    whiles = [n for n in _ast.walk(fn) if isinstance(n, _ast.While)]
+    check("fill_orders has a burst loop", len(whiles) >= 1, True)
+
+    names = set()
+    for w in whiles:
+        for node in _ast.walk(w.test):
+            if isinstance(node, _ast.Name):
+                names.add(node.id)
+    check("the burst loop is bounded by MAX_ORDERS_PER_RESOURCE",
+          "MAX_ORDERS_PER_RESOURCE" in names, True)
+    check("MAX_ORDERS_PER_RESOURCE is a finite number",
+          isinstance(m["MAX_ORDERS_PER_RESOURCE"], int)
+          and m["MAX_ORDERS_PER_RESOURCE"] >= 1, True)
+
+    # It must ALSO still respect the lap cap from inside the burst, or one
+    # resource walks straight past pack space.
+    src = _ast.dump(fn)
+    check("the burst still checks the lap cap", "cap" in src, True)
+
+
+def test_the_burst_reuses_the_hot_filter(m):
+    """The saving IS the skipped filter submit.
+
+    If the burst refiltered every time it would cost exactly what round-robin
+    costs and there would be no point to it.
+    """
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "work_one_order")
+    check("work_one_order takes a hot flag",
+          "hot" in [a.arg for a in fn.args.args], True)
+
+    finder = next(n for n in _ast.walk(tree)
+                  if isinstance(n, _ast.FunctionDef)
+                  and n.name == "find_first_order")
+    check("find_first_order can skip the refilter",
+          "refilter" in [a.arg for a in finder.args.args], True)
+
+    # The refilter must be CONDITIONAL, not merely parameterised.
+    submits = []
+    for node in _ast.walk(finder):
+        if isinstance(node, _ast.If):
+            for inner in _ast.walk(node):
+                if isinstance(inner, _ast.Name) \
+                        and inner.id == "ORDERS_FILTER_SUBMIT":
+                    submits.append(node)
+    check("the filter submit sits behind an if", len(submits) >= 1, True)
+
+    # The rewind must NOT be skipped: withdrawing a row reflows the pages.
+    rewinds = [n for n in _ast.walk(finder)
+               if isinstance(n, _ast.Call)
+               and getattr(n.func, "id", None) == "rewind_to_first_page"]
+    check("the rewind still runs on a hot list", len(rewinds) >= 1, True)
+
+
+def test_reopening_the_book_clears_hot(m):
+    """A reopened book has lost the filter whatever the caller believed.
+
+    If `hot` survived that, the scan would read an unfiltered list.
+    """
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "work_one_order")
+    assigns = [n for n in _ast.walk(fn)
+               if isinstance(n, _ast.Assign)
+               and any(getattr(t, "id", None) == "hot" for t in n.targets)]
+    check("work_one_order resets hot after reopening", len(assigns) >= 1, True)
+    check("and it resets it to False",
+          any(getattr(a.value, "value", None) is False for a in assigns), True)
+
+
+
+# ---------------------------------------------------------------------------
+# The end-of-run tidy: full stacks, not merely fewer stacks
+# ---------------------------------------------------------------------------
+
+def _tidy(amounts, top_up=True, hue=0x08AB, name="Valorite Ingots"):
+    """Run the real consolidate_stacks over these amounts. Returns
+    (final amounts desc, move count, total in, total out)."""
+    module, chest, items = with_chest([
+        FakeItem("s%d" % i, a, 0x1BF2, hue, 0xB0 + i)
+        for i, a in enumerate(amounts)])
+    after = module["consolidate_stacks"](chest, name, top_up=top_up)
+    return (sorted((s.Amount for s in after), reverse=True),
+            len(items.moves), sum(amounts), sum(s.Amount for s in after))
+
+
+def test_absorb_only_cannot_build_full_stacks(m):
+    """Why the deeper pass had to exist at all.
+
+    Three 40,000 stacks under a 60,000 cap absorb into nowhere - no stack fits
+    whole inside another - so the lap-start tidy correctly walks away having
+    done nothing, leaving two stacks' worth of ingots in three.
+    """
+    final, moves, _tin, _tout = _tidy([40000, 40000, 40000], top_up=False)
+    check("absorb-only makes no move here", moves, 0)
+    check("and leaves three stacks", len(final), 3)
+
+
+def test_top_up_builds_full_stacks(m):
+    cap = m["MAX_STACK"]
+    final, moves, tin, tout = _tidy([40000, 40000, 40000])
+    check("top-up gets it down to two", len(final), 2)
+    check("both of them full", final, [cap, cap])
+    check("nothing created or lost", tout, tin)
+    check("and it was cheap", moves <= 4, True)
+
+
+def test_the_tidy_never_drains_a_full_stack(m):
+    """THE NON-TERMINATION GUARD.
+
+    A first cut of the top-up allowed a FULL stack to be the source, so
+    [60000, 60000, 5] poured 59,995 out of a full stack into the scrap and
+    produced [60000, 60000, 5] again - forty moves, no progress, and it would
+    have burned MAX_MERGE_MOVES on every resource every run.
+
+    This layout is already optimal. The correct number of moves is zero.
+    """
+    cap = m["MAX_STACK"]
+    final, moves, tin, tout = _tidy([cap, cap, 5])
+    check("an optimal layout is left alone", moves, 0)
+    check("and is unchanged", final, [cap, cap, 5])
+    check("nothing created or lost", tout, tin)
+
+    # The same shape one item down, where there IS a legal move to make.
+    final, moves, tin, tout = _tidy([cap, cap - 10, 5])
+    check("a real top-up still happens", moves >= 1, True)
+    check("nothing created or lost either way", tout, tin)
+
+
+def test_the_tidy_reaches_the_minimum_stack_count(m):
+    """Conservation, the cap, and optimality across a spread of layouts.
+
+    Optimal is ceil(total / MAX_STACK) - anything more means ingots are
+    sitting in more stacks than they need to.
+    """
+    cap = m["MAX_STACK"]
+    layouts = [
+        [50000, 30000, 25000, 12000, 900, 40],
+        [1, 1, 1, 1, 1],
+        [cap, 1],
+        [cap - 1, cap - 1, 2],
+        [59999, 59999, 59999],
+        [123],
+        [30000, 30000],
+        [10, 20, 30, 40, 50, 60, 70, 80],
+    ]
+    for amounts in layouts:
+        total = sum(amounts)
+        want = max(1, -(-total // cap))
+        final, moves, tin, tout = _tidy(list(amounts))
+        label = "%s -> %d stack(s)" % (str(amounts)[:22], want)
+        check(label, len(final), want)
+        check("  total preserved: %s" % str(amounts)[:20], tout, tin)
+        check("  none over the cap: %s" % str(amounts)[:18],
+              [a for a in final if a > cap], [])
+        check("  bounded moves: %s" % str(amounts)[:21],
+              moves <= m["MAX_MERGE_MOVES"], True)
+
+
+def test_the_deep_tidy_runs_when_nothing_fills(m):
+    """It has to fire at the no-fill moment, with the chests still open.
+
+    At the START of a lap it would leave the mess made by that lap's own fills
+    behind whenever the run ends - which is exactly when the user looks at the
+    chest.
+    """
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "run_lap")
+
+    deep = [n for n in _ast.walk(fn)
+            if isinstance(n, _ast.Call)
+            and getattr(n.func, "id", None) == "organize_chests"
+            and any(kw.arg == "top_up" for kw in n.keywords)]
+    check("run_lap has a top_up organize", len(deep), 1)
+
+    fills = [n.lineno for n in _ast.walk(fn)
+             if isinstance(n, _ast.Call)
+             and getattr(n.func, "id", None) == "fill_orders"]
+    check("and it happens AFTER the filling, not before",
+          deep[0].lineno > min(fills), True)
+
+    # It must be switchable, and off by default would be a silent no-op.
+    check("there is a switch for it", m["ORGANIZE_WHEN_DONE"] in (True, False),
+          True)
+
+
+def test_the_lap_start_tidy_stays_cheap(m):
+    """The lap-start pass must NOT top up - that would spend moves on neatness
+    before a single order is filled."""
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "run_lap")
+    fills = [n.lineno for n in _ast.walk(fn)
+             if isinstance(n, _ast.Call)
+             and getattr(n.func, "id", None) == "fill_orders"]
+    early = [n for n in _ast.walk(fn)
+             if isinstance(n, _ast.Call)
+             and getattr(n.func, "id", None) == "organize_chests"
+             and n.lineno < min(fills)]
+    check("the lap-start organize exists", len(early), 1)
+    check("and it does not ask for top_up",
+          any(kw.arg == "top_up" for kw in early[0].keywords), False)
+
+
+
+# ---------------------------------------------------------------------------
+# "took nothing" must always say WHY
+# ---------------------------------------------------------------------------
+
+def test_an_unfillable_order_is_never_rejected_in_silence(m):
+    """The Iron Ingots case.
+
+    A single `amount > budget or amount > MAX_ORDER_SIZE: continue` threw
+    matching rows away without a word, so a resource whose every order is too
+    big reported "took nothing" with its full stock and spendable budget
+    printed next to it - pointing at the budget, which was fine. The config
+    comment on MAX_ORDER_SIZE records the same thing happening at 5000, where
+    it "rejected almost every one of them and the resource looked skipped".
+    """
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "find_first_order")
+
+    # The combined silent test must be gone: the two causes need opposite
+    # fixes, so they cannot share one branch.
+    combined = []
+    for node in _ast.walk(fn):
+        if isinstance(node, _ast.BoolOp) and isinstance(node.op, _ast.Or):
+            names = set()
+            for sub in _ast.walk(node):
+                if isinstance(sub, _ast.Name):
+                    names.add(sub.id)
+            if "MAX_ORDER_SIZE" in names and "budget" in names:
+                combined.append(node)
+    check("the two rejections are no longer one silent test", combined, [])
+
+    # Both reasons must be collected, and both must reach a log call.
+    appends = set()
+    for node in _ast.walk(fn):
+        if isinstance(node, _ast.Call) \
+                and getattr(node.func, "attr", None) == "append" \
+                and getattr(node.func.value, "id", None) in ("too_big",
+                                                             "over_budget"):
+            appends.add(node.func.value.id)
+    check("rows too big are counted", "too_big" in appends, True)
+    check("rows over budget are counted", "over_budget" in appends, True)
+
+    # Both counters must be READ inside a branch that logs. Checking that the
+    # name appears literally inside the log() call is too narrow - the counts
+    # legitimately reach it through a joined list - so this looks for a branch
+    # guarded on them that reaches a log.
+    reported = set()
+    for node in _ast.walk(fn):
+        if not isinstance(node, _ast.If):
+            continue
+        guards = set(sub.id for sub in _ast.walk(node.test)
+                     if isinstance(sub, _ast.Name))
+        if not guards & {"too_big", "over_budget"}:
+            continue
+        if any(isinstance(c, _ast.Call)
+               and getattr(c.func, "id", None) == "log"
+               for c in _ast.walk(node)):
+            reported |= guards & {"too_big", "over_budget"}
+    check("the too-big count reaches a log line", "too_big" in reported, True)
+    check("the over-budget count reaches a log line",
+          "over_budget" in reported, True)
+
+    # And the count of rows that really were this resource, which is what
+    # separates "no orders exist" from "none of them were takeable".
+    logs = " ".join(_ast.dump(n) for n in _ast.walk(fn)
+                    if isinstance(n, _ast.Call)
+                    and getattr(n.func, "id", None) == "log")
+    check("and how many actually matched", "matched" in logs, True)
+
+
+def test_the_reason_tells_you_what_to_change(m):
+    """A diagnostic that does not say what to do costs another round trip.
+
+    Too big and over budget need OPPOSITE actions - raise a cap versus gather
+    more stock - so the line has to distinguish them by name.
+    """
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def find_first_order("):src.index("def withdraw(")]
+    check("it names MAX_ORDER_SIZE as the thing to raise",
+          "RAISE MAX_ORDER_SIZE" in body, True)
+    check("it reports the smallest order it refused",
+          "min(too_big)" in body, True)
+    check("so you can tell how far off the cap is",
+          "min(over_budget)" in body, True)
+
+    # And the "no row is named exactly this" case, which is a DIFFERENT bug
+    # (the book's name for the resource is not what RESOURCES says).
+    check("a name mismatch is called out separately",
+          "no row is named exactly" in body, True)
+
+
+def test_max_order_size_is_still_a_sanity_ceiling(m):
+    """It exists to stop one order draining the chest. If it ever climbs above
+    what the budget logic protects, it stops being a ceiling at all."""
+    check("there is a ceiling", m["MAX_ORDER_SIZE"] >= 1, True)
+    check("and a stack can hold at least one full order",
+          m["MAX_STACK"] >= m["MAX_ORDER_SIZE"], True)
+
+
+
+# ---------------------------------------------------------------------------
+# Smallest first, by sorting the list
+#
+# The column header sorts. Button 21 came from Razor's Enhanced Gump Inspector
+# (gump 0xB2F21F1A, 2026-08-22) - the response log showed the Name filter
+# restated in Text ID 0 and the reply coming back as the same filtered list, so
+# the filter survives the sort. Sorting ascending makes the first acceptable
+# row the smallest in the whole result, which is what maximises orders filled
+# from a fixed stock.
+# ---------------------------------------------------------------------------
+
+def test_the_sort_button_is_the_captured_one(m):
+    check("button 21, from the Gump Inspector",
+          m["ORDERS_SORT_AMOUNT_BUTTON"], 21)
+    check("the gump id matches the capture", m["ORDERS_GUMP"], 0xB2F21F1A)
+
+    # It must not collide with anything destructive on the same gump.
+    for name in ("ORDERS_FILTER_SUBMIT", "ORDERS_NEXT_BUTTON",
+                 "ORDERS_PREV_BUTTON", "ORDERS_COMPLETED_SUBMIT"):
+        check("21 is not also %s" % name,
+              m["ORDERS_SORT_AMOUNT_BUTTON"] == m[name], False)
+    # Purge is 2 and Fill from backpack is 3 on this gump - documented in
+    # CLAUDE.md as the reason never to guess a button here.
+    check("and it is not Purge (2) or Fill from backpack (3)",
+          m["ORDERS_SORT_AMOUNT_BUTTON"] in (2, 3), False)
+
+
+class SortingList(object):
+    """A filtered order list that really sorts when button 21 is pressed.
+
+    `direction` is which way the FIRST press lands, so both possibilities can
+    be exercised - the script must not assume one.
+    """
+
+    def __init__(self, amounts, direction="desc", works=True):
+        self.base = list(amounts)
+        self.rows = list(amounts)
+        self.direction = direction
+        self.works = works
+        self.presses = 0
+
+    def press(self):
+        self.presses += 1
+        if not self.works:
+            return
+        ascending = (self.direction == "asc") == (self.presses % 2 == 1)
+        self.rows = sorted(self.base, reverse=not ascending)
+
+
+def _sorting_module(listing):
+    """A module whose gump reads come from `listing`."""
+    module = load()
+    module["orders_action"] = lambda button, text=None, entry=None: (
+        listing.press() or True) if button == module["ORDERS_SORT_AMOUNT_BUTTON"] \
+        else True
+    module["rewind_to_first_page"] = lambda *a, **k: True
+    module["gump_lines"] = lambda *a, **k: ["ROWS"]
+    module["parse_order_rows"] = lambda strings, anchor: [
+        {"name": "Iron Ingots", "amount": a} for a in listing.rows]
+    module["log"] = lambda *a, **k: None
+    return module
+
+
+def test_sorting_ascending_is_verified_not_assumed(m):
+    """One press may sort either way. Which one is not worth guessing when the
+    list itself can be read - so it presses again if it came back descending."""
+    import re as _re
+    exact = _re.compile(r"^iron ingots?$", _re.I)
+
+    # First press lands DESCENDING - it must press again.
+    desc = SortingList([500, 100, 900, 300], direction="desc")
+    mod = _sorting_module(desc)
+    check("it reports success", mod["sort_by_amount"]("Iron Ingots",
+                                                     "iron ingots", exact), True)
+    check("and it pressed twice to get there", desc.presses, 2)
+    check("the list ends ascending", desc.rows, [100, 300, 500, 900])
+
+    # First press lands ASCENDING - one press is enough.
+    asc = SortingList([500, 100, 900, 300], direction="asc")
+    mod = _sorting_module(asc)
+    check("ascending first time is accepted",
+          mod["sort_by_amount"]("Iron Ingots", "iron ingots", exact), True)
+    check("and it stopped at one press", asc.presses, 1)
+
+
+def test_a_list_that_will_not_sort_is_reported_not_trusted(m):
+    """If two presses cannot produce an ascending page, saying "sorted" would
+    have the caller take the FIRST row believing it is the smallest."""
+    import re as _re
+    exact = _re.compile(r"^iron ingots?$", _re.I)
+    broken = SortingList([500, 100, 900], works=False)
+    mod = _sorting_module(broken)
+    check("it admits failure",
+          mod["sort_by_amount"]("Iron Ingots", "iron ingots", exact), False)
+    check("after trying twice", broken.presses, 2)
+
+
+def test_a_single_row_cannot_contradict_the_sort(m):
+    import re as _re
+    exact = _re.compile(r"^iron ingots?$", _re.I)
+    one = SortingList([700])
+    mod = _sorting_module(one)
+    check("one row is trivially sorted",
+          mod["sort_by_amount"]("Iron Ingots", "iron ingots", exact), True)
+
+
+def test_sorting_can_be_switched_off(m):
+    import re as _re
+    exact = _re.compile(r"^iron ingots?$", _re.I)
+    listing = SortingList([500, 100])
+    mod = _sorting_module(listing)
+    saved = mod["ORDERS_SORT_AMOUNT_BUTTON"]
+    try:
+        mod["ORDERS_SORT_AMOUNT_BUTTON"] = 0
+        check("no button, no sorting",
+              mod["sort_by_amount"]("Iron Ingots", "iron ingots", exact), False)
+        check("and nothing was pressed", listing.presses, 0)
+    finally:
+        mod["ORDERS_SORT_AMOUNT_BUTTON"] = saved
+
+
+def test_page_amounts_ignores_other_resources(m):
+    """The amt-0 header row and another resource's rows would make an
+    ascending list look unsorted, and the script would press again forever."""
+    import re as _re
+    exact = _re.compile(r"^iron ingots?$", _re.I)
+    mod = load()
+    mod["gump_lines"] = lambda *a, **k: ["ROWS"]
+    mod["parse_order_rows"] = lambda strings, anchor: [
+        {"name": "Iron Ingots", "amount": 0},          # the header row
+        {"name": "Iron Ingots", "amount": 100},
+        {"name": "Shadow Ingots", "amount": 5},        # another resource
+        {"name": "Iron Ingots", "amount": 200},
+    ]
+    check("only this resource's real rows count",
+          mod["page_amounts"]("iron ingots", exact), [100, 200])
+
+
+def test_a_sorted_list_takes_the_first_row_not_the_page_best(m):
+    """The saving: when the list IS sorted, the first acceptable row is the
+    smallest there is, so there is nothing to gain by reading the rest of the
+    page - and nothing later can beat it."""
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        body = fh.read()
+    body = body[body.index("def find_first_order("):body.index("def withdraw(")]
+    check("a sorted list short-circuits", "if sorted_ok or ORDER_PICK" in body,
+          True)
+    check("and an unsorted one still picks the page best",
+          "page_pick" in body, True)
+    check("the sort only runs in smallest mode",
+          'if ORDER_PICK == "smallest":' in body, True)
 
 
 def main():

@@ -89,7 +89,7 @@ import time
 # line in the journal says which copy is actually loaded - two separate
 # debugging rounds were spent on a bug that was already fixed on disk but not
 # in the Scripts folder.
-SCRIPT_VERSION = "2026-08-22.43"
+SCRIPT_VERSION = "2026-08-20.39"
 
 
 # =============================================================================
@@ -291,54 +291,7 @@ KEEP_PER_TYPE = 0
 #
 # Was 1 while the withdraw and fill mechanics were unproven. Confirmed working
 # in game on 2026-07-27 - one order withdrawn, filled, handed in, returned home.
-#
-# THIS IS NO LONGER THE ONLY CEILING. Pack space is checked too, and whichever
-# is smaller wins - see PACK_ITEM_LIMIT. Raising this alone will not overfill
-# the pack.
 MAX_ORDERS_PER_RUN = 15
-
-# Orders to fill for ONE resource before moving on to the next.
-#
-# Every order costs a Name-filter submit, a rewind and a page scan before it
-# can be withdrawn - and each of those is a gump round trip with a SETTLE_MS
-# pause behind it. Filling several orders for a resource while its filter is
-# ALREADY APPLIED skips that setup for all but the first.
-#
-# 1 restores strict round-robin, which is what this did before.
-#
-# DO NOT set this to a huge number hoping for "just exhaust everything". That
-# was version .20 and it was reverted: with a cap on withdrawals per lap, the
-# first few resources ate the entire lap and Iron Ingots - position 9 - was
-# never reached, every lap, with 60,000 iron in the chest. The burst is capped
-# precisely so that cannot happen again. The outer loop still round-robins, so
-# a resource with 400 fillable orders gets 8 a lap, not all of them.
-MAX_ORDERS_PER_RESOURCE = 8
-
-# ---------------------------------------------------------------------------
-# PACK SPACE
-# ---------------------------------------------------------------------------
-# A withdrawn deed is an ITEM in the pack and it stays there until the hand-in.
-# Run out of room and the book simply refuses to hand over the next one, which
-# reads in game as "it stopped filling for no reason".
-#
-# The limit is read from the backpack's OWN tooltip where it reports one, so
-# this is correct for whoever runs it without anybody editing a number. ServUO
-# puts it there: Container.GetProperties adds
-#
-#     list.Add(1073841, "{0}\t{1}\t{2}", TotalItems, MaxItems, TotalWeight)
-#
-# (Server/Items/Container.cs). The value below is only the FALLBACK, for a
-# tooltip that will not load.
-#
-# THE COUNT IS RECURSIVE. Container.UpdateTotals does
-# `m_TotalItems += item.TotalItems + 1`, so everything inside the order bag and
-# every other sub-bag counts against the same limit - which is why this is read
-# off the tooltip rather than counted by walking the pack one level deep.
-PACK_ITEM_LIMIT = 375
-
-# Item slots never used, so a hand-in cannot fail on a pack that is exactly
-# full. Deeds are withdrawn one at a time and each takes one slot.
-PACK_ITEM_SAFETY = 5
 
 # Pages of the filtered list to search per resource before giving up. Each page
 # is 15 rows.
@@ -369,24 +322,6 @@ MAX_REWIND_PRESSES = 4
 # looked skipped. This is only a sanity ceiling - the per-resource budget
 # (stock minus KEEP_PER_TYPE) is what actually protects the chest.
 MAX_ORDER_SIZE = 25000
-
-# ---------------------------------------------------------------------------
-# WHICH of a resource's orders to take
-# ---------------------------------------------------------------------------
-# Taking the SMALLEST first fills more orders from the same stock: an order
-# counts the same whether it wanted 1,460 or 24,000, so spending the cheap ones
-# first is strictly more orders per ingot. That is the whole point when the
-# score is a count of orders handed in.
-#
-#   "smallest"  sort the list by Amt To Gather and take the first row. The
-#               SERVER does the sorting - see ORDERS_SORT_AMOUNT_BUTTON - so
-#               this costs one button press, not a second pass over the pages.
-#               If the sort is unavailable it degrades to the smallest on the
-#               page in hand rather than failing.
-#   "page"      the smallest that fits on the first page that has any, with no
-#               sorting at all.
-#   "first"     the first that fits, in list order. What this did before.
-ORDER_PICK = "smallest"
 
 # Fill passes per deed, as a FLOOR. One target usually does the whole amount;
 # the extra passes cover a shard that consumes one stack at a time.
@@ -473,17 +408,6 @@ ORDERS_FILTER_SUBMIT = 12       # its submit button
 # find orders the book already counts as finished.
 ORDERS_COMPLETED_ENTRY = 4
 ORDERS_COMPLETED_SUBMIT = 52
-
-# The arrow under the "Amt To Gather" column header, which sorts the list by
-# amount. Captured from Razor's Enhanced Gump Inspector on 2026-08-22 - its
-# response log showed Gump ID 0xB2F21F1A, Gump Button 21, with the Name filter
-# ("Bark Fragment") restated in Text ID 0 and the reply coming back as the same
-# filtered list, Displayed: 3. So the filter survives the sort.
-#
-# NOT probed, and not to be guessed at: button 2 on this gump is Purge and 3 is
-# Fill from backpack. Set to 0 to turn sorting off, in which case the runner
-# falls back to taking the smallest order it can see on one page.
-ORDERS_SORT_AMOUNT_BUTTON = 21
 
 # =============================================================================
 # CONFIG - PULLING FINISHED ORDERS OUT OF THE BOOK
@@ -941,21 +865,6 @@ CONSOLIDATE_STACKS = True
 # Worth it beyond neatness - the chest is capped at 125 items, and one stack per
 # metal means one target fills any order.
 ORGANIZE_CHEST = True
-
-# A DEEPER tidy, run at the moment a lap can no longer fill anything.
-#
-# The lap-start tidy above only ever makes moves that absorb a whole stack,
-# because those are the only ones guaranteed to reduce the stack count. That
-# leaves real work undone: three 40,000 stacks under a 60,000 cap fit into
-# nowhere, so absorb-only walks away from 120,000 ingots sitting in three
-# stacks that should be two. Confirmed against the real function offline -
-# it made ZERO moves on that layout.
-#
-# This pass also pours partial stacks together to make FULL ones, so a
-# resource ends as N stacks of MAX_STACK plus at most one remainder. It runs
-# once, when nothing is left to fill, with both chest windows already open -
-# so it costs no travel and delays no filling.
-ORGANIZE_WHEN_DONE = True
 
 # Most a single stack can hold. Iron runs to 840,000, so it can never be one
 # stack - consolidation fills stacks to this and leaves at most one partial.
@@ -2076,88 +1985,6 @@ def deed_is_complete(item):
     return (filled is not None and needed is not None and filled >= needed)
 
 
-def pack_item_count():
-    """(items, max_items) from the backpack's "Contents" line, or (0, 0).
-
-    ServUO's Container.GetProperties puts both numbers in the container's own
-    tooltip (cliloc 1073841 / 1072241 / 1050044, Server/Items/Container.cs), so
-    the limit does not have to be configured to be right - a character with a
-    different pack gets their own number.
-
-    The count is TotalItems, which is RECURSIVE: UpdateTotals does
-    `m_TotalItems += item.TotalItems + 1`. Everything in the order bag counts.
-    That is exactly why this reads the tooltip instead of walking Contents,
-    which only ever sees one level.
-
-    The properties are ASKED FOR first. Read cold they come back empty whenever
-    the client has not fetched them, which is what makes this unreadable
-    mid-run. (0, 0) means "could not tell" - never "the pack is empty".
-    """
-    backpack = Player.Backpack
-    if backpack is None:
-        return 0, 0
-    for _ in range(3):
-        try:
-            Items.WaitForProps(backpack, PROPS_TIMEOUT_MS)
-            props = Items.GetPropStringList(backpack)
-        except Exception:
-            props = []
-        for prop in props or []:
-            if "Contents" in prop:
-                nums = [int(x) for x in re.findall(r"\d+", prop)]
-                if len(nums) >= 2:
-                    return nums[0], nums[1]
-        Misc.Pause(200)
-    return 0, 0
-
-
-def pack_headroom():
-    """How many more deeds the pack can take. None means "could not tell".
-
-    None is NOT zero and must not be treated as it: a tooltip that will not
-    load would otherwise stop the run dead with a full chest and an empty pack.
-    The caller falls back to MAX_ORDERS_PER_RUN and says so.
-    """
-    items, max_items = pack_item_count()
-    if not max_items:
-        # No maximum in the tooltip. If the used count came through it is still
-        # worth something against the configured fallback.
-        if items <= 0:
-            return None
-        max_items = PACK_ITEM_LIMIT
-    return max(0, int(max_items) - int(items) - PACK_ITEM_SAFETY)
-
-
-def orders_this_lap():
-    """The real ceiling on withdrawals for one lap, and why.
-
-    Returns (cap, explanation). Pack space and MAX_ORDERS_PER_RUN are BOTH
-    ceilings and the smaller wins - a deed that cannot fit in the pack is not
-    handed over by the book at all, and that failure looks nothing like a
-    failure from in game.
-    """
-    items, max_items = pack_item_count()
-    room = pack_headroom()
-    if room is None:
-        return MAX_ORDERS_PER_RUN, (
-            "pack space UNKNOWN - the backpack tooltip would not load, so this "
-            "lap is capped by MAX_ORDERS_PER_RUN (%d) alone. If the book stops "
-            "handing over deeds, the pack is full." % MAX_ORDERS_PER_RUN)
-
-    source = "tooltip" if max_items else "PACK_ITEM_LIMIT fallback"
-    limit = max_items or PACK_ITEM_LIMIT
-    if room < MAX_ORDERS_PER_RUN:
-        return room, (
-            "pack %d of %d items used (%s), keeping %d free -> room for %d "
-            "more deed(s). THAT is the cap this lap, under MAX_ORDERS_PER_RUN "
-            "(%d)." % (items, limit, source, PACK_ITEM_SAFETY, room,
-                       MAX_ORDERS_PER_RUN))
-    return MAX_ORDERS_PER_RUN, (
-        "pack %d of %d items used (%s), room for %d more deed(s) - capped by "
-        "MAX_ORDERS_PER_RUN (%d) instead."
-        % (items, limit, source, room, MAX_ORDERS_PER_RUN))
-
-
 def pack_serials():
     """Serials in the backpack, for diffing across a withdrawal.
 
@@ -2589,86 +2416,33 @@ def pull_completed_orders():
     return pulled
 
 
-def page_amounts(anchor, exact):
-    """The amounts of this resource's rows on the page in hand, in order.
+def find_first_order(resource, budget):
+    """The first order for `resource` that fits `budget`, or None.
 
-    Used to tell which way the list just sorted. Rows of other resources and
-    the amt-0 header row are ignored - they would make an ascending list look
-    unsorted.
-    """
-    out = []
-    for row in parse_order_rows(gump_lines(ORDERS_GUMP), anchor):
-        amount = row["amount"]
-        if not amount:
-            continue
-        if not exact.match(row["name"].strip()):
-            continue
-        out.append(amount)
-    return out
+    Returns {"button", "name", "amount"} and LEAVES THE GUMP ON THAT PAGE, so
+    the caller presses the button straight away with no navigation in between.
 
-
-def sort_by_amount(term, anchor, exact):
-    """Put the filtered list in ASCENDING Amt To Gather order. True if sorted.
-
-    The column header sorts, and the button id came from Razor's Enhanced Gump
-    Inspector rather than from probing - its response log shows the exact id
-    for each click, which is the source of truth CLAUDE.md points at for
-    exactly this. Captured 2026-08-22 on gump 0xB2F21F1A: pressing the arrow
-    under "Amt To Gather" sends button 21, and the reply comes back as the same
-    filtered list, so the Name filter SURVIVES the sort.
-
-    THE DIRECTION IS NOT ASSUMED. One press may sort either way, and which one
-    it lands on is not worth guessing when the list itself can be read: press,
-    look at the amounts, and press again if they came back descending. If two
-    presses cannot produce an ascending page, sorting is reported as
-    unavailable and the caller falls back to picking the smallest it can see.
-    """
-    if not ORDERS_SORT_AMOUNT_BUTTON:
-        return False
-    for _attempt in (1, 2):
-        if not orders_action(ORDERS_SORT_AMOUNT_BUTTON, term):
-            log("The list closed while sorting %r by amount." % term, HUE_WARN)
-            return False
-        # Sorting may or may not reset the page; make sure of it either way,
-        # or the first row read is not the smallest of the whole result.
-        if not rewind_to_first_page(term):
-            return False
-        seen = page_amounts(anchor, exact)
-        if len(seen) < 2:
-            return True         # nothing on the page can contradict it
-        if seen == sorted(seen):
-            return True
-    log("%r would not sort ascending - taking the smallest in view instead. "
-        "If this keeps happening, ORDERS_SORT_AMOUNT_BUTTON may be wrong for "
-        "your build." % term, HUE_WARN)
-    return False
-
-
-def find_first_order(resource, budget, refilter=True):
-    """The order for `resource` to take next, or None.
-
-    Returns {"button", "name", "amount", "term"} and LEAVES THE GUMP ON THAT
-    PAGE, so the caller presses the button straight away with no navigation in
-    between.
-
-    THAT IS THE RULE EVERYTHING HERE IS BUILT AROUND. An earlier version
-    scanned every page, returned a shortlist tagged with page numbers, and
-    walked back to each one with Previous/Next. The list is live - other
-    players fill these orders while you read them - so by the time it navigated
-    back the page had reflowed and the remembered button pressed a DIFFERENT
-    order.
-
-    SMALLEST FIRST fills more orders from the same stock, because an order
-    counts the same whether it wanted 1,460 or 24,000. The list is SORTED by
-    amount to get that (see sort_by_amount) rather than searched for it: once
-    the server has put the smallest first, the ordinary first-fit scan below
-    picks it up on page 1 and presses it there, obeying the rule above with no
-    extra passes and no remembered buttons.
+    That is deliberate. An earlier version scanned every page, returned a
+    shortlist tagged with page numbers, and walked back to each one with
+    Previous/Next. The list is live - other players fill these orders while you
+    read them - so by the time it navigated back, the page contents could have
+    shifted and the remembered button pointed at a different order. Re-opening
+    the book to start a second order also cleared the Name filter, which made
+    the remembered page numbers meaningless.
 
     The row's amount is still only a shortlist filter: the real requirement is
     read off the deed once it is out of the book.
     """
     term = resource
+    if not orders_action(ORDERS_FILTER_SUBMIT, term):
+        log("The list closed while filtering for %r." % term, HUE_BAD)
+        return None
+
+    # THE FILTER LEAVES THE LIST ON WHATEVER PAGE IT WAS ALREADY SHOWING, so
+    # without this the scan starts wherever the previous resource stopped and
+    # walks past everything before it. See rewind_to_first_page.
+    if not rewind_to_first_page(term):
+        return None
 
     # Rows are anchored on the filter term, which is what the book matched on,
     # so the count lines up with the buttons even when a page also holds
@@ -2681,21 +2455,6 @@ def find_first_order(resource, budget, refilter=True):
     # away at the deed_matches_resource check.
     exact = re.compile(r"^%ss?$" % re.escape(anchor.rstrip("s")), re.I)
 
-    if refilter:
-        if not orders_action(ORDERS_FILTER_SUBMIT, term):
-            log("The list closed while filtering for %r." % term, HUE_BAD)
-            return None
-
-    # THE FILTER LEAVES THE LIST ON WHATEVER PAGE IT WAS ALREADY SHOWING, so
-    # without this the scan starts wherever the previous resource stopped and
-    # walks past everything before it. See rewind_to_first_page.
-    #
-    # Still done on a hot list: withdrawing a row reflows the pages under you,
-    # and the rewind costs nothing when the list is already on page 1 - which,
-    # mid-burst, it usually is.
-    if not rewind_to_first_page(term):
-        return None
-
     # A name that is not the book's own returns an empty list, which otherwise
     # looks exactly like "this resource has no orders right now". The book calls
     # Shadow Iron "Shadow Ingots"; that mismatch cost a debugging round.
@@ -2705,13 +2464,6 @@ def find_first_order(resource, budget, refilter=True):
             "book's name is different - run diag_resource_orders.py, which "
             "prints the names it really uses." % term, HUE_WARN)
         return None
-
-    # Smallest first. When this works the first acceptable row IS the smallest
-    # in the whole result; when it does not, `sorted_ok` is False and the scan
-    # below settles for the smallest on the page instead.
-    sorted_ok = False
-    if ORDER_PICK == "smallest":
-        sorted_ok = sort_by_amount(term, anchor, exact)
 
     # A name that is a substring of another resource's brings that one back too
     # - "Copper Ingots" also matches every "Dull Copper Ingots" row. Those are
@@ -2724,17 +2476,6 @@ def find_first_order(resource, budget, refilter=True):
             % (term, ", ".join(collisions), pages_to_scan))
 
     rejected = 0
-    # Why matching rows were turned down. These used to be discarded in
-    # COMPLETE SILENCE by a single `amount > budget or amount > MAX_ORDER_SIZE`
-    # continue, so a resource whose every order is simply too big reported
-    # "took nothing" with its full stock and spendable budget printed beside it
-    # - which points squarely at the budget, the one thing that is fine. The
-    # config comment on MAX_ORDER_SIZE records this happening once already:
-    # at 5000 it "rejected almost every one of them and the resource looked
-    # skipped". Silence is what made it cost a debugging round both times.
-    too_big = []            # over MAX_ORDER_SIZE - raise the cap to take these
-    over_budget = []        # more than the chest can spend right now
-    matched = 0             # rows that really are this resource
     for page in range(1, pages_to_scan + 1):
         strings = gump_lines(ORDERS_GUMP)
         rows = parse_order_rows(strings, anchor)
@@ -2748,7 +2489,6 @@ def find_first_order(resource, budget, refilter=True):
                 "%s x%s" % (r["name"][:18], r["amount"]) for r in rows[:8]))
             log("  buttons: %s" % ", ".join(str(b) for b in buttons[:8]))
         else:
-            page_pick = None
             for row, button in zip(rows, buttons):
                 amount = row["amount"]
                 if not amount:
@@ -2756,28 +2496,10 @@ def find_first_order(resource, budget, refilter=True):
                 if not exact.match(row["name"].strip()):
                     rejected += 1
                     continue          # another resource the filter let in
-                matched += 1
-                # Split, because the two need OPPOSITE fixes: too big means
-                # raise MAX_ORDER_SIZE, over budget means gather more stock.
-                if amount > MAX_ORDER_SIZE:
-                    too_big.append(amount)
+                if amount > budget or amount > MAX_ORDER_SIZE:
                     continue
-                if amount > budget:
-                    over_budget.append(amount)
-                    continue
-
-                candidate = {"button": button, "name": row["name"],
-                             "amount": amount, "term": term}
-                if sorted_ok or ORDER_PICK == "first":
-                    # Sorted ascending, so the first acceptable row is the
-                    # smallest there is. Nothing later can beat it.
-                    return candidate
-                if page_pick is None or amount < page_pick["amount"]:
-                    page_pick = candidate
-
-            if page_pick is not None:
-                # Unsorted: the best this page holds, pressed on this page.
-                return page_pick
+                return {"button": button, "name": row["name"],
+                        "amount": amount, "term": term}
 
         current, total = page_counter(strings)
         if total is None or current is None or current >= total:
@@ -2794,25 +2516,6 @@ def find_first_order(resource, budget, refilter=True):
 
     if rejected:
         log("%r: %d row(s) belonged to another resource" % (term, rejected))
-
-    # NAME THE REASON. "took nothing" on its own is indistinguishable between
-    # "the book has no orders for this" and "every order it has is too big",
-    # and those need completely different actions.
-    if too_big or over_budget:
-        bits = []
-        if too_big:
-            bits.append("%d over MAX_ORDER_SIZE (%d), smallest of them %d - "
-                        "RAISE MAX_ORDER_SIZE to take these"
-                        % (len(too_big), MAX_ORDER_SIZE, min(too_big)))
-        if over_budget:
-            bits.append("%d over the %d spendable, smallest of them %d"
-                        % (len(over_budget), budget, min(over_budget)))
-        log("%s: %d matching order(s) in the book, NONE takeable - %s."
-            % (term, matched, "; ".join(bits)), HUE_WARN)
-    elif matched == 0:
-        log("%s: the filter returned %s but no row is named exactly %r."
-            % (term, "%d row(s) of other resources" % rejected if rejected
-               else "nothing", term), HUE_WARN)
     return None
 
 
@@ -2887,12 +2590,8 @@ def chest_stacks(chests, resource):
     return live_stacks(fresh, resource)
 
 
-def consolidate_stacks(chests, resource, top_up=False):
+def consolidate_stacks(chests, resource):
     """Pack a resource into as few stacks as possible. Returns the new list.
-
-    `top_up` also pours partial stacks together to make FULL ones, which the
-    absorb-only rule cannot do - see PASS 2 below. It costs more moves, so it
-    is off during a fill and on for the end-of-run tidy.
 
     ONE MOVE PER PASS, re-reading the chest each time. Batching the moves from a
     single snapshot does not work: Items.Move resolves both ends by serial
@@ -2918,13 +2617,15 @@ def consolidate_stacks(chests, resource, top_up=False):
         if len(stacks) < 2:
             break
 
-        # PASS 1 - absorb. Only a move that ENTIRELY absorbs a stack reduces
-        # the stack count, so those are made first and they are always safe.
+        # Only a move that ENTIRELY absorbs a stack is worth making, because
+        # only that reduces the stack count. A partial pour just shuffles
+        # ingots between two stacks that both survive - with one full stack and
+        # one half stack left, topping up the half from the full leaves two
+        # stacks again and the loop never ends.
         #
         # Smallest gives, and the largest target that can swallow it takes.
         target = None
         source = None
-        move = 0
         for candidate in reversed(stacks):          # smallest first
             need = amount_of(candidate)
             if need <= 0:
@@ -2942,52 +2643,10 @@ def consolidate_stacks(chests, resource, top_up=False):
             if target is not None:
                 break
 
-        if target is not None:
-            move = amount_of(source)
-        elif top_up:
-            # PASS 2 - top up. Nothing fits whole, which is not the same as
-            # "nothing can be done": three 40,000 stacks under a 60,000 cap
-            # absorb nowhere, yet they are two stacks' worth of ingots sitting
-            # in three. Pass 1 alone leaves them exactly as it found them.
-            #
-            # An earlier comment here said a partial pour "shuffles ingots
-            # between two stacks that both survive and the loop never ends".
-            # That is true of an ARBITRARY partial pour, and it very nearly bit
-            # again here: a first cut of this let a FULL stack be the source,
-            # so [60000, 60000, 5] poured 59,995 out of a full stack into the
-            # scrap and produced [60000, 60000, 5] all over again - forty moves
-            # and no progress, caught offline before it ever ran in game.
-            #
-            # A full stack may therefore never be a SOURCE. With that, every
-            # top-up fills its target to MAX_STACK and nothing ever un-fills a
-            # stack, so the number of full stacks rises by one per move and is
-            # bounded by total // MAX_STACK. It terminates, and pass 1 then
-            # absorbs whatever remainder is left over.
-            for holder in stacks:                       # largest first
-                room = MAX_STACK - amount_of(holder)
-                if room <= 0:
-                    continue                            # already full
-                for candidate in reversed(stacks):      # smallest first
-                    if int(candidate.Serial) == int(holder.Serial):
-                        continue
-                    if int(getattr(holder, "Container", 0) or 0) != \
-                            int(getattr(candidate, "Container", 0) or 0):
-                        continue
-                    if amount_of(candidate) <= 0:
-                        continue
-                    # NEVER drain a full stack - that is the non-terminating
-                    # move, and it undoes work already done.
-                    if amount_of(candidate) >= MAX_STACK:
-                        continue
-                    # More than fits, or pass 1 would already have taken it.
-                    if amount_of(candidate) > room:
-                        source, target, move = candidate, holder, room
-                        break
-                if target is not None:
-                    break
-
-        if target is None or move <= 0:
+        if target is None:
             break        # nothing left that fits anywhere
+
+        move = amount_of(source)
 
         before = (len(stacks), amount_of(target))
         Items.Move(source, target, move)
@@ -3014,19 +2673,14 @@ def consolidate_stacks(chests, resource, top_up=False):
     return final
 
 
-def organize_chests(chests, top_up=False):
+def organize_chests(chests):
     """Pack every resource into as few stacks as possible. Returns stacks saved.
 
-    Run at the start of a lap. Keeps the chest's 125-item limit clear and leaves
-    the largest stack of each resource as large as it can be, which is the one a
+    Run once at the start. Keeps the chest's 125-item limit clear and leaves the
+    largest stack of each resource as large as it can be, which is the one a
     fill then targets.
-
-    `top_up` turns on the deeper pass that also builds FULL stacks rather than
-    only absorbing whole ones - see consolidate_stacks. That is the end-of-run
-    tidy; during a lap it would spend moves on neatness before any filling.
     """
-    rule("packing the chest into full stacks" if top_up
-         else "organizing the chest")
+    rule("organizing the chest")
 
     # Re-open first. Contains is only populated once the server has sent the
     # container, and organizing used to run against an empty snapshot and
@@ -3066,7 +2720,7 @@ def organize_chests(chests, top_up=False):
     merged = 0
     for res in sorted(untidy):
         before = len(untidy[res])
-        after = consolidate_stacks(chests, res, top_up=top_up)
+        after = consolidate_stacks(chests, res)
         merged += max(0, before - len(after))
     log("%d stack(s) merged away" % merged, HUE_GOOD)
     return merged
@@ -3990,7 +3644,7 @@ def hand_in(deeds):
 # Startup validation
 # ---------------------------------------------------------------------------
 
-def work_one_order(resource, chests, budget, completed, withdrawn, hot=False):
+def work_one_order(resource, chests, budget, completed, withdrawn):
     """Take and fill ONE order for `resource`. Returns why it stopped.
 
         "filled"    an order was completed and is held for the hand-in
@@ -4000,27 +3654,17 @@ def work_one_order(resource, chests, budget, completed, withdrawn, hot=False):
 
     Pulled out of main so the outer loop can round-robin across resources
     instead of working one to exhaustion and starving the rest.
-
-    `hot` says the list is ALREADY filtered to this resource because the
-    previous call left it that way - every button press restates the filter
-    (see orders_action), so a withdrawal does not clear it. The filter submit
-    is then skipped. If that assumption is ever wrong the scan simply fails to
-    find a matching row and the resource reports "none", because selection is
-    an exact match on the name either way; it cannot pull the wrong order.
     """
-    if not has_gump(ORDERS_GUMP):
-        if not open_book():
-            log("Could not reopen the order list - stopping %s." % resource,
-                HUE_WARN)
-            return "none"
-        # A reopened book lost the filter, whatever the caller believed.
-        hot = False
+    if not has_gump(ORDERS_GUMP) and not open_book():
+        log("Could not reopen the order list - stopping %s." % resource,
+            HUE_WARN)
+        return "none"
 
     # Between orders is a safe point: nothing is half-withdrawn here. The book
     # and the order list stay open - the scan is about to use them.
     wait_out_world_save()
 
-    order = find_first_order(resource, budget.get(resource, 0), refilter=not hot)
+    order = find_first_order(resource, budget.get(resource, 0))
     if order is None:
         return "none"
     term = order["term"]
@@ -4124,26 +3768,6 @@ def validate():
     log("keep %d of each (except %d spendable to zero), at most %d order(s) "
         "this run, up to %d per order"
         % (KEEP_PER_TYPE, len(zero_keep), MAX_ORDERS_PER_RUN, MAX_ORDER_SIZE))
-    log("filling %d order(s) per resource before moving on%s"
-        % (max(1, MAX_ORDERS_PER_RESOURCE),
-           " (1 = strict round-robin)"
-           if max(1, MAX_ORDERS_PER_RESOURCE) == 1 else ""))
-
-    # Pack space, said out loud at startup rather than discovered mid-lap. A
-    # pack that is already nearly full is the difference between a run that
-    # fills 40 orders and one that fills two, and nothing else reports it.
-    _items, _max = pack_item_count()
-    if _max:
-        log("pack: %d of %d items used (from the backpack tooltip), keeping %d "
-            "free -> room for %d deed(s) right now"
-            % (_items, _max, PACK_ITEM_SAFETY,
-               max(0, _max - _items - PACK_ITEM_SAFETY)),
-            HUE_GOOD if _max - _items - PACK_ITEM_SAFETY > 0 else HUE_BAD)
-    else:
-        log("pack: the backpack tooltip did not report a Contents line, so "
-            "PACK_ITEM_LIMIT (%d) is the assumed maximum. If deeds stop coming "
-            "out of the book, that number is wrong for this character."
-            % PACK_ITEM_LIMIT, HUE_WARN)
     if not validate_board_hues():
         ok = False
     log("hand-in: %s > %s, drag to %s"
@@ -4258,16 +3882,6 @@ def fill_orders(chests, offset=0):
     exhausted = set()      # resources with nothing left to take
     examined = []          # resources this lap got as far as considering
 
-    # PACK SPACE IS A CEILING TOO. A deed is an item; the book will not hand
-    # over one that does not fit, and that refusal is indistinguishable from
-    # "there were no more orders" unless it is checked for up front.
-    cap, why = orders_this_lap()
-    log(why, HUE_WARN if cap < MAX_ORDERS_PER_RUN else HUE_INFO)
-    if cap < 1:
-        log("No room in the pack for even one more deed. Hand in what you are "
-            "carrying, or empty it, before running again.", HUE_BAD)
-        return [], False, offset
-
     priority, rest = split_priorities(worked_resources())
     order = priority + rotated(rest, offset)
     priority_names = set(r["name"] for r in priority)
@@ -4283,15 +3897,15 @@ def fill_orders(chests, offset=0):
     # ate the whole lap. With gems listed first and a cap of 15, Iron Ingots
     # sits at position 9 and was never reached - the lap simply ended before its
     # turn, which reads in game as "it skips iron".
-    for _round in range(1, cap + 1):
-        if withdrawn[0] >= cap:
+    for _round in range(1, MAX_ORDERS_PER_RUN + 1):
+        if withdrawn[0] >= MAX_ORDERS_PER_RUN:
             break
 
         took_any = False
         for entry_def in order:
             resource = entry_def["name"]
 
-            if withdrawn[0] >= cap:
+            if withdrawn[0] >= MAX_ORDERS_PER_RUN:
                 break
             if resource not in examined:
                 examined.append(resource)
@@ -4322,40 +3936,10 @@ def fill_orders(chests, offset=0):
                 exhausted.add(resource)
                 continue
 
-            # BURST: keep filling this resource while its filter is already
-            # applied. Every order after the first skips the filter submit,
-            # the rewind and the page scan - the three gump round trips that
-            # dominate the cost of an order. Bounded by MAX_ORDERS_PER_RESOURCE
-            # so one resource cannot eat the lap, which is what sank .20.
-            outcome = None
-            burst = 0
-            while burst < max(1, MAX_ORDERS_PER_RESOURCE):
-                if withdrawn[0] >= cap:
-                    break
-                outcome = work_one_order(resource, chests, budget, completed,
-                                         withdrawn, hot=burst > 0)
-                burst += 1
-                if outcome != "filled":
-                    break
-                if budget.get(resource, 0) <= 0:
-                    # Spent. Say so with the number, so this is never confused
-                    # with "the book had no order".
-                    log("%s: budget spent after %d order(s) this turn."
-                        % (resource, burst))
-                    exhausted.add(resource)
-                    break
-            if burst > 1 and outcome == "filled":
-                log("%s: filled %d order(s) in one turn." % (resource, burst),
-                    HUE_GOOD)
-
+            outcome = work_one_order(resource, chests, budget, completed,
+                                     withdrawn)
             if outcome == "stop":
                 return completed, True, offset      # the helper has said why
-            if outcome == "declined":
-                # The deed is in the pack and it is not coming back out this
-                # lap. It still costs a pack slot, which the cap already counts
-                # through `withdrawn`.
-                took_any = True
-                continue
             if outcome == "none":
                 # A PRIORITY resource coming back empty is worth saying out
                 # loud with its numbers. It is pinned precisely because there
@@ -4385,12 +3969,9 @@ def fill_orders(chests, offset=0):
             log("nothing left to take from any resource")
             break
 
-    if withdrawn[0] >= cap:
-        log("stopped at the lap cap (%d): %d withdrawn, %d filled. %s"
-            % (cap, withdrawn[0], len(completed),
-               "Pack space was the binding limit."
-               if cap < MAX_ORDERS_PER_RUN else
-               "MAX_ORDERS_PER_RUN was the binding limit."))
+    if withdrawn[0] >= MAX_ORDERS_PER_RUN:
+        log("stopped at MAX_ORDERS_PER_RUN (%d): %d withdrawn, %d filled"
+            % (MAX_ORDERS_PER_RUN, withdrawn[0], len(completed)))
 
     missed = [r["name"] for r in order if r["name"] not in examined]
     if missed:
@@ -4457,16 +4038,6 @@ def run_lap(lap, offset=0):
     pulled = pull_completed_orders()
 
     completed, stop, next_offset = fill_orders(chests, offset)
-
-    # NOTHING FILLED - the moment the chests stop being spent out of. They are
-    # as fragmented as they are going to get, both windows are still open, and
-    # no travel is needed, so this is where the deep tidy belongs. Doing it at
-    # the START of a lap instead would leave the mess made by that lap's own
-    # fills sitting there whenever the run ends.
-    if ORGANIZE_WHEN_DONE and not stop and not completed:
-        log("Nothing left to fill - packing the chests into full stacks.")
-        organize_chests(chests, top_up=True)
-
     completed = list(completed) + pulled
 
     # The fill phase is finished with the book, the order list and both chest
