@@ -44,7 +44,7 @@ two must be kept in step.
 |---|---|
 | `resource_order_runner.py`, `diag_resource_orders.py` | `E:\uoclients\RazorEnhanced\Scripts\` |
 | `harvest_runner.py` | `E:\uoclients\UOAlive_Package\razor\Scripts\` |
-| `TameAndFill.py` | not deployed — repo only |
+| `TameAndFill.py` | `E:\uoclients\RazorEnhanced\Scripts\` |
 
 So "the live folder" depends on which script is being edited.
 
