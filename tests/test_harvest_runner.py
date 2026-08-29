@@ -4357,6 +4357,97 @@ def test_the_journal_is_always_scanned(m):
     check("the pause scans directly", "scan_journal" in called, True)
 
 
+
+# ---------------------------------------------------------------------------
+# The waypoint watchdog
+#
+# Observed 2026-08-22 on .19: MrGatherer stood against a cave wall for minutes
+# after "could not reach spot 8/14" - with every guard INSIDE the sweep already
+# in place, because none of them run between calls to task().
+#
+# run_job only advances when task() returns "next". Every other result leaves
+# it at the same waypoint, and two of those paths were both unbounded and
+# silent: "ok", and the pack-full path where unload_in_place() succeeds and
+# `continue` runs without setting need_waypoint.
+# ---------------------------------------------------------------------------
+
+def test_a_waypoint_cannot_be_held_forever(m):
+    cap = m["WAYPOINT_HARD_CAP_MS"]
+    check("there is a waypoint cap", cap >= 60000, True)
+    check("and it is longer than one spot's cap",
+          cap > m["AREA_SPOT_HARD_CAP_MS"], True)
+    # It has to allow a genuinely productive rune: a full bank of spots, each
+    # able to run to its own cap, plus unload trips.
+    check("but not so long it is useless", cap <= 30 * 60000, True)
+
+
+def test_the_watchdog_is_armed_only_by_arriving_somewhere(m):
+    """Resetting it anywhere else would defeat it - the whole failure is a
+    loop that keeps doing things at ONE waypoint."""
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "run_job")
+
+    assigns = [n for n in _ast.walk(fn)
+               if isinstance(n, _ast.Assign)
+               and any(getattr(t, "id", None) == "at_waypoint_since"
+                       for t in n.targets)]
+    check("the clock is set exactly twice - entry and arrival",
+          len(assigns), 2)
+
+    names = set(n.id for n in _ast.walk(fn) if isinstance(n, _ast.Name))
+    check("run_job knows the cap", "WAYPOINT_HARD_CAP_MS" in names, True)
+    check("and tracks which waypoint it is watching",
+          "watched_waypoint" in names, True)
+
+
+def test_the_watchdog_forces_the_next_rune(m):
+    """Not a crash and not a stop - the run has to carry on."""
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def run_job("):src.index("def diagnostic_run(")
+               if "def diagnostic_run(" in src else len(src)]
+    i = body.index("WAYPOINT_HARD_CAP_MS")
+    window = body[i:i + 700]
+    check("it sets need_waypoint", "need_waypoint = True" in window, True)
+    check("and continues rather than returning", "continue" in window, True)
+    check("and says so loudly", "HUE_BAD" in window, True)
+
+
+def test_unloading_in_place_is_bounded(m):
+    """That `continue` does not set need_waypoint, so it returns to the same
+    spot - correct once or twice, an infinite loop if the pack never frees."""
+    check("there is a limit", m["UNLOAD_IN_PLACE_LIMIT"] >= 1, True)
+
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def run_job("):]
+    body = body[:body.index("\ndef ")]
+    check("the limit gates the in-place unload",
+          "unloads_here < UNLOAD_IN_PLACE_LIMIT" in body, True)
+    check("the counter advances", "unloads_here += 1" in body, True)
+    check("and it is reset on arrival", "unloads_here = 0" in body, True)
+    check("hitting it says why", "still full - going home" in body, True)
+
+
+def test_an_unknown_task_result_does_not_mean_stay_here(m):
+    """A typo in a task's return value would otherwise hold the character on
+    one rune for as long as the run lasts, saying nothing."""
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def run_job("):]
+    body = body[:body.index("\ndef ")]
+    check("unknown results are named",
+          'is not a result this loop knows' in body, True)
+    check("and treated as done with the rune",
+          'elif result not in ("ok", "full"):' in body, True)
+
+
 def main():
     module = load_script()
     test_stop_button_is_not_a_crash(module)
@@ -4380,6 +4471,11 @@ def main():
     test_the_hard_cap_is_never_extended(module)
     test_a_long_spot_says_something(module)
     test_the_journal_is_always_scanned(module)
+    test_a_waypoint_cannot_be_held_forever(module)
+    test_the_watchdog_is_armed_only_by_arriving_somewhere(module)
+    test_the_watchdog_forces_the_next_rune(module)
+    test_unloading_in_place_is_bounded(module)
+    test_an_unknown_task_result_does_not_mean_stay_here(module)
     test_page_info(module)
     test_dropoff_smelts_before_the_keys_get_first_refusal(module)
     test_ore_is_not_silently_strandable(module)

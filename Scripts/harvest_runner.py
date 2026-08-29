@@ -50,7 +50,7 @@ Misc.Pause(5000)
 # This script has FOUR copies that differ on purpose (repo, main character,
 # MrGatherer, Mystic Gatherer). Give each a distinct SCRIPT_TAG so the banner
 # also says which copy is running, not just which version.
-SCRIPT_VERSION = "2026-08-22.19"
+SCRIPT_VERSION = "2026-08-22.20"
 SCRIPT_TAG = "repo"
 
 
@@ -1321,6 +1321,30 @@ AREA_IDLE_TIMEOUT_MS = 45000
 #
 # This one is measured from entering the spot and is never reset.
 AREA_SPOT_HARD_CAP_MS = 120000
+
+# ABSOLUTE ceiling on ONE WAYPOINT, enforced by run_job rather than by the
+# sweep - because the sweep is not always the thing that is stuck.
+#
+# run_job re-enters task() and only moves to the next rune when task() returns
+# "next". EVERY OTHER RESULT leaves it at the same waypoint: "ok" does, and so
+# does the pack-full path when unload_in_place() succeeds and `continue` runs
+# without setting need_waypoint. Neither is bounded and neither logs, so a
+# task that keeps returning one of them holds the character on one rune
+# indefinitely, saying nothing.
+#
+# Observed 2026-08-22: MrGatherer stood against a cave wall for minutes after
+# "could not reach spot 8/14", on .19, with every guard inside the sweep
+# already in place - because none of them run between calls to task().
+#
+# This one is measured from arriving at a waypoint and is reset ONLY when the
+# waypoint actually changes. Generous: a productive rune with a full 8x8 bank
+# and a couple of unload trips is legitimately long.
+WAYPOINT_HARD_CAP_MS = 420000
+
+# Times the pack may be emptied into a carried key at ONE waypoint before a
+# trip home is made instead. The in-place unload returns to the same spot
+# without advancing, so an unload that frees nothing loops on itself.
+UNLOAD_IN_PLACE_LIMIT = 3
 
 # Say something while a spot is still being worked, this often. A spot that
 # takes minutes in complete silence is indistinguishable from a hung script -
@@ -5136,6 +5160,9 @@ def run_job(job, resume=False):
 
     need_waypoint = True
     hostile_skips = 0
+    at_waypoint_since = time.time()
+    watched_waypoint = None
+    unloads_here = 0
 
     while not Player.IsGhost:
         if checkGreyskull():
@@ -5157,6 +5184,22 @@ def run_job(job, resume=False):
                 log("Could not reach a %s waypoint." % name, HUE_BAD)
                 return "skip"
             need_waypoint = False
+            # The watchdog is armed HERE and nowhere else - arriving somewhere
+            # new is the only thing that counts as progress.
+            at_waypoint_since = time.time()
+            watched_waypoint = _waypoint.get(name, 0)
+            unloads_here = 0
+
+        # THE WAYPOINT WATCHDOG. Nothing inside task() can be trusted to end,
+        # because "stay here" is what every unhandled result means.
+        if watched_waypoint is not None and                 (time.time() - at_waypoint_since) * 1000.0 >= WAYPOINT_HARD_CAP_MS:
+            log("%s: %d minute(s) on waypoint %d without moving on - forcing "
+                "the next rune. If this repeats, the last few lines above say "
+                "what it was retrying."
+                % (name, int(WAYPOINT_HARD_CAP_MS / 60000), watched_waypoint),
+                HUE_BAD)
+            need_waypoint = True
+            continue
 
         if hostiles_near():
             hostile_skips += 1
@@ -5183,8 +5226,17 @@ def run_job(job, resume=False):
         if result == "full":
             # Smelt, then let anything carried take the load. Only if the pack
             # is STILL full has a trip home earned itself.
-            if unload_in_place():
+            #
+            # BOUNDED. This `continue` does NOT set need_waypoint, so it comes
+            # straight back to task() at the same spot - which is right once or
+            # twice and an infinite loop if the pack never actually frees up.
+            if unloads_here < UNLOAD_IN_PLACE_LIMIT and unload_in_place():
+                unloads_here += 1
                 continue
+            if unloads_here >= UNLOAD_IN_PLACE_LIMIT:
+                log("%s: unloaded in place %d times at this waypoint and the "
+                    "pack is still full - going home instead."
+                    % (name, unloads_here), HUE_WARN)
 
             index = _waypoint.get(name, 0)
             total = len(_routes.get(name) or [])
@@ -5205,6 +5257,14 @@ def run_job(job, resume=False):
             log("%s: the task cannot continue (no tool?)." % name, HUE_BAD)
             return "stop"
         if result == "next":
+            need_waypoint = True
+        elif result not in ("ok", "full"):
+            # An unrecognised result silently means "stay at this waypoint",
+            # which is how a typo in a task's return value becomes a character
+            # standing still for an hour. Name it and move on.
+            log("%s: task returned %r, which is not a result this loop knows. "
+                "Treating it as done with this rune." % (name, result),
+                HUE_WARN)
             need_waypoint = True
 
         interruptible_pause(HARVEST_PAUSE)
