@@ -46,7 +46,7 @@ import time
 # loaded script even after the file on disk changes, and two debugging rounds
 # have already been spent on a bug that was fixed on disk but not in the folder
 # Razor reads. If this line does not say what you expect, hit Reload.
-SCRIPT_VERSION = "2026-08-16.1"
+SCRIPT_VERSION = "2026-08-22.2"
 
 
 # =============================================================================
@@ -289,6 +289,104 @@ PEACE_AGGRESSIVE_WORDS = [
 KILL_ON_SIGHT_WORDS = [
     "lesser hiryu",
 ]
+
+# ---------------------------------------------------------------------------
+# COW HARVEST - kill, carve, loot, store
+#
+# Species listed here are KILLED AND BUTCHERED rather than tamed. This is the
+# "attacking half" the KILL_ON_SIGHT note above says was never written; it is
+# deliberately scoped to one job rather than made general, because a script
+# that decides for itself what to attack is a different and much riskier thing.
+#
+# The round is: cast at it until it dies -> carve the corpse with a dagger ->
+# say the loot command -> push what came out into the two storage keys.
+#
+# HARVEST TAKES PRECEDENCE OVER TAMING. If you are holding a taming deed for
+# something in HARVEST_WORDS, the script kills it instead of taming it and says
+# so at startup - it cannot do both, and silently picking one would be worse.
+HARVEST_ENABLED = True
+
+# Matched as a substring of the creature's NAME, which is what decides. The
+# bodies below are only the cheap filter that finds candidates to name-check -
+# see CLAUDE.md: a body value must never be the sole authority.
+HARVEST_WORDS = ["cow"]
+
+# From the catalogue above: ("cow", [0xD8, 0xE7], 11.1). Bodies are shared
+# between species, which is exactly why the name is checked afterwards.
+HARVEST_BODIES = [0xD8, 0xE7]
+
+# How far to look for something to harvest.
+HARVEST_RANGE = 12
+
+# The spell. Magic Arrow is in SPELL_TABLE as magery/fire/base 10 - cheap, and
+# a cow has 10 physical resist and nothing else, so anything bigger is wasted
+# mana. Set HARVEST_SPELL to "" to fall back to best_spell_against().
+HARVEST_SPELL = "Magic Arrow"
+HARVEST_SPELL_SCHOOL = "magery"
+HARVEST_SPELL_MANA = 4            # Magic Arrow's cost; waited for before casting
+
+HARVEST_MAX_CASTS = 15            # ceiling per creature, so a miss cannot spin
+HARVEST_CAST_MS = 2200            # between casts, for the cast plus recovery
+HARVEST_DEATH_MS = 20000          # give up on one creature after this long
+HARVEST_MANA_WAIT_MS = 30000      # longest to stand waiting for mana
+
+# The knife. Serial first - it is exact - with the graphic as the fallback for
+# when the blade wears out and is replaced.
+HARVEST_DAGGER_SERIAL = 0
+HARVEST_DAGGER_ID = 0x0F52
+
+# Said after carving, to sweep the loot up off the ground.
+HARVEST_GRAB_PHRASE = "[grab"
+HARVEST_GRAB_HUE = 37
+HARVEST_GRAB_MS = 1500            # for the loot to arrive before storing
+
+# THE SHARD RATE-LIMITS [grab TO ONCE EVERY THREE SECONDS. Said sooner it is
+# simply refused, and the loot from that kill stays on the ground - silently,
+# because nothing in the pack changed to say otherwise. Two cows dying close
+# together is enough to hit this, so the wait is enforced here rather than
+# hoped for: grab_loot() blocks out the remainder before speaking.
+HARVEST_GRAB_COOLDOWN_MS = 3000
+
+# Corpses are carved within this many tiles, and only ones this script killed
+# are touched - see _harvest_corpses.
+HARVEST_CORPSE_RANGE = 3
+HARVEST_CARVE_MS = 900
+
+# ---------------------------------------------------------------------------
+# STORAGE KEYS for what the butchering produces
+#
+# Both are single-clicked and answered with HARVEST_CONTEXT, the same way every
+# other storage key on this shard works.
+#
+# Inspected 2026-08-22, both Blessed, 1 stone, and both sitting in a BAG inside
+# the backpack rather than at its top level. That matters: Items.FindAllByID
+# with a container serial walks that container's own Contains list one level
+# deep, so a backpack-level search would never see either of them. The SERIAL
+# is what finds them reliably (FindBySerial goes to the world item list, at any
+# depth); the graphic fallback searches the world by range for the same reason.
+#
+#   Tailor Store     ItemID 0x0F9D, hue 0x0044 - takes the leather
+#   Butcher's Hook   ItemID 0x26BB, hue 0x0697 - takes the meat
+#
+# Serials ship as 0 in the published copy; fill in your own, or leave 0 and let
+# the graphic and name find them.
+HARVEST_KEYS = [
+    {"label": "Tailor Store", "enabled": True,
+     "serial": 0, "id": 0x0F9D, "hue": 0x0044,
+     "names": ["tailor"], "context": []},
+    {"label": "Butcher's Hook", "enabled": True,
+     "serial": 0, "id": 0x26BB, "hue": 0x0697,
+     "names": ["butcher"], "context": []},
+]
+
+# The menu entry that empties the pack into a key. Exact match first, then a
+# guarded substring.
+HARVEST_CONTEXT = ["Refill from stock", "Fill from backpack"]
+
+# Never answered, however well it matches. These sit on the same menus and they
+# do not put things away.
+HARVEST_CONTEXT_NEVER = ["empty", "destroy", "delete", "release", "dye",
+                         "rename", "buy", "sell"]
 
 # Tries per creature before taming is attempted anyway. A failed peace is not
 # fatal - it just means the tame happens the hard way.
@@ -1899,11 +1997,445 @@ def add_to_deed(species_name, pet_serial):
 
 
 # =============================================================================
+# COW HARVEST
+# =============================================================================
+# Kill, carve, loot, store. See the HARVEST_* config block for what and why.
+
+# Corpses this script created, so nothing else's kill gets carved. Serials of
+# the creatures killed; a corpse is matched to one by its own serial, which UO
+# derives from the mobile's.
+_harvest_corpses = []
+
+# When [grab was last said, so the shard's three-second limit is honoured.
+# 0.0 means "never", which is always far enough in the past.
+_last_grab = [0.0]
+
+
+def is_harvest_target(name):
+    """Whether this creature is one to kill and butcher rather than tame.
+
+    The NAME decides. HARVEST_BODIES only narrows the search down to things
+    worth naming - bodies are shared between species and have been wrong in
+    extracted data before.
+    """
+    low = (name or "").strip().lower()
+    if not low:
+        return False
+    for word in HARVEST_WORDS:
+        word = word.strip().lower()
+        if word and word in low:
+            return True
+    return False
+
+
+def harvest_candidates():
+    """Harvestable creatures in range, nearest first, ignore-list respected."""
+    if not HARVEST_ENABLED or not HARVEST_BODIES:
+        return []
+    f = Mobiles.Filter()
+    f.Enabled = True
+    f.RangeMax = HARVEST_RANGE
+    f.CheckIgnoreObject = True
+    for body in HARVEST_BODIES:
+        f.Bodies.Add(body)
+    found = Mobiles.ApplyFilter(f)
+    if not found:
+        return []
+
+    # Name-checked, always. A body match alone is not enough to kill something.
+    named = []
+    for mob in list(found):
+        if getattr(mob, "IsGhost", False):
+            continue
+        if is_harvest_target(mob_name(mob)):
+            named.append(mob)
+    named.sort(key=lambda m: Player.DistanceTo(m))
+    return named
+
+
+def harvest_context_blocked(label):
+    low = (label or "").strip().lower()
+    return any(bad in low for bad in HARVEST_CONTEXT_NEVER)
+
+
+def harvest_context_select(entity, wanted, label_for_log):
+    """Open a context menu and pick the first configured entry.
+
+    EXACT match first and always honoured - it was configured deliberately.
+    Only then a substring match, which refuses anything on
+    HARVEST_CONTEXT_NEVER. The REAL label is sent back, never a position: a
+    menu that gains an entry would otherwise answer something else entirely.
+    """
+    try:
+        entries = Misc.WaitForContext(entity, 10000, False)
+    except Exception as err:
+        log("%s: context menu raised %r." % (label_for_log, err), HUE_WARN)
+        return False
+    if not entries:
+        log("%s gave no context menu." % label_for_log, HUE_WARN)
+        return False
+
+    labels = []
+    for entry in entries:
+        text = getattr(entry, "Entry", None)
+        labels.append(text if text is not None else str(entry))
+    debug("%s menu: %s" % (label_for_log, " | ".join(labels)))
+
+    def reply(text):
+        Misc.Pause(100)
+        Misc.ContextReply(entity, text)
+        Misc.Pause(600)
+        return True
+
+    for want in wanted:
+        target = want.strip().lower()
+        for text in labels:
+            if (text or "").strip().lower() == target:
+                return reply(text)
+    for want in wanted:
+        target = want.strip().lower()
+        if not target:
+            continue
+        for text in labels:
+            if target in (text or "").lower():
+                if harvest_context_blocked(text):
+                    debug("Refusing '%s' - it is on HARVEST_CONTEXT_NEVER."
+                          % text, HUE_WARN)
+                    continue
+                return reply(text)
+
+    log("%s has no entry matching %s - it offers: %s"
+        % (label_for_log, wanted, " | ".join(labels)), HUE_BAD)
+    return False
+
+
+def find_stock_key(spec):
+    """A storage key's item, or None.
+
+    Serial first: FindBySerial goes to the world item list, so it finds the key
+    at any depth. Both of these live in a BAG inside the pack, and a
+    backpack-level graphic search walks only the pack's own Contains - it would
+    never see either of them. That is why the fallback searches the world by
+    range instead of the backpack.
+    """
+    serial = int(spec.get("serial") or 0)
+    if serial:
+        item = Items.FindBySerial(serial)
+        if item is not None:
+            return item
+
+    graphic = int(spec.get("id") or 0)
+    if not graphic:
+        return None
+    hue = int(spec.get("hue", -1))
+    try:
+        found = Items.FindAllByID(graphic, hue, -1, 2, False)
+    except Exception:
+        found = []
+
+    names = [n.lower() for n in (spec.get("names") or [])]
+    for item in list(found or []):
+        if not names:
+            return item
+        label = (getattr(item, "Name", "") or "").strip().lower()
+        if any(n in label for n in names):
+            return item
+    return None
+
+
+def store_harvest():
+    """Offer the pack to every harvest key. Returns how many took a load.
+
+    ONE reply per key - the menu entry empties the pack of everything that key
+    accepts in a single action, so clicking once per item would be the same
+    deposit repeated.
+    """
+    used = 0
+    for spec in HARVEST_KEYS:
+        if not spec.get("enabled", True):
+            continue
+        label = spec.get("label", "key")
+        item = find_stock_key(spec)
+        if item is None:
+            log("%s NOT FOUND (serial 0x%X, id 0x%04X) - nothing of its will "
+                "be stored." % (label, int(spec.get("serial") or 0),
+                                int(spec.get("id") or 0)), HUE_WARN)
+            continue
+        wanted = list(spec.get("context") or []) + list(HARVEST_CONTEXT)
+        if harvest_context_select(item, wanted, label):
+            used += 1
+            log("%s took the load." % label, HUE_GOOD)
+    return used
+
+
+def wait_for_mana(need, timeout_ms=None):
+    """Stand still until there is mana for one cast. False if it never comes."""
+    if timeout_ms is None:
+        timeout_ms = HARVEST_MANA_WAIT_MS
+    deadline = time.time() + timeout_ms / 1000.0
+    said = False
+    while time.time() < deadline:
+        try:
+            if int(Player.Mana or 0) >= int(need):
+                return True
+        except Exception:
+            return True         # cannot read it - do not block on that
+        if not said:
+            said = True
+            log("Waiting for mana (%s of %s needed)."
+                % (Player.Mana, need), HUE_INFO)
+        Misc.Pause(500)
+    log("Still no mana after %ds - leaving this one." % (timeout_ms / 1000),
+        HUE_WARN)
+    return False
+
+
+def cast_at(serial, spell, school):
+    """One cast at one creature. False if the cursor never arrived.
+
+    The manual sequence, not the built-in target: cancel any stale cursor,
+    cast, wait for the cursor, settle, then target. CLAUDE.md records that the
+    settle pause and the cancel are both REQUIRED on this shard, and that a
+    leaked cursor is silently answered by the next TargetExecute.
+    """
+    if not clear_cursor():
+        debug("Target cursor would not clear before casting.", HUE_WARN)
+    try:
+        if school == "magery":
+            Spells.CastMagery(spell)
+        elif school == "necromancy":
+            Spells.CastNecro(spell)
+        elif school == "spellweaving":
+            Spells.CastSpellweaving(spell)
+        elif school == "mysticism":
+            Spells.CastMysticism(spell)
+        else:
+            log("Unknown spell school %r - not casting." % school, HUE_BAD)
+            return False
+    except Exception as err:
+        log("Casting %s failed: %r" % (spell, err), HUE_BAD)
+        return False
+
+    if not Target.WaitForTarget(3000, True):
+        debug("No cursor for %s." % spell, HUE_WARN)
+        Target.Cancel()
+        return False
+    Misc.Pause(400)
+    Target.TargetExecute(serial)
+    return True
+
+
+def kill_target(serial, label):
+    """Cast until it dies. "dead" / "gave up" / "gone".
+
+    Death is read from the creature disappearing or reporting no hits, not from
+    the journal: the kill message varies and a missed match here would have the
+    script stand casting at a corpse.
+    """
+    spell = HARVEST_SPELL
+    school = HARVEST_SPELL_SCHOOL
+    if not spell:
+        chosen = best_spell_against(label)
+        if chosen:
+            spell, school = chosen[0], chosen[1]
+    log("Killing %s with %s." % (label, spell), HUE_INFO)
+
+    deadline = time.time() + HARVEST_DEATH_MS / 1000.0
+    casts = 0
+    while casts < HARVEST_MAX_CASTS and time.time() < deadline:
+        mob = Mobiles.FindBySerial(serial)
+        if mob is None:
+            return "dead"
+        try:
+            if int(mob.Hits or 0) <= 0:
+                return "dead"
+        except Exception:
+            pass
+
+        if not wait_for_mana(HARVEST_SPELL_MANA):
+            return "gave up"
+        if Player.DistanceTo(mob) > HARVEST_RANGE:
+            return "gone"
+
+        if cast_at(serial, spell, school):
+            casts += 1
+        Misc.Pause(HARVEST_CAST_MS)
+
+    if Mobiles.FindBySerial(serial) is None:
+        return "dead"
+    log("%s is still up after %d cast(s) - leaving it." % (label, casts),
+        HUE_WARN)
+    return "gave up"
+
+
+def find_dagger():
+    """The carving blade, by serial then by graphic. None if there is none."""
+    serial = int(HARVEST_DAGGER_SERIAL or 0)
+    if serial:
+        blade = Items.FindBySerial(serial)
+        if blade is not None:
+            return blade
+    pack = Player.Backpack
+    if pack is None:
+        return None
+    try:
+        found = Items.FindAllByID(HARVEST_DAGGER_ID, -1, pack.Serial, -1, False)
+    except Exception:
+        found = []
+    for blade in list(found or []):
+        return blade
+    return None
+
+
+def carve_corpses():
+    """Carve nearby corpses of things this script killed. Returns how many.
+
+    Only corpses whose serial was recorded at the kill are touched. Somebody
+    else's corpse is somebody else's loot, and carving it uninvited is both
+    rude and a good way to draw attention.
+    """
+    if not _harvest_corpses:
+        return 0
+    blade = find_dagger()
+    if blade is None:
+        log("No dagger (serial 0x%X / id 0x%04X) - cannot carve."
+            % (int(HARVEST_DAGGER_SERIAL or 0), HARVEST_DAGGER_ID), HUE_WARN)
+        return 0
+
+    f = Items.Filter()
+    f.Enabled = True
+    f.RangeMax = HARVEST_CORPSE_RANGE
+    f.IsCorpse = 1
+    try:
+        corpses = Items.ApplyFilter(f)
+    except Exception as err:
+        debug("Corpse search failed: %r" % (err,), HUE_WARN)
+        return 0
+
+    carved = 0
+    for corpse in list(corpses or []):
+        if int(corpse.Serial) not in _harvest_corpses:
+            continue
+        if not clear_cursor():
+            debug("Cursor would not clear before carving.", HUE_WARN)
+        Items.UseItem(blade)
+        if not Target.WaitForTarget(3000, True):
+            debug("No cursor for the dagger.", HUE_WARN)
+            Target.Cancel()
+            break
+        Misc.Pause(400)
+        Target.TargetExecute(int(corpse.Serial))
+        Misc.Pause(HARVEST_CARVE_MS)
+        carved += 1
+        try:
+            _harvest_corpses.remove(int(corpse.Serial))
+        except ValueError:
+            pass
+    if carved:
+        log("Carved %d corpse(s)." % carved, HUE_GOOD)
+    return carved
+
+
+def report_harvest():
+    """Say what will be killed rather than tamed, and name the keys."""
+    if not HARVEST_ENABLED:
+        log("Cow harvest: OFF. Nothing will be attacked.", HUE_INFO)
+        return
+    log("Cow harvest: ON - %s are KILLED and butchered, not tamed."
+        % "/".join(HARVEST_WORDS), HUE_WARN)
+    log("  %s, carve with 0x%04X, then say %r."
+        % (HARVEST_SPELL or "best spell available", HARVEST_DAGGER_ID,
+           HARVEST_GRAB_PHRASE), HUE_INFO)
+    for spec in HARVEST_KEYS:
+        if not spec.get("enabled", True):
+            continue
+        label = spec.get("label", "?")
+        item = find_stock_key(spec)
+        if item is None:
+            log("  %-16s NOT FOUND (serial 0x%X, id 0x%04X) - set its serial."
+                % (label, int(spec.get("serial") or 0),
+                   int(spec.get("id") or 0)), HUE_BAD)
+        else:
+            log("  %-16s 0x%X, id 0x%04X hue 0x%04X"
+                % (label, int(item.Serial), int(item.ItemID), int(item.Hue)),
+                HUE_GOOD)
+
+    # THE OVERLAP. Holding a taming deed for something on the kill list is a
+    # contradiction, and picking one silently would be the worse answer.
+    clash = [name for name in _active if is_harvest_target(name)]
+    if clash:
+        log("You hold taming deed(s) for %s, which is ALSO on the harvest "
+            "list - they will be killed, not tamed. Remove them from "
+            "HARVEST_WORDS if that is not what you want."
+            % ", ".join(sorted(set(clash))), HUE_BAD)
+
+
+def grab_loot():
+    """Say the loot command, never sooner than the shard allows.
+
+    Waits out the remainder of HARVEST_GRAB_COOLDOWN_MS rather than skipping:
+    the loot is already on the ground and skipping would leave it there. The
+    wait is normally zero - killing and carving a cow takes longer than three
+    seconds on its own - and only bites when two die together.
+    """
+    if not HARVEST_GRAB_PHRASE:
+        return False
+    waited = time.time() - _last_grab[0]
+    remaining = HARVEST_GRAB_COOLDOWN_MS / 1000.0 - waited
+    if remaining > 0:
+        debug("Waiting %.1fs for the [grab cooldown." % remaining)
+        Misc.Pause(int(remaining * 1000) + 50)
+    Player.ChatSay(HARVEST_GRAB_HUE, HARVEST_GRAB_PHRASE)
+    _last_grab[0] = time.time()
+    Misc.Pause(HARVEST_GRAB_MS)
+    return True
+
+
+def harvest_pass():
+    """One kill-carve-loot-store round. True if anything was harvested."""
+    if not HARVEST_ENABLED:
+        return False
+    targets = harvest_candidates()
+    if not targets:
+        return False
+
+    mob = targets[0]
+    serial = int(mob.Serial)
+    label = mob_name(mob) or "it"
+
+    if not approach(serial, goal=HARVEST_RANGE - 2, accept=HARVEST_RANGE):
+        debug("Could not get near %s." % label, HUE_WARN)
+        Misc.IgnoreObject(serial)
+        return False
+
+    outcome = kill_target(serial, label)
+    if outcome != "dead":
+        Misc.IgnoreObject(serial)
+        return False
+
+    # A corpse carries the mobile's serial with the high bit cleared, but that
+    # is a client-side convention rather than a promise - so BOTH are recorded
+    # and carve_corpses matches on either.
+    _harvest_corpses.append(serial)
+    _harvest_corpses.append(serial & 0x7FFFFFFF)
+    Misc.Pause(600)
+
+    carve_corpses()
+
+    grab_loot()
+
+    store_harvest()
+    Misc.IgnoreObject(serial)
+    return True
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
 def preflight():
     log("TameAndFill v%s" % SCRIPT_VERSION, HUE_GOOD)
+    report_harvest()
 
     if not build_species():
         log("No species available - check ONLY_ANIMALS / NEVER_ANIMALS.", HUE_BAD)
@@ -1957,6 +2489,13 @@ def main():
 
         if (time.time() - _last_scan) * 1000.0 >= DEED_RESCAN_MS:
             rescan("periodic")
+
+        # Before the deed checks, deliberately: harvesting needs no deed, and
+        # the taming loop idles out on an empty deed list without ever getting
+        # this far.
+        if harvest_pass():
+            Misc.Pause(500)
+            continue
 
         if not _active:
             Misc.Pause(IDLE_PAUSE * 5)

@@ -850,6 +850,235 @@ def test_catalogue_invariants(m):
     check("0x74 shared", sorted(owners[0x74]), ["dread warhorse", "nightmare"])
 
 
+
+# --------------------------------------------------------------------------
+# Cow harvest - kill, carve, loot, store
+# --------------------------------------------------------------------------
+
+def test_the_name_decides_what_gets_killed(m):
+    """A body match alone must never be enough to attack something. Bodies are
+    shared between species and have been wrong in extracted data before - a
+    stray 0x3 in the sheep entry once had the tamer walking up to zombies."""
+    check("a cow is a target", m["is_harvest_target"]("a cow"), True)
+    check("case does not matter", m["is_harvest_target"]("A Cow"), True)
+
+    for name in ("a horse", "a bull", "a sheep", "a dire wolf", ""):
+        check("%r is not a target" % name, m["is_harvest_target"](name), False)
+
+
+def test_the_cow_bodies_come_from_the_catalogue(m):
+    """Not typed from memory - the catalogue entry is ("cow", [0xD8, 0xE7])."""
+    entry = None
+    for row in m["ANIMAL_CATALOGUE"]:
+        if row[0] == "cow":
+            entry = row
+    check("the catalogue has a cow", entry is not None, True)
+    if entry is not None:
+        check("and HARVEST_BODIES matches it",
+              sorted(m["HARVEST_BODIES"]), sorted(entry[1]))
+
+
+def test_harvest_uses_a_cheap_spell(m):
+    """A cow has 10 physical resist and nothing else, so anything bigger than
+    Magic Arrow is wasted mana and slower to recover from."""
+    check("magic arrow", m["HARVEST_SPELL"], "Magic Arrow")
+    table = dict((row[0], row) for row in m["SPELL_TABLE"])
+    check("and it is a real table spell", "Magic Arrow" in table, True)
+    check("cast as the school the table says",
+          table["Magic Arrow"][1], m["HARVEST_SPELL_SCHOOL"])
+    check("it is not an area spell", table["Magic Arrow"][4], False)
+
+
+def test_the_kill_loop_is_bounded(m):
+    check("a cast ceiling", m["HARVEST_MAX_CASTS"] >= 1, True)
+    check("and a wall-clock deadline", m["HARVEST_DEATH_MS"] >= 1000, True)
+    check("mana waiting is bounded too", m["HARVEST_MANA_WAIT_MS"] >= 1000,
+          True)
+
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "kill_target")
+    names = set(n.id for n in _ast.walk(fn) if isinstance(n, _ast.Name))
+    check("the loop tests the cast ceiling", "HARVEST_MAX_CASTS" in names, True)
+    check("and the deadline", "deadline" in names, True)
+
+
+def test_only_our_own_corpses_are_carved(m):
+    """Somebody else's corpse is somebody else's loot."""
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "carve_corpses")
+    names = set(n.id for n in _ast.walk(fn) if isinstance(n, _ast.Name))
+    check("it checks the recorded kill list", "_harvest_corpses" in names, True)
+
+    # And the recording happens only after a confirmed death.
+    fn2 = next(n for n in _ast.walk(tree)
+               if isinstance(n, _ast.FunctionDef) and n.name == "harvest_pass")
+    src = _ast.dump(fn2)
+    check("a corpse is only recorded after a kill", "'dead'" in src, True)
+
+
+def test_every_cursor_is_cancelled_first(m):
+    """A leaked cursor is silently answered by the NEXT TargetExecute, so a
+    cast or a carve goes nowhere and nothing says so."""
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    for fname in ("cast_at", "carve_corpses"):
+        fn = next(n for n in _ast.walk(tree)
+                  if isinstance(n, _ast.FunctionDef) and n.name == fname)
+        called = set()
+        for node in _ast.walk(fn):
+            if isinstance(node, _ast.Call):
+                if getattr(node.func, "id", None):
+                    called.add(node.func.id)
+                if getattr(node.func, "attr", None):
+                    called.add(node.func.attr)
+        check("%s clears the cursor first" % fname, "clear_cursor" in called,
+              True)
+        check("%s waits for the cursor" % fname, "WaitForTarget" in called,
+              True)
+        check("%s targets by serial" % fname, "TargetExecute" in called, True)
+
+
+def test_the_storage_keys_are_found_by_serial_first(m):
+    """Both keys sit in a BAG inside the pack. Items.FindAllByID with a
+    container serial walks that container's own Contains one level deep, so a
+    backpack-level search would never see either of them."""
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def find_stock_key("):src.index("def store_harvest(")]
+    check("serial first", body.index("FindBySerial") < body.index("FindAllByID"),
+          True)
+    check("and the fallback searches the WORLD, not the backpack",
+          "FindAllByID(graphic, hue, -1," in body, True)
+    check("not the backpack", "Backpack.Serial" in body, False)
+
+
+def test_the_keys_are_answered_by_label_not_position(m):
+    """A menu that gains an entry would otherwise answer something else."""
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def harvest_context_select("):
+               src.index("def find_stock_key(")]
+    check("the real label goes back", "Misc.ContextReply(entity, text)" in body,
+          True)
+    check("exact match is tried first", body.count("strip().lower()") >= 2, True)
+    check("and dangerous entries are refused",
+          "harvest_context_blocked" in body, True)
+
+    for bad in ("destroy", "empty", "delete"):
+        check("%r is on the never list" % bad,
+              bad in [w.lower() for w in m["HARVEST_CONTEXT_NEVER"]], True)
+
+
+def test_the_inspected_key_graphics_are_configured(m):
+    by_label = dict((k["label"], k) for k in m["HARVEST_KEYS"])
+    check("Tailor Store is configured", "Tailor Store" in by_label, True)
+    check("Butcher's Hook is configured", "Butcher's Hook" in by_label, True)
+    check("tailor graphic", by_label["Tailor Store"]["id"], 0x0F9D)
+    check("tailor hue", by_label["Tailor Store"]["hue"], 0x0044)
+    check("butcher graphic", by_label["Butcher's Hook"]["id"], 0x26BB)
+    check("butcher hue", by_label["Butcher's Hook"]["hue"], 0x0697)
+    for label, spec in by_label.items():
+        check("%s has a name check for the graphic fallback" % label,
+              bool(spec.get("names")), True)
+
+
+def test_the_grab_command_is_said_after_carving(m):
+    """Loot has to be on the ground before [grab can sweep it up."""
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def harvest_pass("):]
+    body = body[:body.index("\ndef ") if "\ndef " in body else len(body)]
+    check("[grab is the phrase", m["HARVEST_GRAB_PHRASE"], "[grab")
+    check("carving comes before the grab",
+          body.index("carve_corpses()") < body.index("grab_loot()"), True)
+    check("and storing comes after it",
+          body.index("grab_loot()") < body.index("store_harvest()"), True)
+
+
+def test_grab_honours_the_three_second_cooldown(m):
+    """The shard refuses [grab said sooner than every three seconds, and the
+    refusal is SILENT - the loot just stays on the ground. Two cows dying
+    close together is enough to hit it."""
+    check("the cooldown is at least three seconds",
+          m["HARVEST_GRAB_COOLDOWN_MS"] >= 3000, True)
+
+    saved = (m["Misc"], m["Player"], m["debug"])
+    paused = []
+    said = []
+
+    class P(object):
+        def ChatSay(self, hue, text):
+            said.append(text)
+
+    class M(object):
+        def Pause(self, ms):
+            paused.append(ms)
+
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    try:
+        m["Misc"] = M()
+        m["Player"] = P()
+        m["debug"] = lambda *a, **k: None
+
+        # Never said before - nothing to wait for beyond the settle.
+        m["_last_grab"][0] = 0.0
+        del paused[:]
+        m["grab_loot"]()
+        check("it said [grab", said, ["[grab"])
+        check("and did not wait out a cooldown it did not owe",
+              max(paused) <= m["HARVEST_GRAB_MS"], True)
+
+        # Said a moment ago - it must wait out the remainder.
+        import time as _time
+        m["_last_grab"][0] = _time.time()
+        del paused[:]
+        del said[:]
+        m["grab_loot"]()
+        check("it said [grab again", said, ["[grab"])
+        check("after waiting out the remainder",
+              max(paused) >= m["HARVEST_GRAB_COOLDOWN_MS"] - 500, True)
+
+        # It WAITS rather than skipping: the loot is already on the floor, and
+        # skipping would leave it there.
+        check("the loot is never abandoned", len(said), 1)
+    finally:
+        m["Misc"], m["Player"], m["debug"] = saved
+
+
+def test_the_taming_overlap_is_reported(m):
+    """Holding a taming deed for something on the kill list is a
+    contradiction. Picking one silently would be the worse answer."""
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def report_harvest("):src.index("def harvest_pass(")]
+    check("it checks the active deeds", "_active" in body, True)
+    check("and says which way it resolves", "killed, not tamed" in body, True)
+
+
+def test_harvest_can_be_switched_off(m):
+    check("there is a switch", m["HARVEST_ENABLED"] in (True, False), True)
+    saved = m["HARVEST_ENABLED"]
+    try:
+        m["HARVEST_ENABLED"] = False
+        check("off means no candidates", m["harvest_candidates"](), [])
+        check("and no pass", m["harvest_pass"](), False)
+    finally:
+        m["HARVEST_ENABLED"] = saved
+
+
 def main():
     module = load_script()
     module["build_species"]()          # populates the name patterns
@@ -863,6 +1092,19 @@ def main():
     test_every_table_spell_has_a_real_damage_type(module)
     test_unknown_creature_gets_no_spell_choice(module)
     test_resistances_came_from_servuo_not_a_wiki(module)
+    test_the_name_decides_what_gets_killed(module)
+    test_the_cow_bodies_come_from_the_catalogue(module)
+    test_harvest_uses_a_cheap_spell(module)
+    test_the_kill_loop_is_bounded(module)
+    test_only_our_own_corpses_are_carved(module)
+    test_every_cursor_is_cancelled_first(module)
+    test_the_storage_keys_are_found_by_serial_first(module)
+    test_the_keys_are_answered_by_label_not_position(module)
+    test_the_inspected_key_graphics_are_configured(module)
+    test_the_grab_command_is_said_after_carving(module)
+    test_grab_honours_the_three_second_cooldown(module)
+    test_the_taming_overlap_is_reported(module)
+    test_harvest_can_be_switched_off(module)
     test_zero_is_a_real_resistance_not_missing_data(module)
     test_weakest_is_chosen_from_what_you_can_cast(module)
     test_known_weaknesses(module)
