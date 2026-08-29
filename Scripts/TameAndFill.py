@@ -41,6 +41,14 @@ import re
 import time
 
 
+# Printed as the first line at startup. Bump it with every change that goes
+# out, so the journal says which copy Razor actually loaded - Razor caches the
+# loaded script even after the file on disk changes, and two debugging rounds
+# have already been spent on a bug that was fixed on disk but not in the folder
+# Razor reads. If this line does not say what you expect, hit Reload.
+SCRIPT_VERSION = "2026-08-16.1"
+
+
 # =============================================================================
 # CONFIG - DEED DISCOVERY
 # =============================================================================
@@ -1895,6 +1903,8 @@ def add_to_deed(species_name, pet_serial):
 # =============================================================================
 
 def preflight():
+    log("TameAndFill v%s" % SCRIPT_VERSION, HUE_GOOD)
+
     if not build_species():
         log("No species available - check ONLY_ANIMALS / NEVER_ANIMALS.", HUE_BAD)
         return False

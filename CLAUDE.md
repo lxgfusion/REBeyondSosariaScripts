@@ -49,17 +49,65 @@ two must be kept in step.
 So "the live folder" depends on which script is being edited.
 
 **`harvest_runner.py` is user-managed — do not sync or edit it unasked.** It
-exists in four diverging copies on purpose:
+exists in five copies (four live, one in the repo). As of **2026-08-21** all
+five carry the **same code**; they differ only in the CONFIG block, and those
+differences are deliberate:
 
-- `…\razor\Scripts\harvest_runner.py` — main character, lumberjacking on.
-- `…\Scripts\Mystic Gatherer\` — same version, `"enabled": False` on the
-  Lumberjacking job. Those characters do not lumberjack yet.
-- `…\Scripts\MrGatherer\` — lumberjacking off, but ~900 lines behind the others.
-- The repo copy is behind the deployed main by a Carpenter vendor stop and the
-  Tailor/Tinker/Carpenter rune entries.
+There are **five** copies, not four — `Hanzo\` is easy to miss, and it is
+`harvest_runner.py` like all the others (there is no `resource_runner.py`).
 
-Those differences are work in progress as of 2026-07-28, not drift to be
-reconciled. Ask before touching any of them.
+Values below are read off disk with `ast.literal_eval`, not from the text —
+confirmed 2026-08-21. **Re-read them rather than trusting this table**; it has
+been wrong before.
+
+| Copy | Actually run? | Jobs enabled | `WOOD_STORAGE_SERIAL` | `STONE_STORAGE_SERIAL` | `BOD_ENABLED` |
+|---|---|---|---|---|---|
+| `…\razor\Scripts\` (`SCRIPT_TAG = "main"`) | **no — idle** | mining only | `(live)` | `0` | `True` |
+| `…\Scripts\Hanzo\` | yes | mining only | `(live)` | `(live)` | `False` |
+| `…\Scripts\MrGatherer\` | yes | mining only | `(live)` | `(live)` | `False` |
+| `…\Scripts\Mystic Gatherer\` | yes | **lumberjacking only** | `(live)` | `0` | `False` |
+| repo `Scripts/harvest_runner.py` | n/a | both (generic template) | `0` | `0` | `True` |
+
+**Only three of the five are ever run** (confirmed by the user, 2026-08-21):
+Hanzo and MrGatherer mine, Mystic Gatherer lumberjacks. The `main` copy is the
+user's own played account and sits idle — which is why its `INGOT_KEY_SERIAL =
+0` and its lone `BOD_ENABLED = True` are **not** bugs to chase. A previous
+handoff listed that zeroed key as an open issue; it is not one.
+
+So expect **three** `harvest_runner v<version> [<tag>]` banners per session, not
+five, and do not go hunting for a missing fourth.
+
+**Mystic Gatherer is the only lumberjack.** That means the lumber sweep is
+exercised on exactly one character and the mining sweep on **two** — worth
+knowing when deciding where a change gets tested.
+
+The jobs column is the user's to set and it moves — **read it, do not assume
+it.** Every one of these characters shares the same house chest
+(`(live)`), BOD book and runebook folders, so the JOBS flags and the wood
+key serial are the *only* per-character values there are.
+
+`0` is the correct value for a copy whose character does not own that serial —
+the graphic plus any hue plus the name check finds whichever key is in their
+own pack, the same way `INGOT_KEY_SERIAL` has always worked. The repo copy also
+carries a configuration index in its CONFIG block that the live copies do not;
+that is repo-only by request.
+
+**The file splits cleanly at the `# HELPERS` banner** — everything above it is
+config, everything below is code, and the header says so. That is what makes a
+merge safe: replace the code half wholesale, carry the config half forward.
+Run `tools/check_undefined_names.py` over every copy afterwards; it catches a
+helper that landed in one copy but is called from another, which is exactly
+what piecemeal patching produces and which Python will not report until that
+line runs in game.
+
+History worth keeping: main's live copy was found **reverted** on 2026-08-18 —
+777 lines short, missing `KEY_BACKED_IDS` / `keys_in_reach` / `chest_sweep_ids`
+(the guard that keeps resources out of the ONE-WAY chest when their key is in
+the pack), and with the `SCRIPT_VERSION` added two days earlier gone. It was
+rebuilt from Mystic Gatherer, which was the most current copy. **Compare
+`SCRIPT_VERSION` and the md5 of the code half across all five before assuming
+they agree** — mtime is not a guide, the reverted copy had the newest timestamp
+of the three, and file size alone will not tell two config blocks apart.
 
 ## Conventions
 
