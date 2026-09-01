@@ -170,15 +170,79 @@ def test_find_instrument_only_looks_in_the_pack(m):
 
 
 def test_only_the_aggressive_get_peaced(m):
-    """Unicorns and ki-rin are peaceful - playing at them is wasted time.
-    Dragons, drakes and their relatives chew on you for the whole tame."""
-    for name in ("dragon", "greater dragon", "frost dragon", "swamp dragon",
-                 "dragon wolf", "drake", "cold drake", "stygian drake",
-                 "white wyrm", "shadow wyrm", "hiryu", "lesser hiryu"):
-        check("%r is aggressive" % name, m["is_aggressive_species"](name), True)
-    for name in ("unicorn", "ki-rin", "chicken", "horse", "great hart",
-                 "polar bear"):
+    """Hostility comes from ServUO's FightMode, not from a word list.
+
+    See tools/extract_aggressive.py. FightMode.Aggressor means "fights back
+    only once attacked"; anything else opens hostilities on its own.
+    """
+    for name in ("dragon", "greater dragon", "frost dragon", "dragon wolf",
+                 "drake", "cold drake", "stygian drake", "white wyrm",
+                 "shadow wyrm", "hiryu", "lesser hiryu", "dire wolf",
+                 "giant spider", "scorpion", "hell hound", "nightmare",
+                 "alligator", "imp", "lion", "rune beetle"):
+        check("%r is hostile" % name, m["is_aggressive_species"](name), True)
+
+    for name in ("chicken", "horse", "great hart", "polar bear", "cow",
+                 "bird", "sheep", "cat"):
         check("%r is not" % name, m["is_aggressive_species"](name), False)
+
+
+def test_the_swamp_dragon_is_not_a_dragon_for_this_purpose(m):
+    """THE BUG THE WORD LIST HAD.
+
+    The old PEACE_AGGRESSIVE_WORDS held a bare "dragon" and its own comment
+    claimed that covered "greater/frost/serpentine/swamp dragon". ServUO says
+    the swamp dragon is FightMode.Aggressor - passive - so it was being played
+    to for no reason, and worse, the same substring logic is what a kill-on-
+    sight list would have used to decide what to attack.
+
+    match_species resolves longest-first with word boundaries, so this now
+    resolves to the swamp dragon rather than being caught by "dragon".
+    """
+    check("a swamp dragon is passive",
+          m["is_aggressive_species"]("a swamp dragon"), False)
+    check("while a plain dragon is not",
+          m["is_aggressive_species"]("a dragon"), True)
+    check("and the trap is real", "dragon" in "swamp dragon", True)
+
+
+def test_karma_hostiles_are_peaced_by_default(m):
+    """Unicorn and ki-rin are FightMode.Evil - hostile only to players of evil
+    karma. The old comment called them peaceful, which was right for most
+    characters and wrong for some. Peaced by default, on the config's own
+    stated rule that a wasted peace costs seconds and a missed one costs the
+    tame."""
+    check("unicorn is karma-conditional",
+          "unicorn" in [n.lower() for n in m["KARMA_AGGRESSIVE_SPECIES"]], True)
+    check("ki-rin too",
+          "ki-rin" in [n.lower() for n in m["KARMA_AGGRESSIVE_SPECIES"]], True)
+    check("and they are peaced by default",
+          m["is_aggressive_species"]("a unicorn"), True)
+
+    saved = m["PEACE_KARMA_AGGRESSIVE"]
+    try:
+        m["PEACE_KARMA_AGGRESSIVE"] = False
+        check("unless you turn it off",
+              m["is_aggressive_species"]("a unicorn"), False)
+        check("which does not affect the always-hostile",
+              m["is_aggressive_species"]("a dragon"), True)
+    finally:
+        m["PEACE_KARMA_AGGRESSIVE"] = saved
+
+
+def test_the_hostile_list_came_from_source(m):
+    """A hand-written list is how this gets quietly wrong. 54 of 112 species,
+    against the five words it replaced."""
+    check("it is not a token list", len(m["AGGRESSIVE_SPECIES"]) > 40, True)
+    check("and every entry is a real catalogue species",
+          sorted(set(n.lower() for n in m["AGGRESSIVE_SPECIES"])
+                 - set(m["_species"])), [])
+    check("the karma list too",
+          sorted(set(n.lower() for n in m["KARMA_AGGRESSIVE_SPECIES"])
+                 - set(m["_species"])), [])
+    # No overlap - a species is one or the other.
+    both = set(n.lower() for n in m["AGGRESSIVE_SPECIES"]) &         set(n.lower() for n in m["KARMA_AGGRESSIVE_SPECIES"])
+    check("and nothing is in both lists", sorted(both), [])
 
 
 def test_aggressive_mode_still_calms_anything_already_swinging(m):
@@ -192,10 +256,10 @@ def test_aggressive_mode_still_calms_anything_already_swinging(m):
     try:
         m["PEACE_ENABLED"] = True
         m["PEACE_WHEN"] = "aggressive"
-        check("a calm unicorn is left alone",
-              m["should_peace"](Mob(False), "unicorn"), False)
-        check("a unicorn that is fighting is not",
-              m["should_peace"](Mob(True), "unicorn"), True)
+        check("a calm sheep is left alone",
+              m["should_peace"](Mob(False), "sheep"), False)
+        check("a sheep that is fighting is not",
+              m["should_peace"](Mob(True), "sheep"), True)
         check("a calm dragon is still calmed first",
               m["should_peace"](Mob(False), "greater dragon"), True)
     finally:
@@ -204,9 +268,10 @@ def test_aggressive_mode_still_calms_anything_already_swinging(m):
 
 def test_the_default_is_aggressive_only(m):
     check("default mode", m["PEACE_WHEN"], "aggressive")
-    check("dragons listed", "dragon" in m["PEACE_AGGRESSIVE_WORDS"], True)
-    check("drakes listed", "drake" in m["PEACE_AGGRESSIVE_WORDS"], True)
-    check("wyverns listed", "wyvern" in m["PEACE_AGGRESSIVE_WORDS"], True)
+    check("dragons are hostile", m["is_aggressive_species"]("dragon"), True)
+    check("drakes are hostile", m["is_aggressive_species"]("drake"), True)
+    # The manual word list is empty now - the species table covers all of it.
+    check("no manual words needed", m["PEACE_AGGRESSIVE_WORDS"], [])
 
 
 def test_should_peace_honours_the_mode(m):
@@ -424,10 +489,90 @@ def test_out_of_range_history_is_forgotten(m):
           0xF6 in m["_threat_distance"], False)
 
 
-def test_nothing_is_attacked_yet(m):
-    """Detection ships before the attack on purpose - naming the wrong
-    creature is cheap, shooting it is not."""
-    check("attacking is off", m["THREAT_ATTACK"], False)
+def test_self_defence_is_on_and_narrow(m):
+    """Detection shipped before the attack on purpose - naming the wrong
+    creature is cheap, shooting it is not. It is on now, and the gate is what
+    keeps it honest: a hostile notoriety AND closing distance, from the
+    detection half that was checked in game first."""
+    check("attacking is on", m["THREAT_ATTACK"], True)
+    check("and bounded by casts", m["DEFEND_MAX_CASTS"] >= 1, True)
+    check("and by the clock", m["DEFEND_TIMEOUT_MS"] >= 1000, True)
+    check("and it breaks off rather than standing manaless",
+          m["DEFEND_MIN_MANA"] >= 1, True)
+
+
+def test_quarry_is_never_attacked(m):
+    """The species you hold deeds for are the point of the run. However grey
+    and however close, they are quarry, not threats."""
+    class Mob(object):
+        def __init__(self, name):
+            self.Name = name
+            self.Serial = 0x777
+
+    saved = dict(m["_active"])
+    try:
+        m["_active"].clear()
+        m["_active"]["hiryu"] = {"species": {"name": "hiryu"}, "deed": 1}
+        check("a hiryu we hold a deed for is not a threat",
+              m["worth_defending_against"](Mob("a hiryu")), False)
+        check("but one we do not is",
+              m["worth_defending_against"](Mob("a dire wolf")), True)
+    finally:
+        m["_active"].clear()
+        m["_active"].update(saved)
+
+
+def test_something_that_will_not_name_itself_is_not_attacked(m):
+    """Same rule the taming half uses. A missed defence costs hit points; the
+    wrong target costs a pet or a murder count."""
+    class Nameless(object):
+        Name = ""
+        Serial = 0x778
+
+    check("no name, no attack", m["worth_defending_against"](Nameless()), False)
+
+
+def test_the_never_list_is_honoured_by_the_attack_too(m):
+    class Mob(object):
+        def __init__(self, name):
+            self.Name = name
+            self.Serial = 0x779
+
+    saved = list(m["THREAT_NEVER_WORDS"])
+    try:
+        m["THREAT_NEVER_WORDS"][:] = ["snuggles"]
+        check("a named pet is never attacked",
+              m["worth_defending_against"](Mob("Snuggles")), False)
+    finally:
+        m["THREAT_NEVER_WORDS"][:] = saved
+
+
+def test_an_unknown_creature_still_gets_answered(m):
+    """best_spell_against returns None for a species not in the resistance
+    table. Something unidentified walking at you still has to be answered."""
+    check("there is a fallback", bool(m["DEFEND_FALLBACK_SPELL"]), True)
+    spell, school = m["defence_spell"]("something nobody has ever seen")
+    check("which is used", spell, m["DEFEND_FALLBACK_SPELL"])
+    check("with its school", school, m["DEFEND_FALLBACK_SCHOOL"])
+    # And a known one still gets the weighed choice.
+    check("a known species still gets the good spell",
+          m["defence_spell"]("hiryu")[0], "Energy Bolt")
+
+
+def test_an_unqueried_threat_is_not_already_dead(m):
+    """Hits = 0 with HitsMax = 0 means nobody asked, not no health left. The
+    same trap that made a sister script announce a kill and cast nothing."""
+    class Mob(object):
+        def __init__(self, hits, hits_max, ghost=False):
+            self.Hits = hits
+            self.HitsMax = hits_max
+            self.IsGhost = ghost
+
+    dead = m["threat_is_dead"]
+    check("0/0 is unknown, not dead", dead(Mob(0, 0)), False)
+    check("0 of a known maximum is dead", dead(Mob(0, 120)), True)
+    check("a healthy one is not", dead(Mob(120, 120)), False)
+    check("a ghost is", dead(Mob(50, 120, ghost=True)), True)
     import ast
     with open(SCRIPT, encoding="utf-8") as fh:
         tree = ast.parse(fh.read())
@@ -525,7 +670,10 @@ def test_substring_ordering_trap(m):
 
 def test_hiryu_is_peaced_before_taming(m):
     check("hiryu counts as aggressive", m["is_aggressive_species"]("hiryu"), True)
-    check("listed by word", "hiryu" in m["PEACE_AGGRESSIVE_WORDS"], True)
+    check("and so does the lesser one",
+          m["is_aggressive_species"]("a lesser hiryu"), True)
+    check("listed as a species, not a word",
+          "hiryu" in [n.lower() for n in m["AGGRESSIVE_SPECIES"]], True)
 
 
 def test_the_spell_choice_beats_naive_lowest_resistance(m):
@@ -878,12 +1026,20 @@ def main():
     test_friendly_notoriety_is_ignored(module)
     test_never_words_win(module)
     test_out_of_range_history_is_forgotten(module)
-    test_nothing_is_attacked_yet(module)
+    test_self_defence_is_on_and_narrow(module)
+    test_quarry_is_never_attacked(module)
+    test_something_that_will_not_name_itself_is_not_attacked(module)
+    test_the_never_list_is_honoured_by_the_attack_too(module)
+    test_an_unknown_creature_still_gets_answered(module)
+    test_an_unqueried_threat_is_not_already_dead(module)
     test_peace_messages_are_the_servuo_ones(module)
     test_instrument_list_is_real_graphics(module)
     test_find_instrument_only_looks_in_the_pack(module)
     test_should_peace_honours_the_mode(module)
     test_only_the_aggressive_get_peaced(module)
+    test_the_swamp_dragon_is_not_a_dragon_for_this_purpose(module)
+    test_karma_hostiles_are_peaced_by_default(module)
+    test_the_hostile_list_came_from_source(module)
     test_aggressive_mode_still_calms_anything_already_swinging(module)
     test_the_default_is_aggressive_only(module)
     test_peace_failure_never_blocks_taming(module)

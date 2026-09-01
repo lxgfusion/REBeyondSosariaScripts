@@ -46,7 +46,7 @@ import time
 # loaded script even after the file on disk changes, and two debugging rounds
 # have already been spent on a bug that was fixed on disk but not in the folder
 # Razor reads. If this line does not say what you expect, hit Reload.
-SCRIPT_VERSION = "2026-08-16.1"
+SCRIPT_VERSION = "2026-08-29.2"
 
 
 # =============================================================================
@@ -159,7 +159,28 @@ NEVER_TAME_WORDS = [
 # before anything starts swinging. Fighting back comes next, and getting this
 # half wrong means hitting the wrong creature.
 THREAT_DETECTION = True
-THREAT_ATTACK = False             # not implemented yet - see the note above
+
+# SELF-DEFENCE. Anything that is closing on you and is NOT a species you hold
+# a taming deed for gets fought off, then the tame resumes.
+#
+# The gate is deliberately narrow, and it is the detection above that makes it
+# so: a hostile notoriety AND closing distance. This is not "clear the zoo" -
+# it is answering something that has locked on and is walking at you. Quarry
+# is never attacked however grey it looks, and neither is anything named in
+# THREAT_NEVER_WORDS.
+THREAT_ATTACK = True
+
+# The defence has to END - one that runs long is a tame abandoned. Bounded
+# twice, by casts and by the clock.
+DEFEND_MAX_CASTS = 12
+DEFEND_CAST_MS = 2000
+DEFEND_TIMEOUT_MS = 45000
+DEFEND_MIN_MANA = 10              # break off below this rather than stand there
+
+# For a creature the resistance table does not know. Something unidentified
+# walking at you still has to be answered.
+DEFEND_FALLBACK_SPELL = "Magic Arrow"
+DEFEND_FALLBACK_SCHOOL = "magery"
 
 # Notorieties that can count as a threat.
 #   3 attackable/grey   4 criminal   5 enemy/orange   6 murderer/red
@@ -265,13 +286,62 @@ PEACE_WHEN = "aggressive"
 #
 # "wyvern" is listed for shards that have a tameable one; ServUO does not, so
 # it simply never matches there.
-PEACE_AGGRESSIVE_WORDS = [
-    "dragon",       # dragon, greater/frost/serpentine/swamp dragon, dragon wolf
-    "drake",        # drake, cold/crimson/platinum/stygian drake
-    "wyvern",
-    "wyrm",         # shadow wyrm, white wyrm - same family, same temper
-    "hiryu",        # hiryu and lesser hiryu
+# ---------------------------------------------------------------------------
+# WHICH SPECIES ARE HOSTILE
+#
+# EXTRACTED FROM SERVUO, not written from memory - tools/extract_aggressive.py
+# rebuilds it. The signal is the FightMode each creature passes to its base
+# constructor, which is the game's own answer to "does this attack me":
+#
+#     FightMode.Aggressor   fights back only once attacked   -> passive
+#     FightMode.Closest     attacks whatever is nearest      -> HOSTILE
+#     FightMode.Evil/Good   attacks by the PLAYER's karma    -> conditional
+#
+# Looked up BY SPECIES, not by substring. That matters: "dragon" is a substring
+# of "swamp dragon", and the swamp dragon is FightMode.Aggressor - passive. The
+# old five-word list said otherwise in its own comment. Names go through
+# match_species first, which resolves longest-first with word boundaries, so a
+# swamp dragon resolves to "swamp dragon" and is left alone.
+#
+# 54 of the catalogue's 112 species. The old list had five words, so around
+# forty hostile species were being tamed with no peace played at all.
+AGGRESSIVE_SPECIES = [
+    "alligator", "bake kitsune", "blood fox", "cold drake",
+    "corrosive slime", "crimson drake", "dire wolf", "dragon",
+    "dragon wolf", "drake", "dread spider", "dread warhorse", "fire beetle",
+    "fire steed", "frenzied ostard", "frost dragon", "frost mite",
+    "frost spider", "gargoyle pet", "giant ice worm", "giant rat",
+    "giant spider", "giant toad", "greater dragon", "greater mongbat",
+    "hell cat", "hell hound", "hiryu", "ice hound", "imp", "iron beetle",
+    "lava lizard", "lion", "mongbat", "nightmare", "ossein ram",
+    "platinum drake", "predator hellcat", "reptalon", "rune beetle",
+    "scorpion", "sewer rat", "shadow wyrm", "skree", "slime", "slith",
+    "snake", "stone slith", "stygian drake", "triceratops", "tsuki wolf",
+    "white wyrm", "wild tiger", "wolf spider",
 ]
+
+# FightMode.Evil - these attack players of EVIL karma and ignore everyone else.
+# For a good or neutral character they never open hostilities, which is why the
+# old comment called unicorns and ki-rin peaceful; that was right for most
+# people and wrong for some.
+#
+# Peaced anyway by default. The config's own rule applies: a peace played at
+# something docile costs a few seconds, one NOT played at something hostile
+# costs the tame and some hit points. Set this False if your karma is good and
+# you would rather save the time.
+PEACE_KARMA_AGGRESSIVE = True
+KARMA_AGGRESSIVE_SPECIES = [
+    "ki-rin", "serpentine dragon", "unicorn",
+]
+
+# EXTRA names, yours to add, matched as a plain substring the way the old list
+# was. The species table above is the authority; this is for anything it does
+# not know about - a shard's own creature, or something renamed.
+#
+# Left EMPTY on purpose. It used to hold "dragon"/"drake"/"wyvern"/"wyrm"/
+# "hiryu", every one of which the species table now covers properly, and
+# "dragon" was actively wrong: it caught the passive swamp dragon too.
+PEACE_AGGRESSIVE_WORDS = []
 
 # ---------------------------------------------------------------------------
 # KILL ON SIGHT
@@ -283,9 +353,9 @@ PEACE_AGGRESSIVE_WORDS = [
 # only for the full hiryu, and the catalogue confirms it - `hiryu` is in it and
 # `lesser hiryu` is not.
 #
-# NOT ACTED ON YET. THREAT_ATTACK is False and nothing in this script attacks
-# anything, so for now this only decides what gets reported. It is here so the
-# list is settled before the attacking half is written.
+# STILL NOT ACTED ON. THREAT_ATTACK now defends you against things that close
+# on you, but that is self-defence and it is gated on a creature actually
+# coming for you - it is not a hunting list. Nothing seeks these out.
 KILL_ON_SIGHT_WORDS = [
     "lesser hiryu",
 ]
@@ -961,6 +1031,10 @@ def build_species():
     # "dread warhorse" over "horse".
     _patterns.sort(key=lambda pair: -len(pair[0]["name"]))
 
+    # The hostility tables are keyed on the same species names, so they are
+    # built here - after ONLY_ANIMALS/NEVER_ANIMALS have decided what exists.
+    build_aggression()
+
     # Anything EXTRA_ANIMALS adds may collide with a catalogue body. Fold those
     # collisions into AMBIGUOUS_BODIES so they get name-verified too. The
     # hardcoded entries stay regardless of what ONLY_ANIMALS filtered out.
@@ -1483,6 +1557,187 @@ def report_threats(exclude_serial=None):
     return len(coming)
 
 
+def worth_defending_against(mob):
+    """Whether this is something to fight rather than walk away from.
+
+    "Anything not on my list" - the list being the species you hold taming
+    deeds for. Those are the whole point of the run and are never attacked,
+    however grey they look.
+
+    The gate is deliberately narrow. threat_candidates has already required a
+    hostile notoriety AND closing distance, so this is not "clear the zoo": it
+    is something that has locked on and is walking at you.
+    """
+    name = mob_name(mob)
+    if not name:
+        # Refusing to act on a creature that will not name itself is the same
+        # rule the taming half uses. A missed defence costs hit points; the
+        # wrong target costs a pet or a murder count.
+        debug("A threat would not name itself - not attacking it.", HUE_WARN)
+        return False
+
+    if is_never_threat(name):
+        return False
+
+    species = match_species(name)
+    if species is not None and species["name"] in _active:
+        # We hold a deed for it. It is quarry, not a threat.
+        debug("%s is on the deed list - not attacking it." % name)
+        return False
+
+    return True
+
+
+def is_never_threat(name):
+    low = (name or "").strip().lower()
+    if not low:
+        return False
+    for word in THREAT_NEVER_WORDS:
+        word = word.strip().lower()
+        if word and word in low:
+            return True
+    return False
+
+
+def defence_spell(name):
+    """(spell, school) to use on a threat.
+
+    best_spell_against weighs base damage against the species' resistances and
+    is already proven here. A creature it does not know gets the fallback,
+    because an unknown thing walking at you still has to be answered.
+    """
+    chosen = best_spell_against(name)
+    if chosen:
+        return chosen[0], chosen[1]
+    return DEFEND_FALLBACK_SPELL, DEFEND_FALLBACK_SCHOOL
+
+
+def defend_cast(serial, spell, school):
+    """One cast at a threat. False if the cursor never arrived.
+
+    The manual sequence, and the cursor is cleared first: a leaked cursor is
+    silently answered by the next TargetExecute, so the cast goes nowhere and
+    nothing says so.
+    """
+    if not clear_cursor():
+        debug("Target cursor would not clear before defending.", HUE_WARN)
+    try:
+        if school == "magery":
+            Spells.CastMagery(spell)
+        elif school == "necromancy":
+            Spells.CastNecro(spell)
+        elif school == "spellweaving":
+            Spells.CastSpellweaving(spell)
+        elif school == "mysticism":
+            Spells.CastMysticism(spell)
+        else:
+            log("Unknown spell school %r - not defending." % school, HUE_BAD)
+            return False
+    except Exception as err:
+        log("Casting %s failed: %r" % (spell, err), HUE_BAD)
+        return False
+
+    if not Target.WaitForTarget(3000, True):
+        log("No target cursor for %s - the cast did not go out." % spell,
+            HUE_WARN)
+        Target.Cancel()
+        return False
+    Misc.Pause(400)
+    Target.TargetExecute(serial)
+    return True
+
+
+def threat_is_dead(mob):
+    """Whether a threat we can still see is actually dead.
+
+    Hits alone is NOT the test. A mobile the client has never queried reports
+    Hits = 0 AND HitsMax = 0, and 0 there means "nobody asked", not "no health
+    left" - reading that as death makes the fight end before it starts.
+    """
+    try:
+        if bool(getattr(mob, "IsGhost", False)):
+            return True
+    except Exception:
+        pass
+    try:
+        hits = int(getattr(mob, "Hits", 0) or 0)
+        hits_max = int(getattr(mob, "HitsMax", 0) or 0)
+    except Exception:
+        return False
+    if hits_max <= 0:
+        return False        # status unknown - NOT a death
+    return hits <= 0
+
+
+def defend(exclude_serial=None):
+    """Fight off anything closing on you that is not quarry. True if it did.
+
+    Called from the taming loop, so it has to END - a defence that runs long
+    is a tame abandoned. Every loop here is bounded twice, by casts and by the
+    clock.
+    """
+    if not THREAT_ATTACK:
+        return False
+
+    coming = closing_threats(exclude_serial)
+    if not coming:
+        return False
+
+    targets = [mob for mob, _p, _d in coming if worth_defending_against(mob)]
+    if not targets:
+        return False
+
+    mob = targets[0]
+    serial = int(mob.Serial)
+    name = mob_name(mob) or "0x%X" % serial
+    spell, school = defence_spell(name)
+    log("DEFENDING against %s with %s." % (name, spell), HUE_WARN)
+
+    # Ask for the status before reading it - see threat_is_dead.
+    try:
+        Mobiles.WaitForStats(serial, 1500)
+    except Exception:
+        pass
+
+    deadline = time.time() + DEFEND_TIMEOUT_MS / 1000.0
+    casts = 0
+    misses = 0
+    while casts < DEFEND_MAX_CASTS and time.time() < deadline:
+        target = Mobiles.FindBySerial(serial)
+        if target is None:
+            log("%s is gone after %d cast(s)." % (name, casts), HUE_GOOD)
+            return True
+        if threat_is_dead(target):
+            log("%s is down after %d cast(s)." % (name, casts), HUE_GOOD)
+            return True
+        if Player.DistanceTo(target) > THREAT_RANGE:
+            log("%s broke off - back to work." % name, HUE_GOOD)
+            return True
+
+        try:
+            if int(Player.Mana or 0) < DEFEND_MIN_MANA:
+                log("Out of mana mid-defence - breaking off.", HUE_WARN)
+                return True
+        except Exception:
+            pass
+
+        if defend_cast(serial, spell, school):
+            casts += 1
+        else:
+            misses += 1
+            if misses >= 3:
+                log("Three casts in a row did not go out - breaking off "
+                    "rather than standing here.", HUE_BAD)
+                return True
+        Misc.Pause(DEFEND_CAST_MS)
+
+    log("%s is still up after %d cast(s) - leaving it and moving on."
+        % (name, casts), HUE_WARN)
+    # Blacklisted so the next pass does not lock onto the same thing forever.
+    Misc.IgnoreObject(serial)
+    return True
+
+
 # =============================================================================
 # PEACEMAKING
 # =============================================================================
@@ -1523,11 +1778,65 @@ def is_kill_on_sight(name):
     return False
 
 
+# Built once by build_species(), so the lookup is a set test rather than a
+# scan of 57 names on every creature.
+_aggressive = set()
+_karma_aggressive = set()
+
+
+def build_aggression():
+    """Load the hostility tables. Called from build_species()."""
+    _aggressive.clear()
+    _karma_aggressive.clear()
+    for n in AGGRESSIVE_SPECIES:
+        key = (n or "").strip().lower()
+        if key:
+            _aggressive.add(key)
+    for n in KARMA_AGGRESSIVE_SPECIES:
+        key = (n or "").strip().lower()
+        if key:
+            _karma_aggressive.add(key)
+
+    # A name here that is not a real catalogue species would never match, and
+    # would do it silently - which is how a peace list quietly covers nothing.
+    unknown = sorted((_aggressive | _karma_aggressive) - set(_species))
+    if unknown:
+        log("Hostility list names %d species not in the catalogue, which will "
+            "never match: %s" % (len(unknown), ", ".join(unknown)), HUE_WARN)
+
+
 def is_aggressive_species(name):
-    """Whether this creature is one of the naturally aggressive ones."""
+    """Whether this creature attacks without being provoked.
+
+    BY SPECIES, not by substring. match_species resolves longest-first with
+    word boundaries, so "swamp dragon" resolves to the swamp dragon - which is
+    FightMode.Aggressor, passive - instead of being caught by a bare "dragon".
+    The old word list did exactly that, and said so in its own comment.
+
+    PEACE_AGGRESSIVE_WORDS is still honoured afterwards, for anything the
+    catalogue does not know about.
+    """
     low = (name or "").strip().lower()
     if not low:
         return False
+
+    species = match_species(low)
+    if species is not None:
+        key = species["name"]
+        if key in _aggressive:
+            return True
+        if key in _karma_aggressive:
+            # FightMode.Evil - hostile only to players of evil karma.
+            return bool(PEACE_KARMA_AGGRESSIVE)
+        # A species the catalogue KNOWS and did not list is passive. Do not
+        # fall through to the substring list and let "dragon" claim it.
+        return _substring_aggressive(low)
+
+    return _substring_aggressive(low)
+
+
+def _substring_aggressive(low):
+    """The old behaviour, for names the catalogue cannot resolve."""
     for word in PEACE_AGGRESSIVE_WORDS:
         word = word.strip().lower()
         if word and word in low:
@@ -1681,6 +1990,12 @@ def watch_attempt(serial):
         if THREAT_DETECTION and time.time() >= next_threat_check:
             next_threat_check = time.time() + 1.0
             report_threats(exclude_serial=serial)
+            # Fighting back RESETS the taming clock: the time spent defending
+            # is not time the tame was failing, and charging it against the
+            # attempt would abandon a tame that was going fine.
+            if defend(exclude_serial=serial):
+                deadline = time.time() + TAME_ATTEMPT_TIMEOUT / 1000.0
+                Journal.Clear()
 
         if journal_hit(MSG_SUCCESS):
             return "success"
