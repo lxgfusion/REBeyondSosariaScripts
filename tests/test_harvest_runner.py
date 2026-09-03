@@ -4470,6 +4470,107 @@ def test_an_unknown_task_result_does_not_mean_stay_here(m):
           'elif result not in ("ok", "full"):' in body, True)
 
 
+
+def test_no_runtime_state_lives_in_the_config_half(m):
+    """THE BUG THAT MADE "move" DO NOTHING IN GAME FOR A WEEK.
+
+    The file splits at the "# HELPERS" seam. The config half is CARRIED
+    FORWARD from each live copy; the code half is REPLACED wholesale. So a
+    piece of state declared above the seam never travels: the splice delivers
+    the code that reads it and not the line that creates it.
+
+    _move_pending was declared above the seam, so take_move() read a name that
+    did not exist. The command raised NameError in all four live copies from
+    the day it shipped, and tested perfectly in the repo - where the line was
+    present all along.
+
+    Anything the code half uses belongs in the code half.
+    """
+    import ast as _ast
+    import re as _re
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+
+    lines = src.splitlines(True)
+    seam = [i for i, l in enumerate(lines) if l.startswith("# HELPERS")]
+    check("there is exactly one seam", len(seam), 1)
+    cfg = "".join(lines[:seam[0]])
+    code = "".join(lines[seam[0]:])
+
+    def assigned(text):
+        out = set()
+        for node in _ast.parse(text).body:
+            if isinstance(node, _ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, _ast.Name):
+                        out.add(t.id)
+        return out
+
+    # Private names are runtime state by this file's own convention.
+    stranded = sorted(n for n in assigned(cfg) if n.startswith("_"))
+    check("no private state above the seam", stranded, [])
+
+    # And every one the code half uses must be DECLARED there, exactly once.
+    for name in ("_move_pending", "_skip_pending", "_greyskull_pending",
+                 "_waypoint", "_routes", "_journal_cursor"):
+        found = _re.findall(r"^%s\s*=" % name, code, _re.M)
+        check("%s is declared in the code half" % name, len(found), 1)
+        check("%s is not also in config" % name,
+              bool(_re.search(r"^%s\s*=" % name, cfg, _re.M)), False)
+
+
+def test_the_manual_override_reaches_the_long_waits(m):
+    """"I have no way to force them to move on." The word was heard from
+    anywhere but only ACTED on inside a walk or a spot loop - and
+    MEDITATION_TIMEOUT alone is 90 seconds of standing still, per recall."""
+    check("there is a bail switch", m["BAIL_ON_COMMAND"] in (True, False), True)
+
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "ensure_mana")
+    called = set()
+    for node in _ast.walk(fn):
+        if isinstance(node, _ast.Call) and getattr(node.func, "id", None):
+            called.add(node.func.id)
+    check("the mana wait honours a spoken command",
+          "bail_requested" in called, True)
+
+    # And it must NOT consume - the structural handlers still need to see it.
+    bail = next(n for n in _ast.walk(tree)
+                if isinstance(n, _ast.FunctionDef) and n.name == "bail_requested")
+    consumed = [n for n in _ast.walk(bail)
+                if isinstance(n, _ast.Call)
+                and getattr(n.func, "id", None) in ("take_skip", "take_move")]
+    check("and does not swallow the word", consumed, [])
+
+
+def test_silence_is_bounded(m):
+    """Every stall so far was reported as "stuck, no output", and each time
+    the question was WHERE - which the script knew and never said."""
+    check("there is a heartbeat", m["HEARTBEAT_MS"] >= 1000, True)
+    check("well inside the waypoint cap",
+          m["HEARTBEAT_MS"] < m["WAYPOINT_HARD_CAP_MS"], True)
+
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    pause = next(n for n in _ast.walk(tree)
+                 if isinstance(n, _ast.FunctionDef)
+                 and n.name == "interruptible_pause")
+    called = set()
+    for node in _ast.walk(pause):
+        if isinstance(node, _ast.Call) and getattr(node.func, "id", None):
+            called.add(node.func.id)
+    check("the pause everything uses emits it", "heartbeat" in called, True)
+
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    check("and the phase is recorded in several places",
+          src.count('phase("') >= 6, True)
+
+
 def main():
     module = load_script()
     test_stop_button_is_not_a_crash(module)
@@ -4499,6 +4600,9 @@ def main():
     test_unloading_in_place_is_never_capped(module)
     test_unload_in_place_only_reports_room_it_really_has(module)
     test_an_unknown_task_result_does_not_mean_stay_here(module)
+    test_no_runtime_state_lives_in_the_config_half(module)
+    test_the_manual_override_reaches_the_long_waits(module)
+    test_silence_is_bounded(module)
     test_page_info(module)
     test_dropoff_smelts_before_the_keys_get_first_refusal(module)
     test_ore_is_not_silently_strandable(module)

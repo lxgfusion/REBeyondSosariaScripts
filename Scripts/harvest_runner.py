@@ -50,7 +50,7 @@ Misc.Pause(5000)
 # This script has FOUR copies that differ on purpose (repo, main character,
 # MrGatherer, Mystic Gatherer). Give each a distinct SCRIPT_TAG so the banner
 # also says which copy is running, not just which version.
-SCRIPT_VERSION = "2026-08-29.21"
+SCRIPT_VERSION = "2026-08-29.22"
 SCRIPT_TAG = "repo"
 
 
@@ -1339,7 +1339,28 @@ AREA_SPOT_HARD_CAP_MS = 120000
 # This one is measured from arriving at a waypoint and is reset ONLY when the
 # waypoint actually changes. Generous: a productive rune with a full 8x8 bank
 # and a couple of unload trips is legitimately long.
-WAYPOINT_HARD_CAP_MS = 420000
+# Was 420000 (seven minutes). Too long to sit watching a character that has
+# clearly stopped - by the time it fires you have already come to look.
+WAYPOINT_HARD_CAP_MS = 180000
+
+# A HEARTBEAT. If nothing at all has been logged for this long, say what the
+# script thinks it is doing.
+#
+# THIS IS THE ONE THAT WOULD HAVE SAVED THREE ROUNDS OF GUESSING. Every stall
+# so far has been reported as "stuck, no output", and each time the question
+# was WHERE - which the script knew and never said. The phase breadcrumb below
+# is set at the top of every long operation, so a heartbeat names it.
+HEARTBEAT_MS = 20000
+
+# Long helpers - mana, the runebook, the trip home, the keys - check for a
+# spoken "skip"/"move" and give up when they see one.
+#
+# WITHOUT THIS THERE IS NO MANUAL OVERRIDE. The word is heard from anywhere
+# (interruptible_pause scans the journal every 250ms) but it was only ACTED on
+# inside a walk or a spot loop. Everywhere else - and MEDITATION_TIMEOUT alone
+# is 90 seconds of standing still, per recall - it did nothing at all, which is
+# exactly "I have no way to force them to move on".
+BAIL_ON_COMMAND = True
 
 # How many in-place unloads at one waypoint before it is worth SAYING so. Not
 # a limit - going home is not triggered by this - just the point at which a
@@ -1567,35 +1588,62 @@ MINE_ALL = (MINE_SUCCESS + MINE_DEPLETED + MINE_BAD_TARGET +
 # RUNTIME STATE
 # =============================================================================
 
-_armor_blocks_meditation = False
-_passive_notice_shown = False
 
-_vendor_history = {}      # vendor label -> [unix times an order was collected]
-_vendor_ready_at = {}     # vendor label -> unix time it is worth asking again
 
 # Deeds actually handed over during the current vendor round. Counted here
 # rather than from visit_stop's return value, which reports True for an NPC
 # that answered "nothing yet" - a cooldown is a successful visit but not a
 # collection, and only a collection is worth a trip home.
-_collected_this_round = 0
 
-_routes = {}              # job name -> [(page, button, rune name)]
-_waypoint = {}            # job name -> next index into that route
-_lap_done = {}            # job name -> True once the route has wrapped
-_current_job = None
 
-_journal_cursor = 0.0
-_greyskull_pending = False
-_skip_pending = False
-_move_pending = False     # "move" - leave this spot, stay on this rune
-_greyskull_active = False
 
-_axe_serial = None        # the axe last used, so it can be recovered by serial
 
 
 # =============================================================================
 # HELPERS
 # =============================================================================
+
+# ---------------------------------------------------------------
+# RUNTIME STATE
+#
+# BELOW THE SEAM ON PURPOSE. Everything above it is CONFIG, which is
+# carried forward from each live copy rather than replaced; everything
+# here is CODE, replaced wholesale. State that the code half uses must
+# therefore live here, or a splice that adds a new one delivers the
+# code that reads it and not the line that creates it.
+#
+# That is not hypothetical: _move_pending was declared above the seam,
+# so the "move" command raised NameError in every live copy from the
+# day it shipped while testing perfectly in the repo.
+# ---------------------------------------------------------------
+_armor_blocks_meditation = False
+_passive_notice_shown = False
+_vendor_history = {}      # vendor label -> [unix times an order was collected]
+_vendor_ready_at = {}     # vendor label -> unix time it is worth asking again
+_collected_this_round = 0
+_routes = {}              # job name -> [(page, button, rune name)]
+_waypoint = {}            # job name -> next index into that route
+_lap_done = {}            # job name -> True once the route has wrapped
+_current_job = None
+_journal_cursor = 0.0
+_greyskull_pending = False
+_skip_pending = False
+_greyskull_active = False
+_axe_serial = None        # the axe last used, so it can be recovered by serial
+
+
+# "move" - leave this spot, stay on this rune.
+#
+# DECLARED BELOW THE SEAM ON PURPOSE. It lived above it, in the config half,
+# which is carried forward from each live copy rather than replaced - so the
+# splice that added the "move" command never delivered this line, and
+# take_move() read a name that did not exist. The command raised NameError in
+# every live copy from the day it shipped and worked perfectly in the repo,
+# which is why it tested clean and did nothing in game.
+#
+# check_undefined_names caught it. Anything the code half USES belongs in the
+# code half.
+_move_pending = False
 
 _transcript = []
 
@@ -1920,6 +1968,45 @@ def take_move():
     return True
 
 
+# What the script believes it is doing, for the heartbeat. A stall that says
+# "mining area spot 3/14" is a different bug from one that says "waiting for
+# mana", and until now neither said anything.
+_phase = ["starting up"]
+
+
+def phase(text):
+    """Record what is happening. Cheap - no logging, just a breadcrumb."""
+    _phase[0] = text
+
+
+def heartbeat():
+    """Say what we are doing if nothing has been said for a while.
+
+    Hooked into interruptible_pause, which nearly every wait goes through, so
+    silence is bounded even inside an operation that logs nothing of its own.
+    """
+    if not HEARTBEAT_MS:
+        return
+    quiet = (time.time() - _last_line["at"]) * 1000.0
+    if quiet >= HEARTBEAT_MS:
+        log("still working: %s (%ds without a word)"
+            % (_phase[0], quiet / 1000.0), HUE_INFO)
+
+
+def bail_requested():
+    """Has a "skip" or "move" been said? Does NOT consume it.
+
+    Long helpers call this so a spoken command is honoured from ANYWHERE, not
+    only from a walk or a spot loop. Consumption stays with the code that acts
+    on it structurally - mine_sweep for skip, the spot loops for move - so
+    checking here cannot swallow the word before that code sees it.
+    """
+    if not BAIL_ON_COMMAND:
+        return False
+    scan_journal()
+    return bool(_skip_pending or _move_pending)
+
+
 def forget_move():
     """Drop a pending move. Called when the route recalls anyway, so a move
     said just as a rune ended does not eat the first spot of the next one."""
@@ -1985,6 +2072,7 @@ def interruptible_pause(total_ms, slice_ms=250):
         # every trigger - the call-out, "skip" and "move" - and routing it
         # through a poller that can decline to scan is what hid them.
         scan_journal()
+        heartbeat()
 
 
 def checkGreyskull():
@@ -2058,6 +2146,7 @@ def passive_regen(deadline, minimum):
 
 def ensure_mana(minimum=None, reason="travel"):
     """Meditate until there is enough mana. True if the threshold was reached."""
+    phase("waiting for mana")
     global _armor_blocks_meditation
 
     if minimum is None:
@@ -2080,6 +2169,12 @@ def ensure_mana(minimum=None, reason="travel"):
     # server actually complains (MED_HANDS), below.
 
     while time.time() < deadline and Player.Mana < goal:
+        # MEDITATION_TIMEOUT is 90 seconds, and this is reached on every
+        # recall. Standing here uninterruptibly is most of what "he is stuck
+        # and I cannot make him move on" turned out to mean.
+        if bail_requested():
+            log("Mana wait cut short - a command was said.", HUE_WARN)
+            return False
         if Player.IsGhost:
             return False
 
@@ -2105,6 +2200,9 @@ def ensure_mana(minimum=None, reason="travel"):
             last = Player.Mana
             stalled = 0
             while time.time() < deadline and Player.Mana < goal:
+                if bail_requested():
+                    log("Meditation cut short - a command was said.", HUE_WARN)
+                    return False
                 interruptible_pause(MEDITATION_POLL)
                 if Player.Mana > last:
                     last = Player.Mana
@@ -2135,6 +2233,7 @@ def travel_failed_for_mana():
 # =============================================================================
 
 def openAR():
+    phase("opening the runebook")
     if has_gump(AR_GUMPID):
         Misc.Pause(250)
         return True
@@ -3060,6 +3159,7 @@ def refill_keys(on_player_only=False):
 
     True once the pack has room again.
     """
+    phase("emptying into the keys")
     # NOT "return True if the pack has room". Every key with something of its
     # own still in the pack gets a turn.
     #
@@ -3114,6 +3214,7 @@ def refill_keys(on_player_only=False):
 
 
 def smelt():
+    phase("smelting")
     forge = Items.FindByID(FORGE_ID, -1, Player.Backpack.Serial, False, False)
     if forge is None:
         return
@@ -3361,6 +3462,7 @@ def file_bulk_orders():
 
 
 def dropoff():
+    phase("trip home to unload")
     log("Drop-off run.", HUE_INFO)
     if not goFolders(DROP_FOLDER):
         log("Could not reach the drop-off folder.", HUE_BAD)
@@ -3887,6 +3989,7 @@ def validate_vendors(vendors=None):
 
 def vendor_round():
     """Visit every vendor that is due. Returns how many deeds were collected."""
+    phase("vendor round")
     global _collected_this_round
     _collected_this_round = 0
     stops = vendor_stops(validate_vendors(all_vendors()))
@@ -4152,6 +4255,7 @@ def mine_sweep(shovel):
     Answers on the job runner's own terms - "ok" to be called again at this
     same waypoint, "next" when there is nothing left within MINE_AREA_RADIUS.
     """
+    job_label = "Mining area"
     key = sweep_key()
     state = _mine_sweep.get(key)
 
@@ -4201,6 +4305,8 @@ def mine_sweep(shovel):
 
         index = state["next"]
         spot = spots[index]
+        phase("%s spot %d/%d at %d,%d"
+              % (job_label, index + 1, len(spots), spot[0], spot[1]))
 
         if index in state["dead"]:
             state["next"] += 1
@@ -4871,6 +4977,7 @@ def lumber_sweep(axe):
       "full"  the pack is full
       "stop"  no axe left
     """
+    job_label = "Lumber area"
     key = sweep_key()
     state = _lumber_sweep.get(key)
 
@@ -4923,6 +5030,8 @@ def lumber_sweep(axe):
 
         index = state["next"]
         spot = spots[index]
+        phase("%s spot %d/%d at %d,%d"
+              % (job_label, index + 1, len(spots), spot[0], spot[1]))
 
         if index in state["dead"]:
             state["next"] += 1
