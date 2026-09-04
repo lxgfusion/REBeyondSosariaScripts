@@ -373,7 +373,7 @@ def test_it_walks_to_the_corpse(m):
     check("it walks to the corpse", "pathfind_to(" in body, True)
     check("after measuring the distance", "DistanceTo(corpse)" in body, True)
     check("and gives up on one it cannot reach",
-          "Could not get to the corpse" in body, True)
+          "Could not reach the corpse" in body, True)
 
 
 def test_it_waits_for_the_corpse_to_appear(m):
@@ -384,7 +384,7 @@ def test_it_waits_for_the_corpse_to_appear(m):
         src = fh.read()
     body = src[src.index("def harvest_pass("):]
     check("it looks for the corpse before carving",
-          "corpse_in_sight()" in body, True)
+          "claim_corpses()" in body, True)
 
 
 def test_a_cast_that_never_goes_out_is_loud_and_bounded(m):
@@ -400,6 +400,134 @@ def test_a_cast_that_never_goes_out_is_loud_and_bounded(m):
 
     kill = src[src.index("def kill_target("):src.index("def find_dagger(")]
     check("repeated misses stop the loop", "misses[0] >= 3" in kill, True)
+
+
+# --------------------------------------------------------------------------
+# The corpse serial, from a live recording
+#
+# The user recorded the whole sequence in Razor's script recorder:
+#
+#     Spells.CastMagery("Magic Arrow")
+#     Target.WaitForTarget(10000, False)
+#     Target.TargetExecute(4544214)          <- the cow,    0x004556D6
+#     Items.UseItem(0x41D40F5C)              <- the dagger
+#     Target.WaitForTarget(10000, False)
+#     Target.TargetExecute(1139572077)       <- its corpse, 0x43EC7D6D
+#
+# The corpse's serial has NOTHING to do with the mobile's. The first version
+# looked for the mobile's serial, and for that serial with the high bit
+# cleared, among the corpses in range - so it matched none of them, ever, and
+# said nothing about it.
+# --------------------------------------------------------------------------
+
+LIVE_MOBILE = 4544214           # 0x004556D6, the cow
+LIVE_CORPSE = 1139572077        # 0x43EC7D6D, the corpse it left
+
+
+def test_the_corpse_serial_is_not_derived_from_the_mobile(m):
+    """Recorded in game. Neither the serial nor the high-bit-cleared serial is
+    the corpse, so neither may be used to find it."""
+    check("the recorded corpse is not the mobile",
+          LIVE_CORPSE == LIVE_MOBILE, False)
+    check("nor the mobile with the high bit cleared",
+          LIVE_CORPSE == (LIVE_MOBILE & 0x7FFFFFFF), False)
+
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    check("and the script no longer derives one from the other",
+          "0x7FFFFFFF" in src, False)
+    body = src[src.index("def harvest_pass("):]
+    check("harvest_pass does not file the creature's serial as a corpse",
+          "_harvest_corpses.append(serial)" in body, False)
+
+
+def test_a_corpse_is_claimed_by_novelty_and_position(m):
+    """New since the kill AND lying where the creature died. Either test on
+    its own adopts somebody else's kill."""
+    class C(object):
+        def __init__(self, serial, x, y):
+            self.Serial = serial
+            self.Position = type("P", (), {"X": x, "Y": y})()
+            self.Name = "a cow corpse"
+
+    ours = C(LIVE_CORPSE, 100, 100)          # new, on the spot
+    stale = C(0x40000001, 100, 100)          # on the spot, but was here first
+    distant = C(0x40000002, 140, 140)        # new, but nowhere near
+
+    m["_corpses_before"][0] = set([0x40000001])
+    m["_death_pos"][0] = (100, 100)
+    del m["_harvest_corpses"][:]
+    m["corpse_scan"] = lambda: [ours, stale, distant]
+
+    claimed = m["claim_corpses"]()
+    check("exactly one is claimed", claimed, 1)
+    check("and it is the new one on the death spot",
+          list(m["_harvest_corpses"]), [LIVE_CORPSE])
+
+    # Nothing new at all must claim nothing rather than fall back to anything.
+    del m["_harvest_corpses"][:]
+    m["_corpses_before"][0] = set([LIVE_CORPSE, 0x40000001, 0x40000002])
+    check("a kill that left no corpse claims none", m["claim_corpses"](), 0)
+    check("and adopts nothing", list(m["_harvest_corpses"]), [])
+
+    # Without a death position nothing is close enough to anything.
+    del m["_harvest_corpses"][:]
+    m["_corpses_before"][0] = set()
+    m["_death_pos"][0] = None
+    check("an unseen death spot claims nothing", m["claim_corpses"](), 0)
+
+
+def test_no_target_cursor_is_hidden_from_the_player(m):
+    """noshow=True hides the cursor from the client. When the last cast lands
+    as the creature dies the server refuses the target and the cursor stays
+    open - invisibly - and every target the player clicks afterwards is eaten
+    by it. That is what "I can no longer target anything" was.
+
+    The user's own recording uses noshow=False throughout."""
+    import ast as _ast
+    with open(SCRIPT, encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    hidden = []
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Call):
+            continue
+        if getattr(node.func, "attr", None) != "WaitForTarget":
+            continue
+        for arg in node.args[1:]:
+            if isinstance(arg, _ast.Constant) and arg.value is True:
+                hidden.append(node.lineno)
+    check("no WaitForTarget hides its cursor", hidden, [])
+
+
+def test_the_cursor_is_released_however_the_script_ends(m):
+    """The Stop button, an exception, the player dying - none of them may
+    leave a cursor open behind the script."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def main():"):src.index("def run():")]
+    check("main wraps the run in try/finally", "finally:" in body, True)
+    check("and cancels the cursor on the way out",
+          "Target.Cancel()" in body, True)
+    check("and clears the queue", "Target.ClearQueue()" in body, True)
+
+    # A cast whose target is refused must not leave the cursor up either.
+    cast = src[src.index("def cast_at("):src.index("def creature_is_dead(")]
+    check("an unconsumed cast cursor is cancelled",
+          "if Target.HasTarget():" in cast, True)
+
+
+def test_the_carve_failure_says_what_it_saw(m):
+    """Ship a diagnostic before a fix when the cause is not certain. "Carved 0"
+    with no detail is what made this cost a round trip."""
+    check("the diagnostic is on by default",
+          m["HARVEST_CORPSE_DIAGNOSTIC"], True)
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def claim_corpses("):src.index("def carve_corpses(")]
+    check("it names every corpse it rejected",
+          "No corpse matched the kill" in body, True)
+    check("and says when there was none at all",
+          "No corpse in sight at all" in body, True)
 
 
 def main():
@@ -423,6 +551,11 @@ def main():
     test_it_walks_to_the_corpse(module)
     test_it_waits_for_the_corpse_to_appear(module)
     test_a_cast_that_never_goes_out_is_loud_and_bounded(module)
+    test_the_corpse_serial_is_not_derived_from_the_mobile(module)
+    test_a_corpse_is_claimed_by_novelty_and_position(module)
+    test_no_target_cursor_is_hidden_from_the_player(module)
+    test_the_cursor_is_released_however_the_script_ends(module)
+    test_the_carve_failure_says_what_it_saw(module)
 
     failed = 0
     for label, got, want, ok in _checks:

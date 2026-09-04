@@ -50,7 +50,7 @@ import time
 # Printed as the first line at startup. Bump it with every change that goes
 # out - Razor caches the loaded script even after the file on disk changes, so
 # if this does not say what you expect, hit Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-08-22.1"
+SCRIPT_VERSION = "2026-08-22.2"
 
 
 # =============================================================================
@@ -145,8 +145,33 @@ HARVEST_GRAB_COOLDOWN_MS = 3000
 # searched three tiles from where it had killed something ten tiles away.
 HARVEST_CORPSE_RANGE = 2          # how close to stand to carve
 HARVEST_CORPSE_SEARCH = 16        # how far to LOOK for our own corpse
-HARVEST_CORPSE_WAIT_MS = 2500     # for the corpse to appear after the kill
+HARVEST_CORPSE_WAIT_MS = 6000     # for the corpse to appear after the kill
 HARVEST_CARVE_MS = 900
+
+# How far from where the creature was last seen alive its corpse may land and
+# still be considered ours. A body drops on the tile it died on, but the last
+# position the client saw can be a step or two stale, so this is not 1.
+HARVEST_CORPSE_MATCH_TILES = 4
+
+# The corpse graphic, used only as a second opinion when the IsCorpse filter
+# comes back empty. A filter field that matches nothing and a world with no
+# corpses in it look the same from here, and telling them apart mattered.
+HARVEST_CORPSE_ID = 0x2006
+
+# Single steps to try after PathFinding.Go has had its go. Go refuses a tile
+# something is standing on, and a corpse is standing on its own tile.
+HARVEST_CORPSE_STEPS = 6
+
+# Double-click the corpse after carving it, before saying the loot command.
+# Straight from the recorded sequence: carve, open the corpse, then the keys.
+HARVEST_OPEN_CORPSE = True
+HARVEST_OPEN_MS = 700
+
+# Print every corpse in sight, with its name and position, whenever none of
+# them can be matched to the kill. Leave this on: a carve that quietly does
+# nothing is indistinguishable from a kill that quietly did nothing, and
+# telling them apart from in-game was the whole difficulty here.
+HARVEST_CORPSE_DIAGNOSTIC = True
 
 # ---------------------------------------------------------------------------
 # STORAGE KEYS for what the butchering produces
@@ -190,7 +215,10 @@ HARVEST_CONTEXT_NEVER = ["empty", "destroy", "delete", "release", "dye",
 # =============================================================================
 
 def log(text, hue=HUE_INFO):
-    Misc.SendMessage("[Tamer] " + text, hue, False)
+    # Its own prefix. This ran as [Tamer], which is TameAndFill's - and with
+    # both scripts running, a journal read could not tell which one was
+    # speaking. Every line below is diagnosis, so it has to be attributable.
+    Misc.SendMessage("[Leather] " + text, hue, False)
 
 
 def debug(text, hue=HUE_INFO):
@@ -355,10 +383,26 @@ def approach(serial, goal=None, accept=None):
 # =============================================================================
 # Kill, carve, loot, store. See the HARVEST_* config block for what and why.
 
-# Corpses this script created, so nothing else's kill gets carved. Serials of
-# the creatures killed; a corpse is matched to one by its own serial, which UO
-# derives from the mobile's.
+# Corpses this script created, so nothing else's kill gets carved.
+#
+# NOT serials derived from the creature's. A corpse is a fresh Item with a
+# newly allocated serial that has nothing to do with the mobile that left it,
+# so the old test - the mobile's serial, and that serial with the high bit
+# cleared - matched no corpse that has ever existed. Every corpse failed the
+# membership check, carve_corpses walked to none and carved none, and returned
+# 0 without a word.
+#
+# What identifies our corpse instead: it was NOT in sight before the kill, and
+# it lies within a few tiles of where the creature was last seen standing.
 _harvest_corpses = []
+
+# Corpse serials already lying about before this kill. Anything in here is
+# somebody else's, or a kill already carved, and is left alone.
+_corpses_before = [set()]
+
+# Where the creature was last seen alive, so its corpse can be told from any
+# other that turns up in the same moment. None when it was never seen.
+_death_pos = [None]
 
 # When [grab was last said, so the shard's three-second limit is honoured.
 # 0.0 means "never", which is always far enough in the past.
@@ -570,7 +614,12 @@ def cast_at(serial, spell, school):
         log("Casting %s failed: %r" % (spell, err), HUE_BAD)
         return False
 
-    if not Target.WaitForTarget(3000, True):
+    # noshow is FALSE deliberately. It used to be True, which hides the cursor
+    # from the client - so when a cursor was left open (the last cast lands as
+    # the creature dies, TargetExecute is refused, the cursor stays up) the
+    # player could not see it and every subsequent target they clicked was
+    # silently swallowed. A visible cursor is a cursor you can cancel.
+    if not Target.WaitForTarget(3000, False):
         # LOUD, not debug. Nothing else in the round says the cast never
         # happened, and a silent miss here looks exactly like a creature that
         # will not die - which is how the first version read as "it says it is
@@ -581,6 +630,15 @@ def cast_at(serial, spell, school):
         return False
     Misc.Pause(400)
     Target.TargetExecute(serial)
+
+    # The creature can die between the cursor arriving and this landing, in
+    # which case the server refuses the target and the cursor stays open. Left
+    # there it eats the player's next click.
+    Misc.Pause(150)
+    if Target.HasTarget():
+        debug("Cast cursor was not consumed - cancelling it.", HUE_WARN)
+        Target.Cancel()
+        Target.ClearQueue()
     return True
 
 
@@ -644,6 +702,15 @@ def kill_target(serial, label):
             log("%s is gone after %d cast(s) - dead." % (label, casts),
                 HUE_GOOD)
             return "dead"
+
+        # Remember the tile it is standing on, every pass. Once it dies the
+        # mobile is gone and there is nothing left to ask, so the last reading
+        # taken while it was alive is the only clue to which corpse is ours.
+        try:
+            _death_pos[0] = (int(mob.Position.X), int(mob.Position.Y))
+        except Exception:
+            pass
+
         if creature_is_dead(mob):
             log("%s is down after %d cast(s)." % (label, casts), HUE_GOOD)
             return "dead"
@@ -692,27 +759,137 @@ def find_dagger():
     return None
 
 
-def corpse_in_sight():
-    """Has one of our corpses appeared yet?"""
-    f = Items.Filter()
-    f.Enabled = True
-    f.RangeMax = HARVEST_CORPSE_SEARCH
-    f.IsCorpse = 1
+def corpse_scan():
+    """Every corpse in sight, as a list. Empty when there are none.
+
+    Two ways of asking, because a filter field that silently matches nothing
+    would look identical to a world with no corpses in it: the IsCorpse flag
+    first, then the corpse graphic. Whichever answers is reported, so the log
+    says which one worked.
+    """
+    found = []
     try:
-        for corpse in list(Items.ApplyFilter(f) or []):
-            if int(corpse.Serial) in _harvest_corpses:
-                return True
+        f = Items.Filter()
+        f.Enabled = True
+        f.RangeMax = HARVEST_CORPSE_SEARCH
+        f.IsCorpse = 1
+        found = list(Items.ApplyFilter(f) or [])
+    except Exception as err:
+        debug("IsCorpse filter raised %r." % (err,), HUE_WARN)
+    if found:
+        return found
+    try:
+        g = Items.Filter()
+        g.Enabled = True
+        g.RangeMax = HARVEST_CORPSE_SEARCH
+        g.Graphics.Add(HARVEST_CORPSE_ID)
+        found = list(Items.ApplyFilter(g) or [])
+        if found:
+            debug("IsCorpse found none; the 0x%04X graphic found %d."
+                  % (HARVEST_CORPSE_ID, len(found)), HUE_WARN)
+    except Exception as err:
+        debug("Corpse graphic filter raised %r." % (err,), HUE_WARN)
+    return found
+
+
+def corpse_serials():
+    """The serials of every corpse in sight, as a set."""
+    out = set()
+    for corpse in corpse_scan():
+        try:
+            out.add(int(corpse.Serial))
+        except Exception:
+            pass
+    return out
+
+
+def corpse_label(corpse):
+    """A corpse's name, from the tooltip when the name has not loaded.
+
+    Same shape as every other name lookup in these scripts: cheap field first,
+    WaitForProps only when it comes back blank.
+    """
+    try:
+        name = (corpse.Name or "").strip()
+    except Exception:
+        name = ""
+    if name:
+        return name
+    try:
+        Items.WaitForProps(corpse, 800)
+        for line in list(Items.GetPropStringList(corpse) or []):
+            line = (line or "").strip()
+            if line:
+                return line
     except Exception:
         pass
-    return False
+    return ""
+
+
+def claim_corpses():
+    """Adopt any corpse that appeared during this kill. How many were adopted.
+
+    A corpse is ours when BOTH hold:
+      - it was not in sight before the kill started, and
+      - it lies within HARVEST_CORPSE_MATCH_TILES of where the creature was
+        last seen alive.
+
+    Position is required rather than merely preferred. "New since the kill" on
+    its own would adopt anything that died nearby in the same few seconds,
+    including another player's, and carving somebody else's kill is both rude
+    and a good way to be noticed.
+    """
+    before = _corpses_before[0]
+    where = _death_pos[0]
+    adopted = 0
+    seen = []
+    for corpse in corpse_scan():
+        try:
+            serial = int(corpse.Serial)
+            cx, cy = int(corpse.Position.X), int(corpse.Position.Y)
+        except Exception:
+            continue
+        if serial in _harvest_corpses:
+            continue
+
+        fresh = serial not in before
+        if where is None:
+            near, gap = False, -1
+        else:
+            gap = max(abs(cx - where[0]), abs(cy - where[1]))
+            near = gap <= HARVEST_CORPSE_MATCH_TILES
+
+        seen.append((serial, cx, cy, gap, fresh, near, corpse))
+        if fresh and near:
+            _harvest_corpses.append(serial)
+            adopted += 1
+
+    if adopted:
+        return adopted
+
+    if HARVEST_CORPSE_DIAGNOSTIC and seen:
+        # Say what was rejected and why. "Carved 0" with no detail is what made
+        # this cost a round trip in the first place.
+        log("No corpse matched the kill. %d in sight, death spot %s:"
+            % (len(seen), "unknown" if where is None else "%d,%d" % where),
+            HUE_WARN)
+        for serial, cx, cy, gap, fresh, near, corpse in seen[:8]:
+            log("  0x%X %-22s at %d,%d  %s  %s"
+                % (serial, (corpse_label(corpse) or "?")[:22], cx, cy,
+                   "new" if fresh else "was already there",
+                   "unknown gap" if gap < 0 else "%d tiles away" % gap),
+                HUE_WARN)
+    elif HARVEST_CORPSE_DIAGNOSTIC:
+        log("No corpse in sight at all within %d tiles."
+            % HARVEST_CORPSE_SEARCH, HUE_WARN)
+    return 0
 
 
 def carve_corpses():
-    """Carve nearby corpses of things this script killed. Returns how many.
+    """Carve the corpses claim_corpses adopted. Returns how many.
 
-    Only corpses whose serial was recorded at the kill are touched. Somebody
-    else's corpse is somebody else's loot, and carving it uninvited is both
-    rude and a good way to draw attention.
+    Only corpses this script claimed are touched. Somebody else's corpse is
+    somebody else's loot.
     """
     if not _harvest_corpses:
         return 0
@@ -722,51 +899,73 @@ def carve_corpses():
             % (int(HARVEST_DAGGER_SERIAL or 0), HARVEST_DAGGER_ID), HUE_WARN)
         return 0
 
-    f = Items.Filter()
-    f.Enabled = True
-    f.RangeMax = HARVEST_CORPSE_SEARCH
-    f.IsCorpse = 1
-    try:
-        corpses = Items.ApplyFilter(f)
-    except Exception as err:
-        debug("Corpse search failed: %r" % (err,), HUE_WARN)
-        return 0
-
     carved = 0
-    for corpse in list(corpses or []):
-        if int(corpse.Serial) not in _harvest_corpses:
+    for corpse in corpse_scan():
+        try:
+            serial = int(corpse.Serial)
+        except Exception:
+            continue
+        if serial not in _harvest_corpses:
             continue
 
         # WALK TO IT. The kill happens at spell range and carving does not
         # reach that far, so without this the dagger is used on something the
         # server says is too far away - and it says so once, quietly.
-        if Player.DistanceTo(corpse) > HARVEST_CORPSE_RANGE:
-            debug("Walking to the corpse at %d,%d."
-                  % (corpse.Position.X, corpse.Position.Y))
+        distance = Player.DistanceTo(corpse)
+        if distance > HARVEST_CORPSE_RANGE:
+            log("Walking %d tiles to the corpse at %d,%d."
+                % (distance, corpse.Position.X, corpse.Position.Y), HUE_INFO)
             pathfind_to(corpse.Position.X, corpse.Position.Y)
             Misc.Pause(400)
             if Player.DistanceTo(corpse) > HARVEST_CORPSE_RANGE:
-                log("Could not get to the corpse (%d tiles) - leaving it."
+                # One more, a step at a time - PathFinding.Go gives up against
+                # a tile something is standing on, and a corpse pile is
+                # exactly that.
+                for _ in range(HARVEST_CORPSE_STEPS):
+                    if Player.DistanceTo(corpse) <= HARVEST_CORPSE_RANGE:
+                        break
+                    step_toward(corpse)
+                    Misc.Pause(350)
+            if Player.DistanceTo(corpse) > HARVEST_CORPSE_RANGE:
+                log("Could not reach the corpse (%d tiles) - leaving it."
                     % Player.DistanceTo(corpse), HUE_WARN)
                 continue
 
         if not clear_cursor():
             debug("Cursor would not clear before carving.", HUE_WARN)
         Items.UseItem(blade)
-        if not Target.WaitForTarget(3000, True):
-            debug("No cursor for the dagger.", HUE_WARN)
+        # Visible cursor, for the same reason as the cast: a hidden one that is
+        # never consumed eats the player's next click and cannot be seen to.
+        if not Target.WaitForTarget(3000, False):
+            log("No cursor for the dagger - is it still in your pack?",
+                HUE_BAD)
             Target.Cancel()
             break
         Misc.Pause(400)
-        Target.TargetExecute(int(corpse.Serial))
+        Target.TargetExecute(serial)
         Misc.Pause(HARVEST_CARVE_MS)
+        if Target.HasTarget():
+            debug("Carve cursor was not consumed - cancelling it.", HUE_WARN)
+            Target.Cancel()
+            Target.ClearQueue()
         carved += 1
+
+        # Open it. The user's recording double-clicks the corpse straight
+        # after carving and before either storage key, so the loot command has
+        # an open container to work from rather than a closed one.
+        if HARVEST_OPEN_CORPSE:
+            Items.UseItem(corpse)
+            Misc.Pause(HARVEST_OPEN_MS)
+
         try:
-            _harvest_corpses.remove(int(corpse.Serial))
+            _harvest_corpses.remove(serial)
         except ValueError:
             pass
     if carved:
         log("Carved %d corpse(s)." % carved, HUE_GOOD)
+    else:
+        log("Claimed %d corpse(s) but carved none - none could be reached."
+            % len(_harvest_corpses), HUE_WARN)
     return carved
 
 
@@ -808,30 +1007,49 @@ def harvest_pass():
         Misc.IgnoreObject(serial)
         return False
 
+    # Photograph the corpses that are ALREADY here, before anything dies. The
+    # one that is not in this set afterwards is the one we made.
+    _corpses_before[0] = corpse_serials()
+    _death_pos[0] = None
+    try:
+        _death_pos[0] = (int(mob.Position.X), int(mob.Position.Y))
+    except Exception:
+        pass
+    debug("%d corpse(s) here before the kill." % len(_corpses_before[0]))
+
     outcome = kill_target(serial, label)
     if outcome != "dead":
         Misc.IgnoreObject(serial)
         return False
 
-    # A corpse carries the mobile's serial with the high bit cleared, but that
-    # is a client-side convention rather than a promise - so BOTH are recorded
-    # and carve_corpses matches on either.
-    _harvest_corpses.append(serial)
-    _harvest_corpses.append(serial & 0x7FFFFFFF)
-
-    # The corpse does not exist the instant the creature does. Waiting for it
-    # to turn up beats carving nothing and calling that done.
+    # The corpse does not exist the instant the creature stops existing, so
+    # this waits for one to turn up rather than looking once and calling an
+    # empty look "nothing to carve".
     deadline = time.time() + HARVEST_CORPSE_WAIT_MS / 1000.0
+    claimed = 0
     while time.time() < deadline:
-        if corpse_in_sight():
+        claimed = claim_corpses()
+        if claimed:
             break
         Misc.Pause(250)
+    if not claimed:
+        # claim_corpses has already said what it saw and why none of it
+        # matched. One last look after the full wait, in case the corpse
+        # arrived on the very last poll.
+        claimed = claim_corpses()
 
-    carve_corpses()
+    if claimed:
+        debug("Claimed %d corpse(s)." % claimed)
+        carve_corpses()
 
     grab_loot()
 
     store_harvest()
+
+    # Nothing below this line targets anything, so any cursor still open is a
+    # leak - and until this was added it was an INVISIBLE leak that ate every
+    # target the player clicked after the script stopped.
+    clear_cursor()
     Misc.IgnoreObject(serial)
     return True
 
@@ -903,7 +1121,22 @@ def preflight():
 def main():
     if not preflight():
         return
+    try:
+        run()
+    finally:
+        # However this ends - the Stop button, a raised exception, the player
+        # dying - do not walk away holding a target cursor. One left open is
+        # answered by the player's next click, on whatever they click.
+        try:
+            Target.Cancel()
+            Target.ClearQueue()
+            Target.ClearLastandQueue()
+        except Exception:
+            pass
+        log("Stopped. Target cursor released.", HUE_INFO)
 
+
+def run():
     killed = 0
     idle = 0
     while True:
