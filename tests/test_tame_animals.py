@@ -216,11 +216,14 @@ def test_karma_hostiles_are_peaced_by_default(m):
           "unicorn" in [n.lower() for n in m["KARMA_AGGRESSIVE_SPECIES"]], True)
     check("ki-rin too",
           "ki-rin" in [n.lower() for n in m["KARMA_AGGRESSIVE_SPECIES"]], True)
-    check("and they are peaced by default",
-          m["is_aggressive_species"]("a unicorn"), True)
-
+    # PEACE_KARMA_AGGRESSIVE is the USER'S setting and it moves - it is False
+    # in the live copy, which the repo now mirrors. So this drives the flag
+    # both ways rather than pinning whatever value happens to ship.
     saved = m["PEACE_KARMA_AGGRESSIVE"]
     try:
+        m["PEACE_KARMA_AGGRESSIVE"] = True
+        check("with the flag on they are peaced",
+              m["is_aggressive_species"]("a unicorn"), True)
         m["PEACE_KARMA_AGGRESSIVE"] = False
         check("unless you turn it off",
               m["is_aggressive_species"]("a unicorn"), False)
@@ -266,8 +269,14 @@ def test_aggressive_mode_still_calms_anything_already_swinging(m):
         m["PEACE_ENABLED"], m["PEACE_WHEN"] = saved
 
 
-def test_the_default_is_aggressive_only(m):
-    check("default mode", m["PEACE_WHEN"], "aggressive")
+def test_the_species_table_carries_the_hostility(m):
+    # PEACE_WHEN is the user's own tuning - "aggressive" in the repo, "fighting"
+    # live - so the mode it happens to be set to is not asserted here. What is
+    # asserted is the thing a merge could actually break: that the species
+    # table still knows what is hostile.
+    check("it is one of the modes the script understands",
+          m["PEACE_WHEN"] in ("always", "aggressive", "fighting", "never"),
+          True)
     check("dragons are hostile", m["is_aggressive_species"]("dragon"), True)
     check("drakes are hostile", m["is_aggressive_species"]("drake"), True)
     # The manual word list is empty now - the species table covers all of it.
@@ -998,6 +1007,160 @@ def test_catalogue_invariants(m):
     check("0x74 shared", sorted(owners[0x74]), ["dread warhorse", "nightmare"])
 
 
+# --------------------------------------------------------------------------
+# The Leatherman merge
+#
+# Taming takes priority; harvesting is what the script does when there is no
+# taming to do. The failure modes worth guarding are all silent ones: a
+# harvest species quietly getting tamed instead of butchered, "goat" quietly
+# claiming "mountain goat", a second copy of the cast helper quietly keeping
+# the cursor bug, and the fallback quietly never being reached.
+# --------------------------------------------------------------------------
+
+def test_harvest_wins_over_taming_for_a_species_on_both_lists(m):
+    """It cannot be both. Of the two ways to be wrong, taming something you meant
+    to butcher costs a deed slot; butchering something you meant to tame cannot
+    be undone - so identify() refuses it and preflight says so out loud."""
+    check("a cow is a harvest target", m["is_harvest_target"]("a cow"), True)
+    check("so is a goat", m["is_harvest_target"]("a goat"), True)
+
+    src = open(SCRIPT, encoding="utf-8").read()
+    body = src[src.index("def identify("):src.index("def find_candidates(")]
+    # Reported, never raised: a mutation that removes the guard must show up
+    # as a failed check, not as a traceback that hides every check after it.
+    guarded = "is_harvest_target(name)" in body
+    check("identify refuses a harvest species", guarded, True)
+    check("and returns None for it",
+          guarded and body.index("is_harvest_target(name)")
+          < body.rindex("return None"), True)
+
+    pf = src[src.index("def harvest_preflight("):src.index("def main(")]
+    check("preflight warns when a species is on both lists",
+          "on BOTH lists" in pf, True)
+
+
+def test_goat_does_not_claim_mountain_goat(m):
+    """The `cat` / `hell cat` trap, and this one is live: "goat" is a substring
+    of "mountain goat", which is a different species with real resistances.
+    Excluded twice - by name and by body."""
+    check("a goat is harvested", m["is_harvest_target"]("a goat"), True)
+    check("a mountain goat is NOT",
+          m["is_harvest_target"]("a mountain goat"), False)
+    check("and the trap is real", "goat" in "mountain goat", True)
+
+    # From the script's own catalogue: goat 0xD1, mountain goat 0x58.
+    bodies = m["HARVEST_BODIES"]
+    check("the goat body is searched", 0xD1 in bodies, True)
+    check("the mountain goat body is not", 0x58 in bodies, False)
+    check("cow bodies are both there",
+          0xD8 in bodies and 0xE7 in bodies, True)
+
+
+def test_the_harvest_bodies_match_the_catalogue(m):
+    """The bodies are a pre-filter, not authority - but a wrong one means the
+    filter never offers the creature and the name check never runs. Read them
+    back off the script's own species table rather than trusting the comment."""
+    owners = {}
+    for name, bods, _skill in m["ANIMAL_CATALOGUE"]:
+        for b in bods:
+            owners.setdefault(b, []).append(name)
+    for body in m["HARVEST_BODIES"]:
+        who = owners.get(body, [])
+        check("0x%X belongs to a harvest species (%s)" % (body, who),
+              bool(who) and all(m["is_harvest_target"](n) for n in who), True)
+
+
+def test_there_is_exactly_one_cast_helper(m):
+    """defend_cast and cast_at were the same function, and only one of the two
+    got the cursor fix. Two copies is how the fixed one drifts back."""
+    src = open(SCRIPT, encoding="utf-8").read()
+    check("defend_cast is gone", "def defend_cast(" in src, False)
+    check("cast_at is the one", src.count("def cast_at(") == 1, True)
+
+    import ast as _ast
+    tree = _ast.parse(src)
+    hidden = []
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Call) \
+                and getattr(node.func, "attr", None) == "WaitForTarget":
+            for arg in node.args[1:]:
+                if isinstance(arg, _ast.Constant) and arg.value is True:
+                    hidden.append(node.lineno)
+    check("no cast hides its cursor from the player", hidden, [])
+
+    body = src[src.index("def cast_at("):src.index("def threat_is_dead(")]
+    check("an unconsumed cursor is cancelled",
+          "if Target.HasTarget():" in body, True)
+
+
+def test_taming_gets_first_refusal_every_lap(m):
+    """"Taming takes priority but will kill cows if nothing else is around."
+    The fallback must sit AFTER the candidate search, never before it."""
+    src = open(SCRIPT, encoding="utf-8").read()
+    body = src[src.index("def run():"):]
+    check("the candidate search happens", "find_candidates()" in body, True)
+    check("and the fallback exists", "harvest_fallback()" in body, True)
+    check("the fallback comes after the search",
+          body.index("candidates = find_candidates()")
+          < body.rindex("harvest_fallback()"), True)
+
+    # Reached from all three idle branches, not just the empty-range one:
+    # no deeds, no follower slot, nothing in range.
+    check("it is reached from every idle branch",
+          body.count("harvest_fallback()"), 3)
+
+
+def test_a_harvest_round_defends_itself(m):
+    """defend() is otherwise only reached from inside a taming attempt. A
+    harvest round walks and stands still just as long."""
+    src = open(SCRIPT, encoding="utf-8").read()
+    body = src[src.index("def harvest_pass("):src.index("def preflight(")]
+    check("harvest_pass defends first", "if defend():" in body, True)
+    check("after clearing stale threat distances",
+          body.index("    forget_threats()") < body.index("    if defend():"),
+          True)
+
+
+def test_an_empty_deed_pack_no_longer_stops_the_script(m):
+    """It used to return False from preflight, which with harvesting merged in
+    would mean an empty pack silently switched the whole script off."""
+    src = open(SCRIPT, encoding="utf-8").read()
+    body = src[src.index("def preflight("):src.index("def harvest_preflight(")]
+    check("harvest-only mode exists", "harvest-only mode" in body, True)
+    check("and it is preflight that decides",
+          "harvest_preflight()" in body, True)
+
+
+def test_the_cursor_is_released_however_the_script_ends(m):
+    """The Stop button, an exception, the player dying - none may leave a cursor
+    open behind the script. It is answered by the player's next click."""
+    src = open(SCRIPT, encoding="utf-8").read()
+    body = src[src.index("def main():"):src.index("def harvest_fallback(")]
+    check("main wraps the run in try/finally", "finally:" in body, True)
+    check("and cancels the cursor", "Target.Cancel()" in body, True)
+    check("and clears the queue", "Target.ClearQueue()" in body, True)
+
+
+def test_nothing_from_either_script_was_dropped(m):
+    """A merge that loses a function fails only when that line is first reached
+    in game. Every harvest entry point has to still be callable."""
+    for name in ("harvest_pass", "harvest_candidates", "kill_target",
+                 "claim_corpses", "carve_corpses", "store_harvest",
+                 "grab_loot", "find_dagger", "find_stock_key",
+                 "harvest_context_select", "wait_for_mana", "corpse_scan",
+                 "harvest_fallback", "harvest_preflight"):
+        check("%s came across" % name, callable(m.get(name)), True)
+    for name in ("tame", "defend", "peacemake", "add_to_deed", "identify",
+                 "find_candidates", "scan_deeds", "threat_is_dead"):
+        check("%s survived" % name, callable(m.get(name)), True)
+
+    # The donor's copies of these are gone; the host's are what remain.
+    src = open(SCRIPT, encoding="utf-8").read()
+    check("one death test, not two", src.count("def creature_is_dead("), 0)
+    check("one log", src.count("def log("), 1)
+    check("one preflight", src.count("def preflight("), 1)
+
+
 def main():
     module = load_script()
     module["build_species"]()          # populates the name patterns
@@ -1041,7 +1204,16 @@ def main():
     test_karma_hostiles_are_peaced_by_default(module)
     test_the_hostile_list_came_from_source(module)
     test_aggressive_mode_still_calms_anything_already_swinging(module)
-    test_the_default_is_aggressive_only(module)
+    test_the_species_table_carries_the_hostility(module)
+    test_harvest_wins_over_taming_for_a_species_on_both_lists(module)
+    test_goat_does_not_claim_mountain_goat(module)
+    test_the_harvest_bodies_match_the_catalogue(module)
+    test_there_is_exactly_one_cast_helper(module)
+    test_taming_gets_first_refusal_every_lap(module)
+    test_a_harvest_round_defends_itself(module)
+    test_an_empty_deed_pack_no_longer_stops_the_script(module)
+    test_the_cursor_is_released_however_the_script_ends(module)
+    test_nothing_from_either_script_was_dropped(module)
     test_peace_failure_never_blocks_taming(module)
     test_peace_clears_the_cursor_on_every_bail(module)
     test_real_deed(module)

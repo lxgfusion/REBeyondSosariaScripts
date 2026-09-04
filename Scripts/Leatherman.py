@@ -50,7 +50,7 @@ import time
 # Printed as the first line at startup. Bump it with every change that goes
 # out - Razor caches the loaded script even after the file on disk changes, so
 # if this does not say what you expect, hit Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-08-22.2"
+SCRIPT_VERSION = "2026-09-04.1"
 
 
 # =============================================================================
@@ -94,11 +94,22 @@ HARVEST_ENABLED = True
 # Matched as a substring of the creature's NAME, which is what decides. The
 # bodies below are only the cheap filter that finds candidates to name-check -
 # see CLAUDE.md: a body value must never be the sole authority.
-HARVEST_WORDS = ["cow"]
+HARVEST_WORDS = ["cow", "goat"]
 
-# From the catalogue above: ("cow", [0xD8, 0xE7], 11.1). Bodies are shared
-# between species, which is exactly why the name is checked afterwards.
-HARVEST_BODIES = [0xD8, 0xE7]
+# Checked FIRST, and it wins. "goat" is a substring of "mountain goat", which
+# is a different species with real resistances - the same trap as `cat`
+# claiming `hell cat`. Its body (0x58) is not in HARVEST_BODIES either, so it
+# is excluded twice: the filter never offers one, and the name check would
+# refuse it if the filter ever did.
+HARVEST_NEVER_WORDS = ["mountain goat"]
+
+# From the tamer's catalogue, which came out of ServUO source:
+#     ("cow",  [0xD8, 0xE7], 11.1)
+#     ("goat", [0xD1],       11.1)
+# Neither body is shared with anything else in the catalogue - checked - but
+# the name is still what decides. Bodies are shared between species, reused by
+# shards, and have been plain wrong in extracted data before.
+HARVEST_BODIES = [0xD8, 0xE7, 0xD1]
 
 # How far to look for something to harvest.
 HARVEST_RANGE = 12
@@ -419,6 +430,10 @@ def is_harvest_target(name):
     low = (name or "").strip().lower()
     if not low:
         return False
+    for word in HARVEST_NEVER_WORDS:
+        word = word.strip().lower()
+        if word and word in low:
+            return False
     for word in HARVEST_WORDS:
         word = word.strip().lower()
         if word and word in low:
