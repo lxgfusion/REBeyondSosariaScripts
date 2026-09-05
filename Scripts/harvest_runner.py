@@ -50,7 +50,7 @@ Misc.Pause(5000)
 # This script has FOUR copies that differ on purpose (repo, main character,
 # MrGatherer, Mystic Gatherer). Give each a distinct SCRIPT_TAG so the banner
 # also says which copy is running, not just which version.
-SCRIPT_VERSION = "2026-08-29.22"
+SCRIPT_VERSION = "2026-09-04.1"
 SCRIPT_TAG = "repo"
 
 
@@ -710,6 +710,59 @@ SKIP_SELF_ONLY = True
 # here, not less.
 MOVE_PHRASES = ["move"]
 MOVE_SELF_ONLY = True
+
+# The bigger hammer, for when the character is wedged.
+#
+# "move" is polite: it is checked at the points where leaving a spot is
+# convenient, and a walk that is mid-leg finishes the leg first. "stuck" is not
+# polite. It is checked everywhere "move" is AND in the places that used to
+# ignore both - the mana wait, the runebook, the trip home - and the spot it is
+# said on is written off rather than merely left, so the route does not walk
+# back into it on the next lap.
+#
+# THE ONE THING IT CANNOT DO is interrupt PathFinding.Go itself. That call is
+# .NET and blocks; nothing in Python runs while it does. What bounds it is
+# PATH_LEG_TIMEOUT_S, so the worst case between saying "stuck" and the
+# character acting on it is one leg of a walk - about five seconds by default,
+# not the minutes it took before that timeout existed.
+STUCK_PHRASES = ["stuck"]
+STUCK_SELF_ONLY = True
+
+# How many spots at ONE rune may be written off by "stuck" before the whole
+# patch is abandoned and the route recalls onwards.
+#
+# The case this exists for is a cave mouth where the standing grid puts several
+# spots inside the same unreachable dark: writing them off one at a time means
+# saying "stuck" five times at the same rune. 0 disables it - every spot is
+# then written off individually, however many there are.
+STUCK_GIVE_UP = 3
+
+# ---------------------------------------------------------------------------
+# THE NO-PROGRESS WATCHDOG
+#
+# What "stuck" does by hand, this does on a clock. One spot gets this long to
+# produce something - and the clock covers WALKING to it as well as working it,
+# because "it keeps trying to find a path it cannot walk" and "it stands there
+# swinging at nothing" are the same failure from the outside and want the same
+# answer.
+#
+# It is reset by a YIELD and by nothing else. That is the whole point, and it
+# is what the guards it sits beside do not do:
+#
+#   AREA_SPOT_TIMEOUT_MS   is pushed out by a mythril "miss" as well as by ore,
+#                          so on a mythril rune it never expires
+#   AREA_SPOT_HARD_CAP_MS  is two minutes, which is a backstop, not a watchdog
+#   AREA_STUCK_TIMEOUT_MS  only counts standing on one TILE, so a character
+#                          shuffling between two tiles resets it forever
+#
+# 0 disables it and leaves those three as the only bounds.
+AREA_NO_PROGRESS_MS = 30000
+
+# The same clock on a mythril rune. A mythril swing takes eight seconds and
+# legitimately finds nothing most of the time, so 30s there is two or three
+# swings - which is normal, not stuck. Set equal to AREA_NO_PROGRESS_MS to
+# treat them alike.
+AREA_NO_PROGRESS_MYTHRIL_MS = 60000
 
 # Where the call sends you: the runebook folder and the rune inside it.
 ARCANE_FOLDER = ['Arcane']
@@ -1557,6 +1610,23 @@ MINE_BAD_TARGET = [
     "You can't mine that",                  # 501863
     "You have moved too far away",          # 503041
 ]
+
+# The subset of MINE_BAD_TARGET that is about the GROUND rather than about the
+# moment. Checked first, and it is what writes a spot off for good.
+#
+# The distinction matters and was not being made: "You have moved too far away"
+# is transient - the character drifted a tile and the next swing is fine - but
+# it shared an outcome with "You can't mine there", which is a permanent fact
+# about where the character is standing. Treating them alike meant either
+# condemning good spots or, as it actually was, remembering a bad one only when
+# it announced itself on the very first swing.
+#
+# Every string here must also appear in MINE_BAD_TARGET, or the journal will
+# not be cleared for it.
+MINE_CANT_MINE_HERE = [
+    "You can't mine there",                 # 501862
+    "You can't mine that",                  # 501863
+]
 MINE_PACK_FULL = [
     "Your backpack is full",                # 1010481
 ]
@@ -1644,6 +1714,26 @@ _axe_serial = None        # the axe last used, so it can be recovered by serial
 # check_undefined_names caught it. Anything the code half USES belongs in the
 # code half.
 _move_pending = False
+
+# "stuck" - write this spot off and take the next one. Below the seam for the
+# same reason _move_pending is, and that is not a formality: this is a new name
+# being added by a splice, which is exactly the shape of the bug that made
+# "move" a NameError in every live copy while testing clean here.
+_stuck_pending = False
+
+# Set when a "stuck" is consumed, read and cleared by the sweep loop. The word
+# is heard in one place (a walk, a swing loop) and acted on in another (the
+# sweep, which owns the dead-spot list), so it needs a hand-off between them.
+_stuck_spot = [False]
+
+# Sweep key -> how many spots "stuck" has written off at this rune, for
+# STUCK_GIVE_UP.
+_stuck_at_rune = {}
+
+# When the current spot last had something to show for itself - arrival, or the
+# last yield. 0.0 means no spot clock is running, which is the case everywhere
+# walk_to is called from outside a sweep.
+_spot_progress_at = [0.0]
 
 _transcript = []
 
@@ -1911,6 +2001,23 @@ def is_move_line(entry, raw):
     return True
 
 
+def is_stuck_line(entry, raw):
+    """True for a bare "stuck" from whoever is allowed to say it.
+
+    Same whole-line rule as skip and move. "stuck" turns up in conversation
+    less than either of them, but the consequence here is larger - the spot is
+    written off, not merely left - so the matching is no looser.
+    """
+    _channel, _caller, said = parse_chat_line(raw)
+    spoken = (said or raw).strip().strip(".,!?;:'\"").lower()
+    if spoken not in [p.strip().lower() for p in STUCK_PHRASES if p.strip()]:
+        return False
+    if STUCK_SELF_ONLY and not said_by_me(entry, said):
+        debug("Stuck ignored - not said by this character.")
+        return False
+    return True
+
+
 def scan_journal():
     """One pass over the new journal lines, feeding EVERY passive trigger.
 
@@ -1920,7 +2027,7 @@ def scan_journal():
     exactly the sort of fault that shows up once a week and cannot be
     reproduced. Every trigger is checked here, on the same line, in one place.
     """
-    global _greyskull_pending, _skip_pending, _move_pending
+    global _greyskull_pending, _skip_pending, _move_pending, _stuck_pending
     for entry in new_journal_entries():
         raw = getattr(entry, "Text", "") or ""
         if not raw:
@@ -1931,6 +2038,13 @@ def scan_journal():
             log("SKIP heard - leaving this spot for the next rune.", HUE_GOOD)
             Player.HeadMessage(HUE_GOOD, "Skipping...")
             _skip_pending = True
+        elif is_stuck_line(entry, raw):
+            # Before move, because it is the stronger of the two and one line
+            # cannot be both anyway.
+            log("STUCK heard - writing this spot off and taking the next.",
+                HUE_GOOD)
+            Player.HeadMessage(HUE_GOOD, "Stuck - moving on...")
+            _stuck_pending = True
         elif is_move_line(entry, raw):
             # elif: one line cannot be both, and skip is the bigger hammer.
             log("MOVE heard - on to the next spot in this area.", HUE_GOOD)
@@ -1966,6 +2080,106 @@ def take_move():
         return False
     _move_pending = False
     return True
+
+
+def take_stuck():
+    """Scan, then consume the stuck flag. True once per time it was said.
+
+    Consuming it also CONDEMNS the current spot - see stuck_condemned. That
+    pairing is deliberate: every caller that consumes a stuck is abandoning
+    something, and the sweep is the only place that can record which spot it
+    was, so the two halves have to be joined here rather than at each call.
+    """
+    global _stuck_pending
+    scan_journal()
+    if not _stuck_pending:
+        return False
+    _stuck_pending = False
+    _stuck_spot[0] = True
+    return True
+
+
+def condemn_spot(why):
+    """Write the current spot off without a word having been said.
+
+    The watchdog's half of the same action. Kept as one function so a spot
+    abandoned by the clock and a spot abandoned by hand are recorded, logged
+    and remembered identically - two paths to the same outcome that diverge is
+    how one of them ends up not marking the spot dead.
+    """
+    _stuck_spot[0] = True
+    log("Writing this spot off: %s" % why, HUE_WARN)
+
+
+def stuck_condemned():
+    """Was the spot just left condemned? Reads AND clears.
+
+    Only the sweep calls this, once per spot, right after the walk or the work
+    returns. Anywhere else would steal the flag from it.
+    """
+    if not _stuck_spot[0]:
+        return False
+    _stuck_spot[0] = False
+    return True
+
+
+def forget_stuck():
+    """Drop a pending stuck. Called when the route recalls anyway, so a word
+    said as a rune ended does not condemn the first spot of the next one."""
+    global _stuck_pending
+    _stuck_pending = False
+    _stuck_spot[0] = False
+
+
+def start_spot_clock():
+    """Begin the no-progress watchdog for one spot, from right now.
+
+    Called on arrival at a spot, and covering the WALK there as well - the
+    clock is started before walk_to, not after it, because a walk that never
+    arrives is the failure this is meant to catch.
+    """
+    _spot_progress_at[0] = time.time()
+
+
+def stop_spot_clock():
+    """No spot is being worked. walk_to is called from the runebook, the trip
+    home and the vendor round too, and none of those are a spot."""
+    _spot_progress_at[0] = 0.0
+
+
+def note_spot_progress():
+    """Something came out of the ground. Restart the watchdog."""
+    if _spot_progress_at[0]:
+        _spot_progress_at[0] = time.time()
+
+
+def spot_no_progress():
+    """Has this spot gone AREA_NO_PROGRESS_MS with nothing to show?
+
+    False whenever no clock is running, so the shared walk_to is unaffected
+    everywhere it is used outside a sweep.
+    """
+    # Cheapest test first. walk_to runs this every 200ms from the runebook,
+    # the trip home and the vendor round as well as from a sweep, and none of
+    # those have a clock running - so nothing else should be asked.
+    if not _spot_progress_at[0]:
+        return False
+    limit = AREA_NO_PROGRESS_MS
+    if in_mythril_zone():
+        # Eight-second swings that legitimately find nothing most of the time.
+        # Judging them by the same clock as ordinary ore calls a working
+        # mythril rune stuck.
+        limit = AREA_NO_PROGRESS_MYTHRIL_MS
+    if not limit:
+        return False
+    return (time.time() - _spot_progress_at[0]) * 1000.0 >= limit
+
+
+def no_progress_seconds():
+    """How long the current spot has had nothing to show. 0 with no clock."""
+    if not _spot_progress_at[0]:
+        return 0.0
+    return time.time() - _spot_progress_at[0]
 
 
 # What the script believes it is doing, for the heartbeat. A stall that says
@@ -2004,7 +2218,7 @@ def bail_requested():
     if not BAIL_ON_COMMAND:
         return False
     scan_journal()
-    return bool(_skip_pending or _move_pending)
+    return bool(_skip_pending or _move_pending or _stuck_pending)
 
 
 def forget_move():
@@ -2610,6 +2824,11 @@ def goNext(job):
     # here - the area it referred to is gone. Left pending it would be spent
     # on the first spot of the NEXT rune, which is not what was asked for.
     forget_move()
+    # And the same for "stuck", for the same reason plus one: a stuck spent on
+    # the next rune's first spot would also mark that spot dead, so the word
+    # would cost a good spot on a rune it was never said about.
+    forget_stuck()
+    stop_spot_clock()
 
     return ar_recall(button, name)
 
@@ -4107,8 +4326,14 @@ def dig_once(shovel, timeout_ms, mythril=None):
             return "broke"
         if journal_hit(MINE_PACK_FULL):
             return "full"
-        if journal_hit(MINE_BAD_TARGET):
+        # The permanent one FIRST. Both lists match "You can't mine there", so
+        # order is what separates "this ground is no good" from "you drifted a
+        # tile"; the broad list is left as it was so nothing else that reads it
+        # changes meaning.
+        if journal_hit(MINE_CANT_MINE_HERE):
             return "notrock"
+        if journal_hit(MINE_BAD_TARGET):
+            return "moved"
 
         # MYTHRIL FIRST, and specifically before the "You" catch-all below:
         # the failure line begins with "You", so the catch-all would score a
@@ -4320,18 +4545,37 @@ def mine_sweep(shovel):
 
         spot_deadline = time.time() + AREA_SPOT_TIMEOUT_MS / 1000.0
 
+        # Started BEFORE the walk. A spot that is never reached is the failure
+        # this clock exists for, so it has to be running while the walking
+        # happens, not started on arrival.
+        start_spot_clock()
+
         if index > 0 and not walk_to(spot[0], spot[1],
                                      budget_ms(spot_deadline,
                                                MINE_AREA_MOVE_TIMEOUT)):
             debug("Mining area: could not reach spot %d/%d at %d,%d."
                   % (index + 1, len(spots), spot[0], spot[1]), HUE_WARN)
             state["dead"].add(index)
+            stop_spot_clock()
+            if give_up_on_patch(key, state, stuck_condemned(), len(spots)):
+                return "next"
             state["next"] += 1
             continue
 
         outcome = mine_spot(shovel, index, len(spots), state, spot_deadline)
+        stop_spot_clock()
+
+        # Read the condemnation FIRST so it is recorded, but let a full pack
+        # win the return. A "stuck" said at the moment the pack filled would
+        # otherwise recall to the next rune carrying a full load, instead of
+        # going home to unload - the spot is still written off either way.
+        condemned = stuck_condemned()
+        if condemned:
+            state["dead"].add(index)
         if outcome in ("full", "stop"):
             return outcome
+        if give_up_on_patch(key, state, condemned, len(spots)):
+            return "next"
         state["next"] += 1
 
     log("Mining area done: %d swing%s gave ore, %d spot%s walked, %d barren%s."
@@ -4372,6 +4616,14 @@ def mine_spot(shovel, index, total, state, deadline=None):
                 "%ds so far." % (index + 1, total, swings, got, now - started))
         if poll_skip():
             break
+        if take_stuck():
+            log("Mining area: stuck heard on spot %d/%d - writing it off."
+                % (index + 1, total), HUE_WARN)
+            break
+        if spot_no_progress():
+            condemn_spot("%ds on spot %d/%d with no ore (%d swing(s))"
+                         % (no_progress_seconds(), index + 1, total, swings))
+            break
         if take_move():
             # Leave THIS spot only. The sweep advances to the next one; if
             # this was the last, the sweep runs out and recalls by itself.
@@ -4400,6 +4652,11 @@ def mine_spot(shovel, index, total, state, deadline=None):
             got += 1
             state["dug"] += 1
             note_area_yield(state)
+            # Ore is the ONLY thing that resets the watchdog. A "miss" below
+            # pushes the soft deadline out but deliberately does not touch
+            # this, which is what stops a mythril rune from resetting its own
+            # stall clock forever.
+            note_spot_progress()
             # Producing ore is not being stuck. Push the deadline out so the
             # bank is worked until the server says it is empty.
             if deadline is not None:
@@ -4429,8 +4686,20 @@ def mine_spot(shovel, index, total, state, deadline=None):
                                        MINE_BANK, MINE_BANK))
             break
         elif outcome == "notrock":
-            if swings == 1:
-                state["dead"].add(index)
+            # The server said this ground cannot be mined. That is a fact about
+            # the tile and it will be just as true next lap, so the spot is
+            # written off WHENEVER it says so - not only on the first swing,
+            # which is how a spot that announced itself on swing three kept
+            # being walked back to.
+            state["dead"].add(index)
+            log("Mining area: the server says this cannot be mined - writing "
+                "spot %d/%d off." % (index + 1, total), HUE_WARN)
+            break
+        elif outcome == "moved":
+            # Transient: the character drifted out of range. Not the spot's
+            # fault, so it is left alone rather than condemned.
+            debug("Mining area: moved too far away from spot %d/%d."
+                  % (index + 1, total), HUE_WARN)
             break
         elif outcome == "silent":
             if swings == 1:
@@ -4862,6 +5131,17 @@ def walk_to(x, y, timeout_ms=None, accept=None):
         if poll_skip():
             debug("Skip heard mid-walk - stopping.")
             return False
+        if take_stuck():
+            # The spot is condemned, not merely left. Returning False sends the
+            # sweep down the path it already has for an unreachable spot, which
+            # marks it dead - so a cave mouth that swallows the character is
+            # never walked at twice.
+            log("Stuck heard mid-walk - writing %d,%d off." % (x, y), HUE_WARN)
+            return False
+        if spot_no_progress():
+            condemn_spot("%ds walking to %d,%d with nothing to show for it"
+                         % (no_progress_seconds(), x, y))
+            return False
         if take_move():
             # Consumed, not polled. Leaving it set would have the move spent a
             # second time on the next spot - one word, two spots skipped.
@@ -4888,6 +5168,16 @@ def walk_to(x, y, timeout_ms=None, accept=None):
                 return gap <= accept
 
         pathfind_to(x, y)
+
+        # Again, straight after the blocking call. PathFinding.Go runs .NET
+        # code for up to PATH_LEG_TIMEOUT_S and no Python check runs while it
+        # does, so a "stuck" said during a leg is only seen now - and asking
+        # here rather than at the top of the next lap is the difference between
+        # acting on it immediately and waiting out the rest of this iteration.
+        if take_stuck():
+            log("Stuck heard while pathfinding - writing %d,%d off." % (x, y),
+                HUE_WARN)
+            return False
 
         # Rooted to one tile for this long while TRYING to walk means stuck,
         # whatever the pathfinder claims. This is the check that catches a
@@ -4932,6 +5222,8 @@ def sweep_key():
 
 def forget_sweeps():
     """Drop all sweep memory, both jobs."""
+    _stuck_at_rune.clear()
+    stop_spot_clock()
     _lumber_sweep.clear()
     _mine_sweep.clear()
 
@@ -5051,21 +5343,36 @@ def lumber_sweep(axe):
         # hold the character longer than this however it goes wrong.
         spot_deadline = time.time() + AREA_SPOT_TIMEOUT_MS / 1000.0
 
+        # Before the walk - see the mining sweep for why.
+        start_spot_clock()
+
         if index > 0 and not walk_to(spot[0], spot[1],
                                      budget_ms(spot_deadline,
                                                LUMBER_AREA_MOVE_TIMEOUT)):
             debug("Lumber area: could not reach spot %d/%d at %d,%d."
                   % (index + 1, len(spots), spot[0], spot[1]), HUE_WARN)
             state["dead"].add(index)
+            stop_spot_clock()
+            if give_up_on_patch(key, state, stuck_condemned(), len(spots)):
+                return "next"
             state["next"] += 1
             continue
 
         outcome = work_spot(axe, index, len(spots), state, spot_deadline)
+        stop_spot_clock()
+
+        # Recorded first, but a full pack wins the return - see mine_sweep.
+        condemned = stuck_condemned()
+        if condemned:
+            state["dead"].add(index)
 
         if outcome == "full":
             return "full"
         if outcome == "stop":
             return "stop"
+
+        if give_up_on_patch(key, state, condemned, len(spots)):
+            return "next"
 
         state["next"] += 1
 
@@ -5078,6 +5385,30 @@ def lumber_sweep(axe):
         HUE_GOOD)
     end_sweep(state)
     return "next"
+
+
+def give_up_on_patch(key, state, condemned, total):
+    """Count a condemned spot, and say whether the whole patch is a write-off.
+
+    A cave mouth does not swallow one spot, it swallows a cluster of them - the
+    standing grid is arithmetic, so if one lands inside unreachable dark then
+    several of its neighbours do too. Writing them off one at a time means
+    saying "stuck" once per spot at the same rune, which is not what anyone
+    means by the word.
+    """
+    if not condemned:
+        return False
+    count = _stuck_at_rune.get(key, 0) + 1
+    _stuck_at_rune[key] = count
+    if not STUCK_GIVE_UP or count < STUCK_GIVE_UP:
+        log("Spot written off (%d of %d at this rune). %d spot(s) in the area."
+            % (count, STUCK_GIVE_UP or 0, total), HUE_WARN)
+        return False
+    log("%d spots written off at this rune - the whole patch is no good. "
+        "Recalling onwards." % count, HUE_WARN)
+    _stuck_at_rune[key] = 0
+    end_sweep(state)
+    return True
 
 
 def end_sweep(state):
@@ -5128,6 +5459,14 @@ def work_spot(axe, index, total, state, deadline=None):
                 "%ds so far." % (index + 1, total, swings, got, now - started))
         if poll_skip():
             break
+        if take_stuck():
+            log("Lumber area: stuck heard on spot %d/%d - writing it off."
+                % (index + 1, total), HUE_WARN)
+            break
+        if spot_no_progress():
+            condemn_spot("%ds on spot %d/%d with no wood (%d swing(s))"
+                         % (no_progress_seconds(), index + 1, total, swings))
+            break
         if take_move():
             log("Lumber area: moving on from spot %d/%d." % (index + 1, total))
             break
@@ -5149,6 +5488,7 @@ def work_spot(axe, index, total, state, deadline=None):
             got += 1
             state["cut"] += 1
             note_area_yield(state)
+            note_spot_progress()
             # Producing wood is not being stuck - see mine_spot.
             if deadline is not None:
                 deadline = time.time() + AREA_SPOT_TIMEOUT_MS / 1000.0
@@ -5763,6 +6103,20 @@ if __name__ == "__main__":
             'same area - or recall, if it was the last%s.'
             % ("/".join(MOVE_PHRASES),
                " (this character only)" if MOVE_SELF_ONLY else ""), HUE_INFO)
+        log('Say "%s" to write the current spot off for good and take the '
+            'next - honoured mid-walk, worst case one leg (%gs)%s.'
+            % ("/".join(STUCK_PHRASES), PATH_LEG_TIMEOUT_S,
+               " (this character only)" if STUCK_SELF_ONLY else ""), HUE_INFO)
+        if AREA_NO_PROGRESS_MS:
+            log("  It does that by itself after %ds on a spot with nothing to "
+                "show (%ds on mythril)%s."
+                % (AREA_NO_PROGRESS_MS / 1000,
+                   AREA_NO_PROGRESS_MYTHRIL_MS / 1000,
+                   ", and gives up on the whole rune after %d such spots"
+                   % STUCK_GIVE_UP if STUCK_GIVE_UP else ""), HUE_INFO)
+        else:
+            log("  AREA_NO_PROGRESS_MS is 0 - nothing moves on by itself.",
+                HUE_WARN)
 
         # Razor keeps a script loaded between runs, so this state can outlive
         # a Reload - and resuming last run's sweep position would put the

@@ -4512,7 +4512,9 @@ def test_no_runtime_state_lives_in_the_config_half(m):
 
     # And every one the code half uses must be DECLARED there, exactly once.
     for name in ("_move_pending", "_skip_pending", "_greyskull_pending",
-                 "_waypoint", "_routes", "_journal_cursor"):
+                 "_waypoint", "_routes", "_journal_cursor",
+                 "_stuck_pending", "_stuck_spot", "_stuck_at_rune",
+                 "_spot_progress_at"):
         found = _re.findall(r"^%s\s*=" % name, code, _re.M)
         check("%s is declared in the code half" % name, len(found), 1)
         check("%s is not also in config" % name,
@@ -4542,7 +4544,8 @@ def test_the_manual_override_reaches_the_long_waits(m):
                 if isinstance(n, _ast.FunctionDef) and n.name == "bail_requested")
     consumed = [n for n in _ast.walk(bail)
                 if isinstance(n, _ast.Call)
-                and getattr(n.func, "id", None) in ("take_skip", "take_move")]
+                and getattr(n.func, "id", None) in ("take_skip", "take_move",
+                                                    "take_stuck")]
     check("and does not swallow the word", consumed, [])
 
 
@@ -4571,6 +4574,307 @@ def test_silence_is_bounded(m):
           src.count('phase("') >= 6, True)
 
 
+# --------------------------------------------------------------------------
+# "stuck", and the no-progress watchdog
+#
+# One of the caves gets Mr Gatherer walking at dark that cannot be entered or
+# mined. "move" was not enough for it: it is checked where leaving a spot is
+# convenient, and the spot it leaves is taken again on the next lap. "stuck"
+# writes the spot off, and the watchdog does the same thing on a clock so it
+# does not have to be said at all.
+# --------------------------------------------------------------------------
+
+def _say_stuck(m, text, mine=True):
+    """Feed one spoken line through the REAL stuck detector."""
+    saved = {k: m[k] for k in ("Player", "debug")}
+    try:
+        class P(object):
+            Name = "Mr Gatherer"
+
+            def HeadMessage(self, *a, **k):
+                pass
+
+        m["Player"] = P()
+        m["debug"] = lambda *a, **k: None
+        entry = MoveEntry(text, name="Mr Gatherer" if mine else "Someone Else")
+        return m["is_stuck_line"](entry, text)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_stuck_is_matched_on_the_whole_line(m):
+    """The consequence is larger than move's - the spot is written off, not just
+    left - so the matching is no looser."""
+    check("a bare stuck is heard", _say_stuck(m, "stuck"), True)
+    check("capitals do not matter", _say_stuck(m, "Stuck"), True)
+    check("trailing punctuation does not matter", _say_stuck(m, "stuck!"), True)
+
+    for phrase in ("stuck again", "you are stuck", "I think he is stuck",
+                   "unstuck", "stuckness", "get unstuck"):
+        check("%r is NOT a stuck command" % phrase,
+              _say_stuck(m, phrase), False)
+
+
+def test_stuck_is_self_only(m):
+    check("said by this character", _say_stuck(m, "stuck", mine=True), True)
+    check("said by somebody else", _say_stuck(m, "stuck", mine=False), False)
+    check("and the switch exists", m["STUCK_SELF_ONLY"], True)
+
+
+def test_the_three_words_are_distinct(m):
+    words = []
+    for key in ("SKIP_PHRASES", "MOVE_PHRASES", "STUCK_PHRASES"):
+        words.append(set(p.lower() for p in m[key]))
+    check("skip and stuck do not overlap", words[0] & words[2], set())
+    check("move and stuck do not overlap", words[1] & words[2], set())
+
+
+def test_take_stuck_fires_once_and_condemns(m):
+    """Consuming the word and condemning the spot are one action. Splitting them
+    is how a spot gets abandoned without being remembered."""
+    saved = m["_stuck_pending"]
+    saved_scan = m["scan_journal"]
+    try:
+        m["scan_journal"] = lambda: None
+        m["_stuck_spot"][0] = False
+        m["_stuck_pending"] = True
+        check("first call takes it", m["take_stuck"](), True)
+        check("and the spot is condemned", m["_stuck_spot"][0], True)
+        check("second call does not", m["take_stuck"](), False)
+
+        check("the sweep reads it", m["stuck_condemned"](), True)
+        check("and it is cleared by reading", m["stuck_condemned"](), False)
+    finally:
+        m["scan_journal"] = saved_scan
+        m["_stuck_pending"] = saved
+        m["_stuck_spot"][0] = False
+
+
+def test_stuck_reaches_the_long_waits(m):
+    """"No matter if they are trying to pathfind or not." bail_requested is what
+    every long helper checks, so stuck has to be in it - and it must not be
+    consumed there, or the sweep never learns which spot to write off."""
+    import ast as _ast
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    tree = _ast.parse(src)
+    bail = next(n for n in _ast.walk(tree)
+                if isinstance(n, _ast.FunctionDef)
+                and n.name == "bail_requested")
+    names = {n.id for n in _ast.walk(bail) if isinstance(n, _ast.Name)}
+    check("bail_requested sees a pending stuck", "_stuck_pending" in names,
+          True)
+    consumed = [n for n in _ast.walk(bail) if isinstance(n, _ast.Call)
+                and getattr(n.func, "id", None) == "take_stuck"]
+    check("and does not swallow it", consumed, [])
+
+
+def test_the_walk_checks_stuck_after_the_blocking_call(m):
+    """PathFinding.Go is .NET and blocks; no Python check runs while it does. So
+    the check has to happen straight after it returns, not only at the top of
+    the next lap - that is the difference between acting on the word now and
+    waiting out another whole iteration."""
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def walk_to("):src.index("def give_up_on_patch(")]
+    check("the walk reacts to stuck", "take_stuck()" in body, True)
+    check("twice - before and after the pathfinder",
+          body.count("take_stuck()"), 2)
+    check("and one of them is after PathFinding",
+          body.index("pathfind_to(x, y)") < body.rindex("take_stuck()"), True)
+    check("the walk also watches the clock", "spot_no_progress()" in body,
+          True)
+
+
+def test_the_watchdog_needs_a_clock_to_be_running(m):
+    """walk_to is shared - the runebook, the trip home and the vendor round all
+    use it, and none of them is a spot. A watchdog that fired there would
+    abandon a journey."""
+    saved = m["_spot_progress_at"][0]
+    try:
+        m["stop_spot_clock"]()
+        check("no clock, no watchdog", m["spot_no_progress"](), False)
+        check("and no elapsed time to report", m["no_progress_seconds"](), 0.0)
+    finally:
+        m["_spot_progress_at"][0] = saved
+
+
+def test_the_watchdog_fires_and_a_yield_resets_it(m):
+    """The clock is reset by a YIELD and by nothing else. That is what the
+    guards beside it do not do."""
+    import time as _time
+    saved = m["_spot_progress_at"][0]
+    saved_myth = m["in_mythril_zone"]
+    try:
+        m["in_mythril_zone"] = lambda: False
+        limit = m["AREA_NO_PROGRESS_MS"] / 1000.0
+
+        m["start_spot_clock"]()
+        check("a fresh spot is not stuck", m["spot_no_progress"](), False)
+
+        # Wind the clock back past the limit rather than sleeping for it.
+        m["_spot_progress_at"][0] = _time.time() - limit - 1
+        check("past the limit it is", m["spot_no_progress"](), True)
+        check("and it can say how long",
+              m["no_progress_seconds"]() > limit, True)
+
+        m["note_spot_progress"]()
+        check("a yield resets it", m["spot_no_progress"](), False)
+
+        # A yield with no clock running must not start one.
+        m["stop_spot_clock"]()
+        m["note_spot_progress"]()
+        check("and cannot start one from nothing",
+              m["_spot_progress_at"][0], 0.0)
+    finally:
+        m["in_mythril_zone"] = saved_myth
+        m["_spot_progress_at"][0] = saved
+
+
+def test_mythril_gets_a_longer_clock(m):
+    """An 8s swing that legitimately finds nothing most of the time. Judged by
+    the ordinary clock, a working mythril rune reads as stuck."""
+    check("mythril is given longer",
+          m["AREA_NO_PROGRESS_MYTHRIL_MS"] >= m["AREA_NO_PROGRESS_MS"], True)
+    check("and long enough for several swings",
+          m["AREA_NO_PROGRESS_MYTHRIL_MS"] >= 4 * m["MYTHRIL_SWING_TIMEOUT"],
+          True)
+
+    import time as _time
+    saved = m["_spot_progress_at"][0]
+    saved_myth = m["in_mythril_zone"]
+    try:
+        # Long enough to trip the ordinary clock, not the mythril one.
+        m["start_spot_clock"]()
+        m["_spot_progress_at"][0] = _time.time() \
+            - (m["AREA_NO_PROGRESS_MS"] / 1000.0) - 1
+        m["in_mythril_zone"] = lambda: False
+        check("ordinary ground has given up", m["spot_no_progress"](), True)
+        m["in_mythril_zone"] = lambda: True
+        check("mythril has not", m["spot_no_progress"](), False)
+    finally:
+        m["in_mythril_zone"] = saved_myth
+        m["_spot_progress_at"][0] = saved
+
+
+def test_cannot_mine_here_is_told_from_moved_too_far(m):
+    """"You can't mine there" is a fact about the tile. "You have moved too far
+    away" is a fact about the moment. They shared an outcome, so the permanent
+    one was only remembered when it happened to land on the first swing."""
+    permanent = m["MINE_CANT_MINE_HERE"]
+    broad = m["MINE_BAD_TARGET"]
+    check("the permanent list is not empty", bool(permanent), True)
+    check("every string in it is also in the broad list",
+          [s for s in permanent if s not in broad], [])
+    check("and the transient one is NOT in it",
+          [s for s in permanent if "moved too far" in s.lower()], [])
+    check("but is still in the broad list",
+          any("moved too far" in s.lower() for s in broad), True)
+
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    dig = src[src.index("def dig_once("):src.index("def mine_area_spots(")]
+    check("the permanent list is checked first",
+          dig.index("MINE_CANT_MINE_HERE") < dig.index("MINE_BAD_TARGET"),
+          True)
+    check("and they return different outcomes", '"moved"' in dig, True)
+
+    spot = src[src.index("def mine_spot("):src.index("def chop_once(")]
+    check("notrock writes the spot off whenever it is said",
+          'elif outcome == "notrock":\n            # ' in spot
+          and "if swings == 1:\n                state[\"dead\"]" not in spot,
+          True)
+    check("moved does not write it off",
+          spot.index('elif outcome == "moved":')
+          > spot.index('elif outcome == "notrock":'), True)
+
+
+def test_a_rune_of_bad_spots_is_abandoned_whole(m):
+    """A cave mouth swallows a CLUSTER of spots - the standing grid is
+    arithmetic, so if one lands in unreachable dark several neighbours do too.
+    Writing them off one at a time means saying the word once per spot."""
+    check("there is a give-up count", m["STUCK_GIVE_UP"] >= 0, True)
+    if not m["STUCK_GIVE_UP"]:
+        return
+
+    saved_log = m["log"]
+    saved_end = m["end_sweep"]
+    try:
+        m["log"] = lambda *a, **k: None
+        ended = []
+        m["end_sweep"] = lambda state: ended.append(state)
+        m["_stuck_at_rune"].clear()
+        key = ("mine", 7)
+        state = {"dead": set()}
+
+        # Not condemned - nothing is counted at all.
+        check("a spot that was fine counts for nothing",
+              m["give_up_on_patch"](key, state, False, 12), False)
+        check("and nothing was recorded", m["_stuck_at_rune"].get(key, 0), 0)
+
+        results = [m["give_up_on_patch"](key, state, True, 12)
+                   for _ in range(m["STUCK_GIVE_UP"])]
+        check("only the last one gives up on the rune",
+              results, [False] * (m["STUCK_GIVE_UP"] - 1) + [True])
+        check("and the sweep was ended", len(ended), 1)
+        check("the count resets for the next visit",
+              m["_stuck_at_rune"].get(key, 0), 0)
+    finally:
+        m["log"] = saved_log
+        m["end_sweep"] = saved_end
+        m["_stuck_at_rune"].clear()
+
+
+def test_both_sweeps_record_a_condemned_spot(m):
+    """The word is heard in one place and acted on in another. A sweep that
+    forgets to ask leaves the spot alive, and the character walks back into the
+    same dark next lap."""
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    for name, nxt in (("mine_sweep", "def mine_spot("),
+                      ("lumber_sweep", "def give_up_on_patch(")):
+        body = src[src.index("def %s(" % name):src.index(nxt)]
+        check("%s starts the clock before walking" % name,
+              body.index("start_spot_clock()") < body.index("walk_to("), True)
+        check("%s asks whether the spot was condemned" % name,
+              body.count("stuck_condemned()"), 2)
+        # A full pack must go HOME, not recall onwards - the condemnation is
+        # recorded either way, but it must not steal the return.
+        # The two sweeps spell the same test differently.
+        full = min(body.index(form) for form
+                   in ('outcome in ("full", "stop")', 'outcome == "full"')
+                   if form in body)
+        check("%s lets a full pack win the return" % name,
+              full < body.rindex("give_up_on_patch("), True)
+        check("%s can give up on the whole rune" % name,
+              "give_up_on_patch(" in body, True)
+        check("%s stops the clock when it leaves" % name,
+              "stop_spot_clock()" in body, True)
+
+
+def test_a_recall_forgets_a_pending_stuck(m):
+    """A stuck said as the last spot ended would otherwise be spent on the first
+    spot of the NEXT rune - and unlike move, it would mark that spot dead. The
+    word would cost a good spot on a rune it was never said about."""
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    check("the recall drops it", "forget_stuck()" in src, True)
+    body = src[src.index("    forget_move()"):]
+    check("right beside the move it mirrors",
+          body.index("forget_stuck()") < body.index("return ar_recall"), True)
+
+    saved = m["_stuck_pending"]
+    try:
+        m["_stuck_pending"] = True
+        m["_stuck_spot"][0] = True
+        m["forget_stuck"]()
+        check("the flag is gone", m["_stuck_pending"], False)
+        check("and so is the condemnation", m["_stuck_spot"][0], False)
+    finally:
+        m["_stuck_pending"] = saved
+
+
 def main():
     module = load_script()
     test_stop_button_is_not_a_crash(module)
@@ -4587,6 +4891,19 @@ def main():
     test_move_is_self_only(module)
     test_move_and_skip_are_different_words(module)
     test_take_move_fires_once(module)
+    test_stuck_is_matched_on_the_whole_line(module)
+    test_stuck_is_self_only(module)
+    test_the_three_words_are_distinct(module)
+    test_take_stuck_fires_once_and_condemns(module)
+    test_stuck_reaches_the_long_waits(module)
+    test_the_walk_checks_stuck_after_the_blocking_call(module)
+    test_the_watchdog_needs_a_clock_to_be_running(module)
+    test_the_watchdog_fires_and_a_yield_resets_it(module)
+    test_mythril_gets_a_longer_clock(module)
+    test_cannot_mine_here_is_told_from_moved_too_far(module)
+    test_a_rune_of_bad_spots_is_abandoned_whole(module)
+    test_both_sweeps_record_a_condemned_spot(module)
+    test_a_recall_forgets_a_pending_stuck(module)
     test_a_recall_forgets_a_pending_move(module)
     test_move_leaves_the_spot_but_not_the_sweep(module)
     test_the_walk_consumes_rather_than_polls(module)
