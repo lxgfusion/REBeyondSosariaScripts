@@ -89,7 +89,7 @@ import time
 # line in the journal says which copy is actually loaded - two separate
 # debugging rounds were spent on a bug that was already fixed on disk but not
 # in the Scripts folder.
-SCRIPT_VERSION = "2026-08-22.43"
+SCRIPT_VERSION = "2026-09-11.1"
 
 
 # =============================================================================
@@ -194,6 +194,11 @@ STATIONS = [
         "id": 0x151A,
         "hue": 0x0000,
         "context": ["Refill From Stock"],
+        # Which server fill timer this spends. "master" is the safe default:
+        # over-waiting costs two seconds, under-waiting costs the whole
+        # deposit, silently. Change to "key" if this is an ordinary storage
+        # key rather than one of the Master Keys.
+        "timer": "master",
     },
     {
         # Inspected: "Ultimate Power Scroll Book", 0x4093D482, ItemID 0x2259,
@@ -211,6 +216,7 @@ STATIONS = [
         "id": 0x2259,
         "hue": 0x0481,
         "context": ["Refill From Stock"],
+        "timer": "master",
     },
 ]
 
@@ -265,6 +271,10 @@ RUNECRAFT_SERIAL = 0x411CCD22
 RUNECRAFT_ID = 0x2254
 RUNECRAFT_CONTEXT = ["Refill from stock"]
 
+# The Runecrafting Storage is an ordinary storage key, not one of the Master
+# Keys, so it spends the one-second timer. See FILL_RATE_LIMITED.
+RUNECRAFT_TIMER = "key"
+
 # Context entries that must NEVER be chosen by a loose substring match. A
 # storage item's menu can carry something that spends or destroys stock right
 # next to the entry wanted, so an exact label is tried first and a substring
@@ -295,7 +305,7 @@ KEEP_PER_TYPE = 0
 # THIS IS NO LONGER THE ONLY CEILING. Pack space is checked too, and whichever
 # is smaller wins - see PACK_ITEM_LIMIT. Raising this alone will not overfill
 # the pack.
-MAX_ORDERS_PER_RUN = 15
+MAX_ORDERS_PER_RUN = 60
 
 # Orders to fill for ONE resource before moving on to the next.
 #
@@ -312,7 +322,7 @@ MAX_ORDERS_PER_RUN = 15
 # never reached, every lap, with 60,000 iron in the chest. The burst is capped
 # precisely so that cannot happen again. The outer loop still round-robins, so
 # a resource with 400 fillable orders gets 8 a lap, not all of them.
-MAX_ORDERS_PER_RESOURCE = 8
+MAX_ORDERS_PER_RESOURCE = 10
 
 # ---------------------------------------------------------------------------
 # PACK SPACE
@@ -368,7 +378,7 @@ MAX_REWIND_PRESSES = 4
 # 5478-6540 each, so 5000 rejected almost every one of them and the resource
 # looked skipped. This is only a sanity ceiling - the per-resource budget
 # (stock minus KEEP_PER_TYPE) is what actually protects the chest.
-MAX_ORDER_SIZE = 25000
+MAX_ORDER_SIZE = 80000
 
 # ---------------------------------------------------------------------------
 # WHICH of a resource's orders to take
@@ -417,6 +427,14 @@ BOOK_GUMP = 0x06ABCE12
 BOOK_ORDERS_BUTTON = 1          # "Resource Orders..." -> opens the list
 BOOK_FILL_BUTTON = 5            # "Fill from backpack" -> deposits deeds held
 
+# Which server fill timer that button spends - see FILL_RATE_LIMITED. The
+# patch notes rate "the Fill from backpack button in a key, stash or list
+# window" at about once a second, and the order book is a list window, so
+# "key" is the reading. If deeds still go missing on the first press, try
+# "master": the retry will cover either way, this only decides how long the
+# script waits BEFORE finding out.
+BOOK_FILL_TIMER = "key"
+
 
 # =============================================================================
 # CONFIG - COLLECTING A NEW ORDER AT THE HAND-IN
@@ -438,7 +456,7 @@ NEW_ORDER_SETTLE_MS = 1200
 
 # Ceiling per trip, so a menu that answers without ever producing a deed cannot
 # spin. One per hand-in means this only bites if MAX_ORDERS_PER_RUN is raised.
-NEW_ORDER_MAX_PER_TRIP = 30
+NEW_ORDER_MAX_PER_TRIP = 60
 
 # Where new orders are parked for the trip home.
 #
@@ -668,6 +686,7 @@ RESOURCES = [
     {"name": "Fire Ruby",                  "id": 0x3197, "hue": -1},      # 1 orders
     {"name": "Iron Ingots",                "id": 0x1BF2, "hue": 0x0000},  # 1 orders
     {"name": "Turquoise",                  "id": 0x3193, "hue": -1},      # 1 orders
+    {"name": "Raw Ribs",                   "id": 0x09F1, "hue": -1},      # 1 orders
 ]
 
 # Peerless ingredients are spendable to the last one - the obelisks refill them
@@ -1033,6 +1052,61 @@ MOVE_PAUSE_MS = 900             # drag rate limit
 RECALL_SETTLE_MS = 2500
 MEDITATE_TIMEOUT_S = 90
 
+# ---------------------------------------------------------------------------
+# FILL RATE LIMITS - shard change announced 2026-09-11
+#
+# From the patch notes, which are the source for these two numbers:
+#
+#   "Fill from backpack on a storage key (the Refill from stock menu entry, or
+#    the Fill from backpack button in a key, stash or list window) now works
+#    about once per second. Refill from stock on your Master Keys runs about
+#    once every 3 seconds. Clicking again sooner does nothing extra and tells
+#    you how long to wait."
+#
+# "Does nothing extra" is the dangerous half. A refused fill is not an error -
+# the click goes out, the window behaves, and the stock simply does not move -
+# so without a gate the script presses, sees nothing happen, and carries on as
+# though it had worked.
+#
+# TWO timers, not one: the notes describe them separately, and say the Auto
+# Looter's overweight filling shares the Master Keys one. So each fill declares
+# which it spends.
+FILL_RATE_LIMITED = True
+
+# A little over the stated rates. The margin is deliberate - "about" once per
+# second is not a promise, and being 200ms early costs the whole fill while
+# being 200ms late costs 200ms.
+FILL_KEY_COOLDOWN_MS = 1200         # storage keys, stashes, list windows
+FILL_MASTER_COOLDOWN_MS = 3300      # Master Keys
+
+# A fill is verified by RESULT - did the deeds or the stock actually move -
+# and pressed again if it did not. This is what makes the two numbers above
+# safe to be wrong about: if the gate lets a press through too early, the
+# retry catches it.
+FILL_RETRIES = 3
+
+# The server's "you must wait N seconds" line, once it is known. EMPTY ON
+# PURPOSE: nobody has read the real wording off the journal yet, and a guessed
+# server string is worse than none - it would match nothing and look like the
+# message never appeared.
+#
+# FILL_REPORT_REPLY below prints whatever the server actually says after a
+# fill, so this list fills itself the same way the granite hue table did. Paste
+# the line in, and the script will wait exactly as long as it is told instead
+# of the fixed cooldowns above.
+FILL_WAIT_MESSAGES = []
+
+# Print every journal line that arrives in the FILL_REPLY_WINDOW_MS after a
+# fill. That is how the line above gets read off the game. Turn it off once
+# FILL_WAIT_MESSAGES is filled in.
+FILL_REPORT_REPLY = True
+FILL_REPLY_WINDOW_MS = 1500
+
+# How many journal lines to keep for that report. Held in a ring buffer that
+# anything may read WITHOUT consuming - the cursor can only be read once, and
+# a second reader would steal lines from the world-save watcher.
+JOURNAL_KEEP_LINES = 40
+
 
 # =============================================================================
 # SERVER MESSAGES
@@ -1147,6 +1221,19 @@ def tidy_gumps(keep=(), why=""):
 _journal_cursor = [0.0]
 _save_seen_at = [0.0]
 
+# Every journal line scan_journal has seen lately, as (when, text). Read freely
+# - reading this consumes nothing, which is the point: the cursor itself can
+# only be read once and belongs to scan_journal alone.
+_recent_lines = []
+
+# The last "you must wait" the server sent, if FILL_WAIT_MESSAGES knows the
+# wording yet. "seconds" is whatever number was in the line.
+_fill_wait = {"at": 0.0, "text": "", "seconds": 0.0}
+
+# When each server-side fill timer was last spent. The shard runs two - one for
+# storage keys and one for Master Keys - so the script tracks two.
+_last_fill = {"key": 0.0, "master": 0.0}
+
 
 def prime_journal_cursor():
     """Start the cursor at NOW, so lines from before the run are ignored."""
@@ -1174,6 +1261,74 @@ def new_journal_entries():
     return fresh
 
 
+def scan_journal():
+    """One pass over the new journal lines, feeding EVERY passive reader.
+
+    Reading the journal CONSUMES it - new_journal_entries advances the cursor -
+    so there can only ever be one reader. Two would steal lines from each other
+    and both would miss things at random, which is the sort of fault that shows
+    up once a week and cannot be reproduced.
+
+    Every line is also kept in a small ring buffer that anything may read
+    WITHOUT consuming, which is how the fill reply gets reported without
+    becoming a second reader.
+
+    Returns True if a NEW world-save warning was seen in THIS pass. That is an
+    edge, not a level, and the distinction is load-bearing: poll_world_save is
+    an edge trigger, and returning "a warning is outstanding" instead would
+    have it re-fire on every call for the rest of the run - which is the exact
+    fault the timestamp cursor exists to avoid.
+    """
+    saw_save = False
+    for entry in new_journal_entries():
+        text = str(getattr(entry, "Text", "") or "").strip()
+        if not text:
+            continue
+
+        _recent_lines.append((time.time(), text))
+        if len(_recent_lines) > JOURNAL_KEEP_LINES:
+            del _recent_lines[:-JOURNAL_KEEP_LINES]
+
+        low = text.lower()
+
+        if WORLD_SAVE_PAUSE:
+            for phrase in WORLD_SAVE_PHRASES:
+                if phrase.strip().lower() in low:
+                    _save_seen_at[0] = time.time()
+                    log("world save announced: %s" % text[:60], HUE_WARN)
+                    saw_save = True
+                    break
+
+        for phrase in FILL_WAIT_MESSAGES:
+            phrase = phrase.strip().lower()
+            if phrase and phrase in low:
+                _fill_wait["at"] = time.time()
+                _fill_wait["text"] = text
+                _fill_wait["seconds"] = seconds_in(text)
+                break
+
+    return saw_save
+
+
+def seconds_in(text):
+    """The first number in a line, as seconds. 0.0 if there is none.
+
+    The server's refusal says how long to wait. Reading the number out of it
+    beats any fixed cooldown, because it is the server's own answer rather
+    than this script's guess at one.
+    """
+    try:
+        found = re.search(r"(\d+(?:\.\d+)?)", text or "")
+        return float(found.group(1)) if found else 0.0
+    except Exception:
+        return 0.0
+
+
+def recent_lines_since(when):
+    """Journal lines seen since `when`. Does not consume anything."""
+    return [text for stamp, text in _recent_lines if stamp >= when]
+
+
 def poll_world_save():
     """Note a world-save warning. Safe to call anywhere, including in waits.
 
@@ -1181,20 +1336,10 @@ def poll_world_save():
     recurse through whatever was already waiting; the caller decides when it is
     safe to stand still. Returns True if a NEW warning was seen.
     """
+    saw = scan_journal()
     if not WORLD_SAVE_PAUSE:
         return False
-    seen = False
-    for entry in new_journal_entries():
-        text = str(getattr(entry, "Text", "") or "").lower()
-        if not text:
-            continue
-        for phrase in WORLD_SAVE_PHRASES:
-            if phrase.strip().lower() in text:
-                _save_seen_at[0] = time.time()
-                log("world save announced: %s" % text.strip()[:60], HUE_WARN)
-                seen = True
-                break
-    return seen
+    return saw
 
 
 def wait_out_world_save():
@@ -1225,6 +1370,85 @@ def wait_out_world_save():
             _save_seen_at[0] = 0.0
     log("world save over - resuming", HUE_GOOD)
     return True
+
+
+def fill_cooldown_ms(timer):
+    """How long that server timer wants between fills."""
+    return (FILL_MASTER_COOLDOWN_MS if timer == "master"
+            else FILL_KEY_COOLDOWN_MS)
+
+
+def fill_gate(timer, label):
+    """Wait until `timer` will accept another fill. Returns what it waited.
+
+    The whole reason this exists: a refused fill is NOT an error. The click
+    goes out, the window behaves, and the stock simply does not move - so
+    without this the script presses, sees nothing happen, and carries on as
+    though it had worked.
+
+    If the server has told us how long to wait, that wins over the configured
+    cooldown. It is the server's own answer rather than this script's guess at
+    one, and it is right even when the shard retunes the rate again.
+    """
+    if not FILL_RATE_LIMITED:
+        return 0.0
+
+    ready = _last_fill.get(timer, 0.0) + fill_cooldown_ms(timer) / 1000.0
+
+    # A refusal the server actually sent beats the configured guess.
+    if _fill_wait["at"] and _fill_wait["seconds"] > 0:
+        told = _fill_wait["at"] + _fill_wait["seconds"]
+        if told > ready:
+            log("  server said to wait %gs - honouring that over the %gs "
+                "cooldown" % (_fill_wait["seconds"],
+                              fill_cooldown_ms(timer) / 1000.0), HUE_WARN)
+            ready = told
+
+    waited = ready - time.time()
+    if waited <= 0:
+        return 0.0
+    log("  waiting %.1fs for the %s fill timer (%s)"
+        % (waited, timer, label))
+    # Sliced, so the world-save watcher keeps reading while we stand here.
+    deadline = time.time() + waited
+    while time.time() < deadline:
+        Misc.Pause(min(250, max(50, int((deadline - time.time()) * 1000))))
+        scan_journal()
+    return waited
+
+
+def note_fill(timer):
+    """Record that a fill just spent that timer."""
+    _last_fill[timer] = time.time()
+    # The refusal we were honouring, if any, is spent with it.
+    _fill_wait["at"] = 0.0
+    _fill_wait["seconds"] = 0.0
+
+
+def report_fill_reply(label, since):
+    """Print what the server said in reply to a fill.
+
+    This is how FILL_WAIT_MESSAGES gets filled in: the wording is not known
+    here, and a guessed server string is worse than none because it would match
+    nothing and look like the message never appeared. Same shape as the granite
+    hue report - the diagnostic writes its own table entry.
+    """
+    if not FILL_REPORT_REPLY:
+        return []
+    deadline = time.time() + FILL_REPLY_WINDOW_MS / 1000.0
+    while time.time() < deadline:
+        Misc.Pause(250)
+        scan_journal()
+    said = recent_lines_since(since)
+    if said:
+        log("  %s said:" % label)
+        for text in said[-6:]:
+            log("      %s" % text[:100])
+        if not FILL_WAIT_MESSAGES:
+            log("  ^ if one of those is the wait message, put it in "
+                "FILL_WAIT_MESSAGES and the script will obey it exactly.",
+                HUE_WARN)
+    return said
 
 
 def checkpoint(keep=(), why=""):
@@ -3487,7 +3711,8 @@ def refill_runecraft():
             return False
         item = found[0]
 
-    return use_context_item(item, RUNECRAFT_CONTEXT, "Runecrafting Storage")
+    return use_context_item(item, RUNECRAFT_CONTEXT, "Runecrafting Storage",
+                            timer=RUNECRAFT_TIMER)
 
 
 def find_trash_bag():
@@ -3563,8 +3788,26 @@ def trash_junk():
     return binned
 
 
-def use_context_item(item, wanted, label):
-    """Single-click an item and answer one entry from its context menu."""
+def is_fill_entry(label):
+    """Is this menu entry one the shard rate-limits?
+
+    "Refill from stock" and "Fill from backpack" are the two the patch notes
+    name. Matched loosely on purpose: the gate costs a second at worst if this
+    is wrong in one direction, and a silently refused fill if it is wrong in
+    the other.
+    """
+    low = (label or "").strip().lower()
+    return "refill from stock" in low or "fill from backpack" in low
+
+
+def use_context_item(item, wanted, label, timer="key"):
+    """Single-click an item and answer one entry from its context menu.
+
+    `timer` says which server fill timer the entry spends - "key" for an
+    ordinary storage key, "master" for the Master Keys, which the shard rates
+    three times slower. It is only consulted for entries is_fill_entry
+    recognises; everything else on a menu is not rate-limited.
+    """
     Items.SingleClick(item)
     Misc.Pause(SETTLE_MS)
 
@@ -3580,9 +3823,18 @@ def use_context_item(item, wanted, label):
             % (wanted, label), HUE_WARN)
         return False
 
+    fill = is_fill_entry(choice)
+    if fill:
+        fill_gate(timer, label)
+
     log("  selecting %r" % choice, HUE_GOOD)
+    since = time.time()
     Misc.ContextReply(item, choice)
     Misc.Pause(SETTLE_MS)
+
+    if fill:
+        note_fill(timer)
+        report_fill_reply(label, since)
     return True
 
 
@@ -3685,11 +3937,35 @@ def stash_order(deed, bag):
     return True
 
 
-def bag_deeds(bag):
-    """Order deeds sitting inside the order bag."""
+def bag_deeds(bag, reopen=False):
+    """Order deeds sitting inside the order bag.
+
+    `reopen` re-opens the bag first, which is the ONLY real refresh of a
+    Contains list - FindBySerial hands back the same stale snapshot, because
+    Contains is taken when the container is opened and nothing else updates it.
+    See refresh_chest for the chapter and verse.
+
+    It matters here specifically AFTER a fill: the button empties the bag
+    server-side, the snapshot still lists the deeds, and the caller concludes
+    the fill did nothing. It then tips those deeds out into the pack and
+    presses again - so a fill that WORKED ends with the orders loose in the
+    backpack. The shard's new batched redraw makes the contents update land
+    later than it used to, which turns that from occasional into reliable.
+
+    Off by default because most callers are only asking "is there anything to
+    do", where a stale answer costs nothing.
+    """
     if bag is None:
         return []
-    fresh = Items.FindBySerial(int(bag.Serial)) or bag
+    serial = int(bag.Serial)
+    if reopen:
+        try:
+            Items.UseItem(bag)
+            Items.WaitForContents(bag, CONTENTS_TIMEOUT_MS)
+        except Exception:
+            pass
+        Misc.Pause(SETTLE_MS)
+    fresh = Items.FindBySerial(serial) or bag
     return [i for i in list(getattr(fresh, "Contains", None) or [])
             if is_order_deed(i)]
 
@@ -3705,12 +3981,23 @@ def deposit_new_orders():
     are they tipped out into the top level of the pack and the button pressed
     again. That way the common case costs nothing and the other case still
     works.
+
+    TWO shard changes land on this function (2026-09-11):
+
+      * the button is rate-limited to about one press a second, and a refused
+        press is NOT an error - it takes the click and moves nothing - so the
+        press goes through fill_gate and the result is verified by counting
+      * the key window redraws once at the end rather than per section, so the
+        bag's contents update arrives later than it used to, which is why
+        every count here re-opens the bag instead of trusting the snapshot
     """
     if not NEW_ORDER_ENABLED:
         return 0
 
     bag = find_order_bag()
-    held = bag_deeds(bag)
+    # Re-opened: this count is the baseline every later one is measured
+    # against, so a stale one poisons the whole verification.
+    held = bag_deeds(bag, reopen=True)
     loose = [d for d in pack_deeds() if not deed_is_complete(d)]
     if not held and not loose:
         return 0
@@ -3722,6 +4009,18 @@ def deposit_new_orders():
         log("Resource Order Book not found - the new orders stay in the bag.",
             HUE_WARN)
         return 0
+
+    def still_held():
+        """Deeds that have NOT gone into the book yet, bag and pack together.
+
+        The bag is RE-OPENED for this. A fill empties it server-side and the
+        old snapshot still lists every deed, so counting without the reopen
+        reads a successful fill as a failed one - and the recovery for a failed
+        one is to tip the bag out into the pack, which is how deeds that were
+        already safely deposited ended up loose.
+        """
+        return (len(bag_deeds(find_order_bag(), reopen=True))
+                + len([d for d in pack_deeds() if not deed_is_complete(d)]))
 
     def press_fill(book_item):
         # WaitForGump returns True for a gump that is already open, so any
@@ -3735,28 +4034,58 @@ def deposit_new_orders():
         if not has_gump(BOOK_GUMP):
             log("The book's window never opened.", HUE_BAD)
             return False
+
+        # THE RATE LIMIT. "Fill from backpack" is one of the two entries the
+        # shard now throttles, and a refused press is not an error - the button
+        # takes the click, the window behaves, and the deeds simply stay where
+        # they are.
+        fill_gate(BOOK_FILL_TIMER, "order book")
+        since = time.time()
         Gumps.SendAction(BOOK_GUMP, BOOK_FILL_BUTTON)
+        note_fill(BOOK_FILL_TIMER)
         Misc.Pause(SETTLE_MS)
+        report_fill_reply("the book", since)
         return True
 
-    if not press_fill(book):
-        return 0
+    # PRESS, THEN CHECK, THEN PRESS AGAIN. Verifying by RESULT is what makes
+    # the cooldown numbers safe to be wrong about: if the gate lets a press
+    # through too early the server refuses it, nothing moves, and this notices
+    # and waits properly the second time.
+    before = len(held) + len(loose)
+    attempts = 0
+    left = before
+    while attempts < max(1, FILL_RETRIES):
+        attempts += 1
+        if not press_fill(book):
+            break
+        now_left = still_held()
+        if now_left < left:
+            log("  %d deposited on press %d" % (left - now_left, attempts))
+            left = now_left
+        elif attempts > 1:
+            log("  press %d moved nothing either." % attempts, HUE_WARN)
+        else:
+            left = now_left
+        if not left:
+            break
 
-    remaining = bag_deeds(find_order_bag())
-    if remaining:
-        log("%d order(s) are still in the bag - 'Fill from backpack' does not "
-            "reach inside it. Tipping them out and pressing it again."
-            % len(remaining), HUE_WARN)
-        backpack = Player.Backpack
-        for deed in remaining:
-            Items.Move(deed, backpack, -1)
-            Misc.Pause(MOVE_PAUSE_MS)
-        press_fill(book)
-        remaining = bag_deeds(find_order_bag())
+        # Deeds inside the bag may simply be out of the button's reach, which
+        # is a different problem from the rate limit and has its own fix.
+        in_bag = bag_deeds(find_order_bag(), reopen=True)
+        if in_bag:
+            log("%d order(s) are still in the bag - 'Fill from backpack' does "
+                "not reach inside it. Tipping them out and pressing it again."
+                % len(in_bag), HUE_WARN)
+            backpack = Player.Backpack
+            for deed in in_bag:
+                Items.Move(deed, backpack, -1)
+                Misc.Pause(MOVE_PAUSE_MS)
+        elif attempts < max(1, FILL_RETRIES):
+            log("  %d order(s) did not go in - waiting out the fill timer and "
+                "pressing again (attempt %d of %d)."
+                % (left, attempts + 1, max(1, FILL_RETRIES)), HUE_WARN)
 
-    left = len(remaining) + len([d for d in pack_deeds()
-                                 if not deed_is_complete(d)])
-    deposited = (len(held) + len(loose)) - left
+    deposited = before - left
     if deposited > 0:
         log("%d new order(s) deposited into the book" % deposited, HUE_GOOD)
     if left:
@@ -3788,7 +4117,8 @@ def visit_station(station):
             % (label, WORLD_RANGE), HUE_WARN)
         return False
 
-    sent = use_context_item(item, station.get("context", []), label)
+    sent = use_context_item(item, station.get("context", []), label,
+                            timer=station.get("timer", "master"))
 
     # The deposit stop leaves its own window open. One per stop, every lap,
     # is most of what was piling up.
@@ -4168,6 +4498,32 @@ def validate():
             log("station %r has no rune - it will be skipped."
                 % station.get("label", "?"), HUE_BAD)
             ok = False
+
+    # The fill rate limits, said out loud. A silently refused fill is the
+    # failure mode here, so the settings that guard against it are worth a line
+    # rather than being something to go and read in the file.
+    if FILL_RATE_LIMITED:
+        log("fill timers: %gs storage keys, %gs Master Keys, %d attempt(s) "
+            "each, verified by result"
+            % (FILL_KEY_COOLDOWN_MS / 1000.0,
+               FILL_MASTER_COOLDOWN_MS / 1000.0, max(1, FILL_RETRIES)))
+        log("  order book uses the %r timer; %s"
+            % (BOOK_FILL_TIMER,
+               ", ".join("%s=%s" % (s.get("label", "?"),
+                                    s.get("timer", "master"))
+                         for s in STATIONS if s.get("enabled", True))))
+        if FILL_WAIT_MESSAGES:
+            log("  and it obeys the server's own wait message: %s"
+                % ", ".join(repr(m) for m in FILL_WAIT_MESSAGES), HUE_GOOD)
+        else:
+            log("  FILL_WAIT_MESSAGES is empty - the fixed cooldowns above are "
+                "all there is. Watch the journal for the shard's \"wait N "
+                "seconds\" line and paste it in; the script will then obey it "
+                "exactly instead of guessing.", HUE_WARN)
+    else:
+        log("FILL_RATE_LIMITED is OFF - fills will be sent as fast as the "
+            "script can press, and the shard now refuses the extra ones "
+            "silently.", HUE_BAD)
     return ok
 
 

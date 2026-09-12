@@ -1343,11 +1343,21 @@ def test_every_name_came_from_the_book(m):
     """Harvested from all 540 pages by diag_order_names.py on 2026-07-28. The
     previous table was largely invented: 38 entries the book never asks for and
     48 it wants that had no entry at all."""
-    names = set(r["name"] for r in m["RESOURCES"])
+    names = [r["name"] for r in m["RESOURCES"]]
+    unique = set(names)
     # 79 names came from the book harvest; Perfect Emerald is the 80th, added
     # 2026-08-18 from a live chest with 6517 of them in it. See
     # test_gem_entries for why the earlier "leave it out" call was reversed.
-    check("80 names", len(names), 80)
+    #
+    # A FLOOR, not a pin. The user adds entries to the live copy as the book
+    # starts asking for them - Raw Ribs came in that way on 2026-09-11 - and a
+    # test that forbids that is a test that fights its own maintainer. What the
+    # original count was really protecting against was an INVENTED table, and
+    # losing names is the half of that a count can actually catch.
+    check("at least the 80 harvested from the book", len(unique) >= 80, True)
+    check("and no name is listed twice", len(names), len(unique))
+    check("none of them is blank",
+          [n for n in names if not str(n).strip()], [])
     check("shadow iron is 'Shadow Ingots'", "Shadow Ingots" in names, True)
     check("plain leather is 'Regular Leather'",
           "Regular Leather" in names, True)
@@ -1508,7 +1518,12 @@ def test_resource_order_follows_the_book(m):
     leading entries starving the rest."""
     names = [r["name"] for r in m["worked_resources"]()]
     check("busiest first", names[0], "Agapite Granite")
-    check("the single-order gems trail", names[-1], "Turquoise")
+    # The INVARIANT is that the heavy entries lead and the one-order ones
+    # trail - not which particular one is last. Pinning the final name breaks
+    # every time a resource is appended to the live table.
+    tail = names[-6:]
+    check("and the one-order entries trail",
+          "Turquoise" in tail and "Iron Ingots" in tail, True)
     check("ingots present", "Iron Ingots" in names, True)
     check("leather present", "Barbed Leather" in names, True)
 
@@ -1900,7 +1915,13 @@ def test_orders_per_run_is_sane(m):
     """Was 1 while the withdraw/fill mechanics were unproven; raised to 5 after
     a confirmed end-to-end run. All of them ride one recall trip."""
     check("at least one", m["MAX_ORDERS_PER_RUN"] >= 1, True)
-    check("not an unbounded batch", m["MAX_ORDERS_PER_RUN"] <= 25, True)
+    # The ceiling is the user's, and it is 60 live - the weekly competition is
+    # scored on throughput, so a low cap costs them directly. What has to stay
+    # true is that it IS bounded, and that a single resource cannot eat the
+    # whole run on its own.
+    check("still bounded", m["MAX_ORDERS_PER_RUN"] <= 500, True)
+    check("and no one resource can take the whole run",
+          m["MAX_ORDERS_PER_RESOURCE"] <= m["MAX_ORDERS_PER_RUN"], True)
 
 
 def test_reserve_is_off(m):
@@ -3377,8 +3398,20 @@ def test_max_order_size_is_still_a_sanity_ceiling(m):
     """It exists to stop one order draining the chest. If it ever climbs above
     what the budget logic protects, it stops being a ceiling at all."""
     check("there is a ceiling", m["MAX_ORDER_SIZE"] >= 1, True)
-    check("and a stack can hold at least one full order",
-          m["MAX_STACK"] >= m["MAX_ORDER_SIZE"], True)
+
+    # It may exceed one stack, and live it does - 80,000 against a 60,000
+    # stack cap. That is fine BECAUSE fill_deed makes one pass per stack and
+    # re-reads the chest each time, so an order larger than any single stack is
+    # drawn from two. If that ever stops being true, this ceiling starts
+    # accepting orders that cannot be filled, so the two are checked together.
+    if m["MAX_ORDER_SIZE"] > m["MAX_STACK"]:
+        with open(SCRIPT, encoding="utf-8") as fh:
+            body = fh.read()
+        body = body[body.index("def fill_deed("):body.index("def openAR(")]
+        check("an order bigger than a stack still gets a pass per stack",
+              "len(on_hand) + 2" in body, True)
+        check("and the chest is re-read on every pass",
+              body.count("chest_stacks(chests, resource)") >= 2, True)
 
 
 
@@ -3533,6 +3566,250 @@ def test_a_sorted_list_takes_the_first_row_not_the_page_best(m):
           "page_pick" in body, True)
     check("the sort only runs in smallest mode",
           'if ORDER_PICK == "smallest":' in body, True)
+
+
+# --------------------------------------------------------------------------
+# The fill rate limit (shard change, 2026-09-11)
+#
+#   "Fill from backpack on a storage key ... now works about once per second.
+#    Refill from stock on your Master Keys runs about once every 3 seconds.
+#    Clicking again sooner does nothing extra and tells you how long to wait."
+#
+# "Does nothing extra" is the dangerous half. A refused fill is not an error -
+# the click goes out, the window behaves, the stock does not move - so nothing
+# in the script noticed it had failed.
+# --------------------------------------------------------------------------
+
+def test_there_are_two_timers_and_they_differ(m):
+    """The notes describe them separately and say the Auto Looter's overweight
+    filling shares the Master Keys one. One shared timer would under-wait on
+    Master Keys and over-wait on everything else."""
+    check("rate limiting is on", m["FILL_RATE_LIMITED"], True)
+    check("a storage key waits at least the stated second",
+          m["FILL_KEY_COOLDOWN_MS"] >= 1000, True)
+    check("Master Keys wait at least the stated three",
+          m["FILL_MASTER_COOLDOWN_MS"] >= 3000, True)
+    check("and they are not the same timer",
+          m["FILL_MASTER_COOLDOWN_MS"] > m["FILL_KEY_COOLDOWN_MS"], True)
+    check("both are tracked separately",
+          sorted(m["_last_fill"].keys()), ["key", "master"])
+
+    check("the key cooldown leaves a margin over 1s",
+          m["FILL_KEY_COOLDOWN_MS"] > 1000, True)
+    check("and the master one over 3s",
+          m["FILL_MASTER_COOLDOWN_MS"] > 3000, True)
+
+
+def test_the_gate_waits_and_spending_it_resets_it(m):
+    """fill_gate is what stands between two presses. Without it the second one
+    is refused and nothing says so."""
+    clock = _FakeClock()
+    saved_pause = m["Misc"].Pause
+    restore = _with_fakes(m, journal=_FakeJournal(), clock=clock)
+    try:
+        # fill_gate really waits, so the fake clock has to be driven by the
+        # pause - otherwise its loop never ends. Same wiring as the world-save
+        # test above.
+        m["Misc"].Pause = lambda ms: clock.advance(ms / 1000.0)
+        m["_journal_cursor"][0] = 0.0
+        m["_last_fill"]["key"] = 0.0
+        m["_last_fill"]["master"] = 0.0
+        m["_fill_wait"]["at"] = 0.0
+        m["_fill_wait"]["seconds"] = 0.0
+
+        check("a cold timer does not wait", m["fill_gate"]("key", "x"), 0.0)
+
+        m["note_fill"]("key")
+        waited = m["fill_gate"]("key", "x")
+        check("straight after a fill it waits",
+              waited >= (m["FILL_KEY_COOLDOWN_MS"] / 1000.0) - 0.5, True)
+
+        # And the OTHER timer is untouched by it.
+        check("the master timer is independent",
+              m["fill_gate"]("master", "x"), 0.0)
+    finally:
+        m["Misc"].Pause = saved_pause
+        restore()
+
+
+def test_the_servers_own_wait_beats_the_configured_guess(m):
+    """The notes say the refusal "tells you how long to wait". Obeying the
+    number the server sent is right even when the shard retunes the rate
+    again - a fixed cooldown is only ever this script's guess at it."""
+    clock = _FakeClock()
+    saved_pause = m["Misc"].Pause
+    restore = _with_fakes(m, journal=_FakeJournal(), clock=clock)
+    try:
+        m["Misc"].Pause = lambda ms: clock.advance(ms / 1000.0)
+        m["_journal_cursor"][0] = 0.0
+        m["_last_fill"]["key"] = 0.0
+        # A refusal that wants far longer than the configured cooldown.
+        m["_fill_wait"]["at"] = clock.time()
+        m["_fill_wait"]["seconds"] = 9.0
+        waited = m["fill_gate"]("key", "x")
+        check("it waits what it was told, not the 1.2s guess",
+              waited >= 8.0, True)
+
+        # Spending the timer clears the refusal with it.
+        m["note_fill"]("key")
+        check("the refusal is spent too", m["_fill_wait"]["seconds"], 0.0)
+    finally:
+        m["Misc"].Pause = saved_pause
+        restore()
+
+
+def test_the_wait_message_list_ships_empty(m):
+    """NOBODY HAS READ THE REAL WORDING OFF THE JOURNAL YET. A guessed server
+    string is worse than none: it matches nothing and looks exactly like the
+    message never appeared, which is the hardest kind of failure to see.
+
+    This test exists to keep it honest. When the real line is pasted in, this
+    check flips - and that is the moment to delete it."""
+    check("no invented server string", m["FILL_WAIT_MESSAGES"], [])
+    check("but the reader is wired up and ready for one",
+          callable(m.get("seconds_in")), True)
+    check("and the diagnostic that reads it off the game is on",
+          m["FILL_REPORT_REPLY"], True)
+
+
+def test_the_wait_number_is_read_out_of_the_line(m):
+    """Whatever the wording turns out to be, the number in it is the answer."""
+    for text, want in (("You must wait 3 seconds.", 3.0),
+                       ("Please wait 1.5 more seconds", 1.5),
+                       ("You must wait 10 seconds before doing that", 10.0),
+                       ("You cannot do that yet", 0.0),
+                       ("", 0.0)):
+        check("%r -> %gs" % (text, want), m["seconds_in"](text), want)
+
+
+def test_every_fill_entry_is_recognised(m):
+    """Both wordings the patch notes name. Matched loosely on purpose - being
+    wrong one way costs a second, the other way costs the whole fill."""
+    for label in ("Refill from stock", "Refill From Stock",
+                  "  refill from stock  ", "Fill from backpack",
+                  "Fill From Backpack"):
+        check("%r is a fill" % label, m["is_fill_entry"](label), True)
+    for label in ("Open", "Empty", "Rename", "Set Name", "", None):
+        check("%r is not" % label, m["is_fill_entry"](label), False)
+
+
+def test_every_fill_in_the_script_goes_through_the_gate(m):
+    """A fill that skips the gate is a fill that gets silently refused. There
+    are four - the two deposit stations, the runecrafting storage and the order
+    book's button - and they all press through one door."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+
+    ctx = src[src.index("def use_context_item("):
+              src.index("def use_context_mobile(")]
+    check("the context path gates on a fill entry", "fill_gate(" in ctx, True)
+    check("and only when the entry IS a fill", "is_fill_entry(" in ctx, True)
+    check("and records the fill afterwards", "note_fill(" in ctx, True)
+
+    dep = src[src.index("def deposit_new_orders("):
+              src.index("def visit_station(")]
+    # Reported, never raised: a mutation that removes the gate must show as a
+    # failed check, not a traceback that hides every check after it.
+    gated = "fill_gate(" in dep
+    check("the book's button gates too", gated, True)
+    check("before the press, not after",
+          gated and dep.index("fill_gate(") < dep.index("Gumps.SendAction("),
+          True)
+    check("and records it", "note_fill(" in dep, True)
+
+    # Every station declares which timer it spends.
+    for station in m["STATIONS"]:
+        check("station %r declares a timer" % station.get("label"),
+              station.get("timer") in ("key", "master"), True)
+    check("the runecrafting storage declares one",
+          m["RUNECRAFT_TIMER"] in ("key", "master"), True)
+    check("and so does the book", m["BOOK_FILL_TIMER"] in ("key", "master"),
+          True)
+
+
+def test_the_deposit_verifies_by_result_and_presses_again(m):
+    """The cooldown numbers are a guess at "about once per second". Verifying by
+    RESULT is what makes them safe to be wrong about: if the gate lets a press
+    through too early, the server refuses it, nothing moves, and this notices."""
+    check("there is more than one attempt", m["FILL_RETRIES"] >= 2, True)
+
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    dep = src[src.index("def deposit_new_orders("):
+              src.index("def visit_station(")]
+    check("it counts what is still held", "def still_held(" in dep, True)
+    check("and loops on it", "while attempts <" in dep, True)
+    check("bounded by FILL_RETRIES", "FILL_RETRIES" in dep, True)
+    check("and stops as soon as nothing is left",
+          "if not left:" in dep, True)
+
+
+def test_the_bag_is_reopened_before_it_is_believed(m):
+    """Contains is a snapshot taken when the container was opened. A fill empties
+    the bag SERVER-side and the snapshot still lists every deed, so counting
+    without reopening reads a successful fill as a failed one - and the
+    recovery for a failed one is to tip the bag out into the pack. That is how
+    deeds that were already safely deposited ended up loose.
+
+    The shard's new batched redraw ("redraws once at the end instead of once
+    for every section") makes the contents update land later than it used to,
+    which turns that from occasional into reliable."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+
+    bd = src[src.index("def bag_deeds("):src.index("def deposit_new_orders(")]
+    check("bag_deeds can reopen", "reopen=False" in bd, True)
+    check("and reopening really re-opens the container",
+          "Items.UseItem(bag)" in bd and "WaitForContents" in bd, True)
+
+    dep = src[src.index("def deposit_new_orders("):
+              src.index("def visit_station(")]
+    # Every count that a DECISION hangs on must be the fresh kind.
+    check("the baseline count is fresh",
+          "bag_deeds(bag, reopen=True)" in dep, True)
+    check("so is the verification count",
+          "bag_deeds(find_order_bag(), reopen=True)" in dep, True)
+    check("and no count in here trusts the snapshot",
+          "bag_deeds(find_order_bag())" in dep, False)
+
+
+def test_the_journal_still_has_exactly_one_reader(m):
+    """Reading the journal CONSUMES it - the cursor advances - so two readers
+    would steal lines from each other and both would miss things at random.
+    The fill reply is reported off a ring buffer for exactly this reason."""
+    import ast as _ast
+    with open(SCRIPT, encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    readers = []
+    for fn in _ast.walk(tree):
+        if not isinstance(fn, _ast.FunctionDef):
+            continue
+        for node in _ast.walk(fn):
+            if isinstance(node, _ast.Call) \
+                    and getattr(node.func, "id", None) == "new_journal_entries":
+                readers.append(fn.name)
+    check("exactly one function consumes the cursor", sorted(set(readers)),
+          ["scan_journal"])
+    check("and the reply report reads the buffer instead",
+          callable(m.get("recent_lines_since")), True)
+
+
+def test_a_world_save_warning_still_fires_once(m):
+    """scan_journal grew a second job this round. The save watcher is an EDGE
+    trigger - returning "a warning is outstanding" instead of "a new one
+    arrived" would have it re-fire on every call for the rest of the run,
+    which is the exact fault the timestamp cursor exists to avoid."""
+    clock = _FakeClock()
+    journal = _FakeJournal()
+    journal.add("The world will save in 30 seconds", clock.now + 1)
+    restore = _with_fakes(m, journal=journal, clock=clock)
+    try:
+        m["_journal_cursor"][0] = 0.0
+        m["_save_seen_at"][0] = 0.0
+        check("seen once", m["poll_world_save"](), True)
+        check("and not again", m["poll_world_save"](), False)
+    finally:
+        restore()
 
 
 def main():
