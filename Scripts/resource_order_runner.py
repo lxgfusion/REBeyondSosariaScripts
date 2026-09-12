@@ -89,7 +89,7 @@ import time
 # line in the journal says which copy is actually loaded - two separate
 # debugging rounds were spent on a bug that was already fixed on disk but not
 # in the Scripts folder.
-SCRIPT_VERSION = "2026-09-11.1"
+SCRIPT_VERSION = "2026-09-12.1"
 
 
 # =============================================================================
@@ -322,7 +322,7 @@ MAX_ORDERS_PER_RUN = 60
 # never reached, every lap, with 60,000 iron in the chest. The burst is capped
 # precisely so that cannot happen again. The outer loop still round-robins, so
 # a resource with 400 fillable orders gets 8 a lap, not all of them.
-MAX_ORDERS_PER_RESOURCE = 10
+MAX_ORDERS_PER_RESOURCE = 15
 
 # ---------------------------------------------------------------------------
 # PACK SPACE
@@ -1085,16 +1085,47 @@ FILL_MASTER_COOLDOWN_MS = 3300      # Master Keys
 # retry catches it.
 FILL_RETRIES = 3
 
-# The server's "you must wait N seconds" line, once it is known. EMPTY ON
-# PURPOSE: nobody has read the real wording off the journal yet, and a guessed
-# server string is worse than none - it would match nothing and look like the
-# message never appeared.
+# THE SERVER'S REFUSAL, read off the journal 2026-09-12:
 #
-# FILL_REPORT_REPLY below prints whatever the server actually says after a
-# fill, so this list fills itself the same way the granite hue table did. Paste
-# the line in, and the script will wait exactly as long as it is told instead
-# of the fixed cooldowns above.
-FILL_WAIT_MESSAGES = []
+#     "You must wait 0.4 more seconds before you can fill from backpack"
+#
+# What is stored here is the part that DOES NOT CHANGE. The full line was
+# pasted in first and it carried the 0.4 with it - which matches a 0.4-second
+# refusal and nothing else, so a two-second one would have sailed straight
+# past unrecognised. The number is read separately by seconds_in().
+#
+# Matched as a substring, case-insensitively.
+FILL_WAIT_MESSAGES = [
+    "before you can fill from backpack",     # confirmed, the order book
+]
+
+# The same refusal by SHAPE, for the wordings that have not been seen yet - the
+# Master Keys and the storage keys presumably say something similar about
+# "refill from stock", but nobody has read those lines, so they are not typed
+# in here as though they had been.
+#
+# Note the gap in the middle: the real message reads "wait 0.4 MORE
+# seconds", and the first version of this pattern required the number to butt
+# straight up against "second". It therefore failed to match the one line it
+# was written for. Checked against the real text now, and against the
+# near-misses that must NOT match.
+#
+# Set to "" to turn it off and rely on FILL_WAIT_MESSAGES alone.
+FILL_WAIT_PATTERN = r"wait\s+(\d+(?:\.\d+)?)[^.\d]{0,24}?second"
+
+# An extra cushion on top of whatever wait is worked out, requested 2026-09-12
+# after the book kept being refused by 0.4 seconds.
+#
+# It exists because the script CANNOT see every fill that spends a timer. The
+# patch notes are explicit: "The Auto Looter's overweight key filling shares
+# the Master Keys timer, so a manual refill right after an automatic one may
+# tell you to wait." An automatic fill happens with no journal line the script
+# is watching and no call it makes - so no amount of tracking its own presses
+# will predict it, and the only defences are a cushion and a retry.
+#
+# Set to 0 to get the time back once the refusals stop; the retry still covers
+# it.
+FILL_EXTRA_PAUSE_MS = 700
 
 # Print every journal line that arrives in the FILL_REPLY_WINDOW_MS after a
 # fill. That is how the line above gets read off the game. Turn it off once
@@ -1299,15 +1330,41 @@ def scan_journal():
                     saw_save = True
                     break
 
-        for phrase in FILL_WAIT_MESSAGES:
-            phrase = phrase.strip().lower()
-            if phrase and phrase in low:
-                _fill_wait["at"] = time.time()
-                _fill_wait["text"] = text
-                _fill_wait["seconds"] = seconds_in(text)
-                break
+        if fill_refusal(text):
+            _fill_wait["at"] = time.time()
+            _fill_wait["text"] = text
+            _fill_wait["seconds"] = seconds_in(text)
+            log("fill refused: %s" % text[:80], HUE_WARN)
 
     return saw_save
+
+
+def fill_refusal(text):
+    """Is this the server refusing a fill and saying how long to wait?
+
+    Two ways of recognising it, and neither invents a shard string:
+
+      * FILL_WAIT_MESSAGES - the exact line, once somebody has transcribed it
+      * FILL_WAIT_PATTERN  - its SHAPE, which was reported from the game: a
+                             number of seconds after the word "wait"
+
+    The pattern exists because the wording is still unconfirmed but the
+    structure is not, and waiting on the server's own number is worth far more
+    than waiting on this script's guess at the rate.
+    """
+    low = (text or "").strip().lower()
+    if not low:
+        return False
+    for phrase in FILL_WAIT_MESSAGES:
+        phrase = phrase.strip().lower()
+        if phrase and phrase in low:
+            return True
+    if FILL_WAIT_PATTERN:
+        try:
+            return bool(re.search(FILL_WAIT_PATTERN, low, re.I))
+        except Exception:
+            return False
+    return False
 
 
 def seconds_in(text):
@@ -1404,6 +1461,11 @@ def fill_gate(timer, label):
                               fill_cooldown_ms(timer) / 1000.0), HUE_WARN)
             ready = told
 
+    # The cushion. Applied to the READY TIME, not only when a wait was already
+    # due, because the refusals being seen are 0.4s - i.e. the press was very
+    # nearly in time, and a fraction of a second either way decides it.
+    ready += FILL_EXTRA_PAUSE_MS / 1000.0
+
     waited = ready - time.time()
     if waited <= 0:
         return 0.0
@@ -1426,19 +1488,25 @@ def note_fill(timer):
 
 
 def report_fill_reply(label, since):
-    """Print what the server said in reply to a fill.
+    """Listen for the server's reply to a fill, and optionally print it.
 
-    This is how FILL_WAIT_MESSAGES gets filled in: the wording is not known
-    here, and a guessed server string is worse than none because it would match
-    nothing and look like the message never appeared. Same shape as the granite
-    hue report - the diagnostic writes its own table entry.
+    THE LISTENING IS NOT OPTIONAL. Only the printing is. An earlier version
+    returned early when FILL_REPORT_REPLY was off, which also skipped the scan
+    - so turning the diagnostic off would have turned off the refusal detection
+    with it, and the retry would have had nothing to react to. A switch labelled
+    "print this" must not quietly decide whether the script can see.
+
+    The printing is how FILL_WAIT_MESSAGES gets filled in: the exact wording is
+    not known here, and a guessed server string is worse than none because it
+    would match nothing and look like the message never appeared. Same shape as
+    the granite hue report - the diagnostic writes its own table entry.
     """
-    if not FILL_REPORT_REPLY:
-        return []
     deadline = time.time() + FILL_REPLY_WINDOW_MS / 1000.0
     while time.time() < deadline:
         Misc.Pause(250)
         scan_journal()
+    if not FILL_REPORT_REPLY:
+        return []
     said = recent_lines_since(since)
     if said:
         log("  %s said:" % label)
@@ -3835,6 +3903,13 @@ def use_context_item(item, wanted, label, timer="key"):
     if fill:
         note_fill(timer)
         report_fill_reply(label, since)
+        # A refused fill here is worth saying out loud too. Nothing retries a
+        # station - it is one press per visit - so the only thing that makes
+        # the failure visible is this line.
+        if _fill_wait["at"] >= since:
+            log("%s refused the fill - it will be short this trip: %s"
+                % (label, _fill_wait["text"][:60]), HUE_BAD)
+            return False
     return True
 
 
@@ -4056,18 +4131,34 @@ def deposit_new_orders():
     left = before
     while attempts < max(1, FILL_RETRIES):
         attempts += 1
+
+        # Remember when the last refusal was seen, so a NEW one can be told
+        # from the stale one still sitting in _fill_wait.
+        refused_before = _fill_wait["at"]
+
         if not press_fill(book):
             break
         now_left = still_held()
         if now_left < left:
             log("  %d deposited on press %d" % (left - now_left, attempts))
             left = now_left
-        elif attempts > 1:
-            log("  press %d moved nothing either." % attempts, HUE_WARN)
         else:
             left = now_left
         if not left:
             break
+
+        # A REFUSAL IS NOT THE SAME PROBLEM AS AN OUT-OF-REACH BAG, and it has
+        # the opposite fix. Tipping the deeds out of the bag does nothing for a
+        # rate limit - the next press is refused just the same, and now the
+        # orders are loose in the pack. So the refusal is checked FIRST and the
+        # only answer to it is to wait, which fill_gate does at the top of the
+        # next press using the server's own number.
+        if _fill_wait["at"] > refused_before:
+            log("  the server refused that press (%s) - waiting it out and "
+                "pressing again, attempt %d of %d."
+                % (_fill_wait["text"][:60] or "no reason given",
+                   attempts + 1, max(1, FILL_RETRIES)), HUE_WARN)
+            continue
 
         # Deeds inside the bag may simply be out of the button's reach, which
         # is a different problem from the rate limit and has its own fix.
@@ -4081,9 +4172,9 @@ def deposit_new_orders():
                 Items.Move(deed, backpack, -1)
                 Misc.Pause(MOVE_PAUSE_MS)
         elif attempts < max(1, FILL_RETRIES):
-            log("  %d order(s) did not go in - waiting out the fill timer and "
-                "pressing again (attempt %d of %d)."
-                % (left, attempts + 1, max(1, FILL_RETRIES)), HUE_WARN)
+            log("  %d order(s) did not go in and the server did not say why - "
+                "waiting out the fill timer and pressing again (attempt %d of "
+                "%d)." % (left, attempts + 1, max(1, FILL_RETRIES)), HUE_WARN)
 
     deposited = before - left
     if deposited > 0:

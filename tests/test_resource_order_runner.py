@@ -3658,18 +3658,55 @@ def test_the_servers_own_wait_beats_the_configured_guess(m):
         restore()
 
 
-def test_the_wait_message_list_ships_empty(m):
-    """NOBODY HAS READ THE REAL WORDING OFF THE JOURNAL YET. A guessed server
-    string is worse than none: it matches nothing and looks exactly like the
-    message never appeared, which is the hardest kind of failure to see.
+def test_the_real_refusal_is_matched_and_generalises(m):
+    """Read off the journal 2026-09-12:
 
-    This test exists to keep it honest. When the real line is pasted in, this
-    check flips - and that is the moment to delete it."""
-    check("no invented server string", m["FILL_WAIT_MESSAGES"], [])
-    check("but the reader is wired up and ready for one",
-          callable(m.get("seconds_in")), True)
-    check("and the diagnostic that reads it off the game is on",
-          m["FILL_REPORT_REPLY"], True)
+        "You must wait 0.4 more seconds before you can fill from backpack"
+
+    THE NUMBER MUST NOT BE IN THE STORED STRING. The full line went in first
+    and it carried the 0.4 with it, which matches a 0.4-second refusal and
+    nothing else - a two-second one would have sailed straight past. The
+    number is read separately, by seconds_in().
+    """
+    real = "You must wait 0.4 more seconds before you can fill from backpack"
+    check("the real line is recognised", m["fill_refusal"](real), True)
+    check("and its number is read", m["seconds_in"](real), 0.4)
+
+    for stored in m["FILL_WAIT_MESSAGES"]:
+        check("no stored phrase pins a number: %r" % stored,
+              any(ch.isdigit() for ch in stored), False)
+
+    # The same refusal with any other delay must match just as well.
+    for secs in ("0.1", "1", "2.5", "3", "10"):
+        line = ("You must wait %s more seconds before you can fill from "
+                "backpack" % secs)
+        check("a %ss refusal is recognised too" % secs,
+              m["fill_refusal"](line), True)
+        check("  and its number read", m["seconds_in"](line), float(secs))
+
+
+def test_the_shape_pattern_covers_the_wordings_not_yet_seen(m):
+    """Only the order book's refusal has been read. The Master Keys and the
+    storage keys presumably say something similar, but nobody has transcribed
+    those, so they are NOT typed in as though they had been - the pattern
+    covers them by shape instead."""
+    check("the pattern is set", bool(m["FILL_WAIT_PATTERN"]), True)
+    check("an unseen wording still matches",
+          m["fill_refusal"]("You must wait 2.1 more seconds before you can "
+                            "refill from stock"), True)
+
+    # It failed to match the ONE line it was written for, first time round:
+    # the number does not butt up against "second", "more" sits between them.
+    check("the gap between the number and the unit is allowed",
+          m["fill_refusal"]("You must wait 3 more seconds"), True)
+
+    # And it stays narrow.
+    for text in ("You wait for the smith to finish.",
+                 "Wait here.",
+                 "3 seconds remaining",
+                 "You put 60000 ingots into the key."):
+        check("%r is not a refusal" % text[:32], m["fill_refusal"](text),
+              False)
 
 
 def test_the_wait_number_is_read_out_of_the_line(m):
@@ -3810,6 +3847,129 @@ def test_a_world_save_warning_still_fires_once(m):
         check("and not again", m["poll_world_save"](), False)
     finally:
         restore()
+
+
+# --------------------------------------------------------------------------
+# The refusal, reported from the game 2026-09-12
+#
+# "it goes back to the RO book and it seems to appear to blink the menu then
+#  attempt to place the new deeds in the RO book, but they never deposit
+#  saying we need to wait 0.4 seconds"
+#
+# 0.4 seconds is the tell. The script recalls to Start Fill and bins junk
+# between the last station fill and this press, which is far longer than any
+# timer it tracks - so the timer was spent by something the script never saw.
+# The patch notes name the culprit: "The Auto Looter's overweight key filling
+# shares the Master Keys timer, so a manual refill right after an automatic one
+# may tell you to wait."
+#
+# No amount of tracking its own presses can predict that. Only a cushion and a
+# retry help, and the retry needs to RECOGNISE the refusal.
+# --------------------------------------------------------------------------
+
+def test_the_refusal_is_recognised_by_shape(m):
+    """The exact wording is still unread, but the STRUCTURE was reported: a
+    number of seconds after the word "wait". That is enough to match on, and
+    it is derived from the report rather than invented."""
+    for text in ("You must wait 0.4 seconds before doing that again.",
+                 "You need to wait 3 seconds.",
+                 "Please wait 1.5 seconds",
+                 "WAIT 2 SECONDS"):
+        check("%r is a refusal" % text[:34], m["fill_refusal"](text), True)
+
+    # Narrow on purpose - both halves are required.
+    for text in ("You wait for the smith to finish.",
+                 "Wait here.",
+                 "3 seconds remaining",
+                 "You put 60000 ingots into the key.",
+                 "", None):
+        check("%r is not" % (text or "",), m["fill_refusal"](text), False)
+
+
+def test_the_number_of_seconds_is_what_gets_waited(m):
+    """0.4 is not 3. Waiting the configured cooldown for a 0.4s refusal throws
+    away most of a lap over a run; waiting 0.4s for a 3s one gets refused
+    again. The server's own number is the only right answer."""
+    check("a fractional wait is read",
+          m["seconds_in"]("You must wait 0.4 seconds"), 0.4)
+    check("and a whole one", m["seconds_in"]("You must wait 3 seconds"), 3.0)
+
+
+def test_the_extra_cushion_is_applied(m):
+    """Requested after the book kept being refused BY 0.4 SECONDS - the press
+    was very nearly in time, so a fraction either way decides it."""
+    check("there is a cushion", m["FILL_EXTRA_PAUSE_MS"] >= 0, True)
+    check("and it is the 0.7s that was asked for",
+          m["FILL_EXTRA_PAUSE_MS"], 700)
+
+    clock = _FakeClock()
+    saved_pause = m["Misc"].Pause
+    restore = _with_fakes(m, journal=_FakeJournal(), clock=clock)
+    try:
+        m["Misc"].Pause = lambda ms: clock.advance(ms / 1000.0)
+        m["_journal_cursor"][0] = 0.0
+        m["_fill_wait"]["at"] = 0.0
+        m["_fill_wait"]["seconds"] = 0.0
+        m["_last_fill"]["key"] = 0.0
+        m["note_fill"]("key")
+        waited = m["fill_gate"]("key", "x")
+        want = (m["FILL_KEY_COOLDOWN_MS"] + m["FILL_EXTRA_PAUSE_MS"]) / 1000.0
+        check("the cushion is on top of the cooldown",
+              waited >= want - 0.5, True)
+    finally:
+        m["Misc"].Pause = saved_pause
+        restore()
+
+
+def test_a_refusal_is_not_answered_by_tipping_the_bag_out(m):
+    """THE OPPOSITE FIX. Tipping the deeds out of the bag is the recovery for a
+    button that cannot reach inside it. For a rate limit it does nothing - the
+    next press is refused just the same - and now the orders are loose in the
+    pack instead of where they were put. So the refusal is tested FIRST and
+    the only answer to it is to wait."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    dep = src[src.index("def deposit_new_orders("):
+              src.index("def visit_station(")]
+
+    guard = 'if _fill_wait["at"] > refused_before:'
+    check("a new refusal is told from a stale one",
+          "refused_before = _fill_wait" in dep, True)
+    # Reported, never raised - a mutation that removes the guard must show as
+    # a failed check, not a traceback that hides every check after it.
+    check("the refusal is acted on at all", guard in dep, True)
+    if guard in dep:
+        refusal = dep.index(guard)
+        tipping = dep.index("Tipping them out")
+        check("and it is checked BEFORE the tipping", refusal < tipping, True)
+        check("its only answer is to go round again",
+              "continue" in dep[refusal:tipping], True)
+
+
+def test_listening_for_the_reply_is_not_optional(m):
+    """FILL_REPORT_REPLY says "print this". It must not also decide whether the
+    script can SEE - turning the diagnostic off would otherwise turn off the
+    refusal detection with it, and the retry would have nothing to react to."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def report_fill_reply("):src.index("def checkpoint(")]
+    scan = body.index("scan_journal()")
+    gate = body.index("if not FILL_REPORT_REPLY:")
+    check("the journal is scanned before the print switch is consulted",
+          scan < gate, True)
+
+
+def test_a_station_says_when_it_was_refused(m):
+    """Nothing retries a station - it is one press per visit - so the only thing
+    that makes the failure visible is the script saying so."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    ctx = src[src.index("def use_context_item("):
+              src.index("def use_context_mobile(")]
+    check("a refused station fill is reported",
+          "refused the fill" in ctx, True)
+    check("and reported as a failure, not a success",
+          "return False" in ctx[ctx.index("refused the fill"):], True)
 
 
 def main():

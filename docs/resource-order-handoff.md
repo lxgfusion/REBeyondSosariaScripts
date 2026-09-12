@@ -1,65 +1,52 @@
 # Resource order handoff
 
-## Fill rate limits — `.2026-09-11.1`, and ONE THING IS STILL MISSING
+## The refusal is known now — `.2026-09-12.1`
 
-The shard now throttles filling:
-
-> Fill from backpack on a storage key (the Refill from stock menu entry, or the
-> Fill from backpack button in a key, stash or list window) now works about
-> once per second. Refill from stock on your Master Keys runs about once every
-> 3 seconds. **Clicking again sooner does nothing extra and tells you how long
-> to wait.**
-
-"Does nothing extra" is the dangerous half — a refused fill is not an error.
-The click goes out, the window behaves, and the stock simply does not move.
-
-### What is still open
-
-**`FILL_WAIT_MESSAGES` is empty and must stay empty until the real wording is
-read off the journal.** A guessed server string is worse than none: it matches
-nothing and looks exactly like the message never appeared. `FILL_REPORT_REPLY`
-prints every line the server sends in the 1.5s after a fill, so the table fills
-itself the same way the granite hue table did:
+Read off the journal 2026-09-12:
 
 ```
-[RO]   the book said:
-[RO]       You must wait 3 seconds before doing that again.
-[RO]   ^ if one of those is the wait message, put it in FILL_WAIT_MESSAGES
+You must wait 0.4 more seconds before you can fill from backpack
 ```
 
-Paste the line in and the script obeys the server's own number via
-`seconds_in()` instead of the fixed cooldowns. There is a test
-(`test_the_wait_message_list_ships_empty`) that fails when the list stops being
-empty — that is the signal to delete the test, not to edit the list back.
+**`FILL_WAIT_MESSAGES` stores the part without the number** —
+`"before you can fill from backpack"`. The full line went in first and it
+carried the `0.4` with it, so it matched a 0.4-second refusal and nothing else;
+a two-second one would have sailed straight past. `seconds_in()` reads the
+number separately.
 
-### Which timer each fill spends
+`FILL_WAIT_PATTERN` covers the wordings nobody has read yet (the Master Keys
+and the storage keys presumably say something similar about *refill from
+stock*). Note its shape: the real message says **"wait 0.4 MORE seconds"**, and
+the first version of the pattern required the number to butt straight up
+against `second` — so it failed to match the one line it was written for.
 
-Two server timers, tracked separately in `_last_fill`. These assignments are a
-**reading of the patch notes, not confirmed in game**:
+### Why 0.4 seconds, when nothing the script does is that close together?
 
-| Fill | Setting | Timer | Why |
-|---|---|---|---|
-| Deposit items | `STATIONS[0]["timer"]` | `master` | safe default — over-waiting costs 2s, under-waiting costs the deposit |
-| Deposit PS | `STATIONS[1]["timer"]` | `master` | same |
-| Runecrafting Storage | `RUNECRAFT_TIMER` | `key` | an ordinary storage key |
-| Order book button | `BOOK_FILL_TIMER` | `key` | the notes rate "a key, stash or **list** window" at 1/s |
+The script recalls to Start Fill and bins junk between the last station fill
+and the book press. That is far longer than any timer it tracks — so **the
+timer was spent by something the script never saw.** The patch notes name it:
 
-Getting one wrong costs waiting time, not correctness: every fill is verified
-by **result** and pressed again up to `FILL_RETRIES` times.
+> The Auto Looter's overweight key filling shares the Master Keys timer, so a
+> manual refill right after an automatic one may tell you to wait.
 
-### The second bug in the same function
+No amount of tracking its own presses can predict that. The defences are
+`FILL_EXTRA_PAUSE_MS` (700ms cushion) and the retry — and the retry needs to
+*recognise* the refusal, which is what the message table is for.
 
-`bag_deeds()` read `Contains`, which is a snapshot taken when the container was
-opened. A fill empties the bag **server-side**, the snapshot still lists every
-deed, and `deposit_new_orders` concluded the fill had done nothing — then ran
-its recovery, which tips the bag out into the pack. **A fill that worked ended
-with the orders loose in the backpack.**
+### A refusal and an out-of-reach bag have OPPOSITE fixes
 
-The patch's other change makes this reliable rather than occasional: the key
-window now "redraws once at the end instead of once for every section", so the
-contents update lands later than it used to.
+Tipping the deeds out of the order bag is the recovery for a button that cannot
+reach inside it. For a rate limit it does nothing — the next press is refused
+just the same, and now the orders are loose in the pack. `deposit_new_orders`
+therefore tests for a refusal **first**, and its only answer is to wait.
 
-Every count a decision hangs on now passes `reopen=True`.
+### Still unconfirmed
+
+- Which timer the book's button actually spends. `BOOK_FILL_TIMER = "key"` is
+  a reading of the patch notes ("a key, stash or **list** window"), not a
+  measurement. Getting it wrong costs waiting time, not correctness.
+- The Master Keys and storage-key refusal wordings. Pattern-matched by shape
+  until someone reads them.
 
 ---
 
