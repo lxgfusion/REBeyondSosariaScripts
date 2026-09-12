@@ -1,6 +1,41 @@
 # Resource order handoff
 
-## The refusal is known now — `.2026-09-12.1`
+## `.2026-09-12.2` — the cushion was never actually waiting
+
+From the journal:
+
+```
+[RO] == depositing 120 new order(s) ==
+You must wait 0.4 more seconds before you can fill from backpack.
+[RO] fill refused: You must wait 0.4 more seconds before you can fill from backpack.
+```
+
+Detection worked. **The wait did not.** `FILL_EXTRA_PAUSE_MS` was added to the
+ready time:
+
+```python
+ready = _last_fill[timer] + cooldown
+ready += FILL_EXTRA_PAUSE_MS / 1000.0     # <- did nothing
+```
+
+The first press of a lap is *minutes* after the last fill the script made, so
+`ready` sits far in the past and `ready + 0.7` is still in the past. The gate
+returned 0 and pressed immediately. **It is a floor measured from now**, and
+the property worth remembering is: `fill_gate` must never be able to return 0
+while `FILL_EXTRA_PAUSE_MS` is set.
+
+Why it has to be unconditional: the timer is spent by things the script cannot
+see. The patch notes say the Auto Looter's overweight key filling shares it,
+and the character arrives at Start Fill with a full pack every lap. **"Nothing
+I did was recent" is no evidence that the server is ready.**
+
+The retry also waits explicitly now, in its own loop, rather than leaving it to
+the next press's `fill_gate` — `press_fill` spends over a second closing and
+reopening the book before it reaches the gate, so the real delay was an
+accident of how long the window took. `FILL_RETRIES` is 5; 120 deeds is worth
+more than three presses.
+
+## The refusal message
 
 Read off the journal 2026-09-12:
 
@@ -9,44 +44,32 @@ You must wait 0.4 more seconds before you can fill from backpack
 ```
 
 **`FILL_WAIT_MESSAGES` stores the part without the number** —
-`"before you can fill from backpack"`. The full line went in first and it
-carried the `0.4` with it, so it matched a 0.4-second refusal and nothing else;
-a two-second one would have sailed straight past. `seconds_in()` reads the
-number separately.
+`"before you can fill from backpack"`. The full line went in first and carried
+the `0.4` with it, so it matched a 0.4-second refusal and nothing else.
+`seconds_in()` reads the number separately. A test forbids a digit in any
+stored phrase.
 
 `FILL_WAIT_PATTERN` covers the wordings nobody has read yet (the Master Keys
-and the storage keys presumably say something similar about *refill from
-stock*). Note its shape: the real message says **"wait 0.4 MORE seconds"**, and
-the first version of the pattern required the number to butt straight up
-against `second` — so it failed to match the one line it was written for.
+and storage keys presumably say something similar about *refill from stock*).
+Its first version required the number to butt up against `second` — the real
+message says "wait 0.4 **more** seconds" — so it failed to match the one line
+it was written for.
 
-### Why 0.4 seconds, when nothing the script does is that close together?
-
-The script recalls to Start Fill and bins junk between the last station fill
-and the book press. That is far longer than any timer it tracks — so **the
-timer was spent by something the script never saw.** The patch notes name it:
-
-> The Auto Looter's overweight key filling shares the Master Keys timer, so a
-> manual refill right after an automatic one may tell you to wait.
-
-No amount of tracking its own presses can predict that. The defences are
-`FILL_EXTRA_PAUSE_MS` (700ms cushion) and the retry — and the retry needs to
-*recognise* the refusal, which is what the message table is for.
-
-### A refusal and an out-of-reach bag have OPPOSITE fixes
+## A refusal and an out-of-reach bag have OPPOSITE fixes
 
 Tipping the deeds out of the order bag is the recovery for a button that cannot
 reach inside it. For a rate limit it does nothing — the next press is refused
 just the same, and now the orders are loose in the pack. `deposit_new_orders`
-therefore tests for a refusal **first**, and its only answer is to wait.
+tests for a refusal **first**, and its only answer is to wait.
 
-### Still unconfirmed
+## Still unconfirmed
 
-- Which timer the book's button actually spends. `BOOK_FILL_TIMER = "key"` is
-  a reading of the patch notes ("a key, stash or **list** window"), not a
-  measurement. Getting it wrong costs waiting time, not correctness.
-- The Master Keys and storage-key refusal wordings. Pattern-matched by shape
-  until someone reads them.
+- Which timer the book's button actually spends. `BOOK_FILL_TIMER = "key"` is a
+  reading of the patch notes ("a key, stash or **list** window"), not a
+  measurement. Wrong costs waiting time, not correctness.
+- The Master Keys and storage-key refusal wordings.
+- Whether the refusals stop now. If they persist, the next thing to try is
+  `BOOK_FILL_TIMER = "master"` and a larger `FILL_EXTRA_PAUSE_MS`.
 
 ---
 

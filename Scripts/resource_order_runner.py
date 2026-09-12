@@ -89,7 +89,7 @@ import time
 # line in the journal says which copy is actually loaded - two separate
 # debugging rounds were spent on a bug that was already fixed on disk but not
 # in the Scripts folder.
-SCRIPT_VERSION = "2026-09-12.1"
+SCRIPT_VERSION = "2026-09-12.2"
 
 
 # =============================================================================
@@ -1083,7 +1083,7 @@ FILL_MASTER_COOLDOWN_MS = 3300      # Master Keys
 # and pressed again if it did not. This is what makes the two numbers above
 # safe to be wrong about: if the gate lets a press through too early, the
 # retry catches it.
-FILL_RETRIES = 3
+FILL_RETRIES = 5
 
 # THE SERVER'S REFUSAL, read off the journal 2026-09-12:
 #
@@ -1446,10 +1446,24 @@ def fill_gate(timer, label):
     If the server has told us how long to wait, that wins over the configured
     cooldown. It is the server's own answer rather than this script's guess at
     one, and it is right even when the shard retunes the rate again.
+
+    THE CUSHION IS A FLOOR MEASURED FROM NOW, not an addition to the ready
+    time. That distinction is the whole of a bug: the first press of a lap is
+    minutes after the last fill this script made, so `ready` sits far in the
+    past and `ready + cushion` is still in the past - the cushion never
+    happened, and the journal showed the book being refused with no wait
+    before it at all.
+
+    It has to be unconditional because the timer is spent by things the script
+    cannot see. The patch notes are explicit that the Auto Looter's overweight
+    key filling shares the Master Keys timer, and the character arrives at
+    Start Fill with a full pack every lap - so "nothing I did was recent" is
+    no evidence at all that the server is ready.
     """
     if not FILL_RATE_LIMITED:
         return 0.0
 
+    now = time.time()
     ready = _last_fill.get(timer, 0.0) + fill_cooldown_ms(timer) / 1000.0
 
     # A refusal the server actually sent beats the configured guess.
@@ -1461,12 +1475,13 @@ def fill_gate(timer, label):
                               fill_cooldown_ms(timer) / 1000.0), HUE_WARN)
             ready = told
 
-    # The cushion. Applied to the READY TIME, not only when a wait was already
-    # due, because the refusals being seen are 0.4s - i.e. the press was very
-    # nearly in time, and a fraction of a second either way decides it.
-    ready += FILL_EXTRA_PAUSE_MS / 1000.0
+    # The floor. Always at least this long before a fill, however quiet the
+    # script's own timers look.
+    floor = now + FILL_EXTRA_PAUSE_MS / 1000.0
+    if floor > ready:
+        ready = floor
 
-    waited = ready - time.time()
+    waited = ready - now
     if waited <= 0:
         return 0.0
     log("  waiting %.1fs for the %s fill timer (%s)"
@@ -4154,10 +4169,20 @@ def deposit_new_orders():
         # only answer to it is to wait, which fill_gate does at the top of the
         # next press using the server's own number.
         if _fill_wait["at"] > refused_before:
-            log("  the server refused that press (%s) - waiting it out and "
-                "pressing again, attempt %d of %d."
-                % (_fill_wait["text"][:60] or "no reason given",
-                   attempts + 1, max(1, FILL_RETRIES)), HUE_WARN)
+            # Waited HERE, explicitly, rather than left to the next press's
+            # gate. press_fill spends over a second closing and reopening the
+            # book before it reaches fill_gate, so leaving the wait to the gate
+            # makes the actual delay an accident of how long the window took.
+            # This way the retry is deterministic and the log says the number.
+            owed = max(0.0, _fill_wait["seconds"])
+            wait_s = owed + FILL_EXTRA_PAUSE_MS / 1000.0
+            log("  refused - the server wants %gs. Waiting %.1fs and pressing "
+                "again (attempt %d of %d)."
+                % (owed, wait_s, attempts + 1, max(1, FILL_RETRIES)), HUE_WARN)
+            deadline = time.time() + wait_s
+            while time.time() < deadline:
+                Misc.Pause(250)
+                scan_journal()
             continue
 
         # Deeds inside the bag may simply be out of the button's reach, which

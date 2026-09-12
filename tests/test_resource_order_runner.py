@@ -3617,16 +3617,24 @@ def test_the_gate_waits_and_spending_it_resets_it(m):
         m["_fill_wait"]["at"] = 0.0
         m["_fill_wait"]["seconds"] = 0.0
 
-        check("a cold timer does not wait", m["fill_gate"]("key", "x"), 0.0)
+        floor = m["FILL_EXTRA_PAUSE_MS"] / 1000.0
+        # A COLD TIMER STILL WAITS THE FLOOR. That is the fix: the first press
+        # of a lap is minutes after the last fill this script made, so the
+        # tracked timer says "ready" - and the journal showed the book being
+        # refused anyway, because the Auto Looter had spent the server's timer
+        # 0.4s earlier. "Nothing I did was recent" is no evidence.
+        check("even a cold timer waits the floor",
+              abs(m["fill_gate"]("key", "x") - floor) < 0.3, True)
 
         m["note_fill"]("key")
         waited = m["fill_gate"]("key", "x")
-        check("straight after a fill it waits",
-              waited >= (m["FILL_KEY_COOLDOWN_MS"] / 1000.0) - 0.5, True)
+        check("and the cooldown wins when it is longer",
+              waited >= (m["FILL_KEY_COOLDOWN_MS"] / 1000.0) - 0.3, True)
 
-        # And the OTHER timer is untouched by it.
-        check("the master timer is independent",
-              m["fill_gate"]("master", "x"), 0.0)
+        # Still two timers, not one.
+        m["_last_fill"]["master"] = 0.0
+        check("the master timer is still independent of the key one",
+              abs(m["fill_gate"]("master", "x") - floor) < 0.3, True)
     finally:
         m["Misc"].Pause = saved_pause
         restore()
@@ -3911,11 +3919,19 @@ def test_the_extra_cushion_is_applied(m):
         m["_fill_wait"]["at"] = 0.0
         m["_fill_wait"]["seconds"] = 0.0
         m["_last_fill"]["key"] = 0.0
+        # THE POINT OF THE CUSHION: it is a FLOOR measured from now, not an
+        # addition to the ready time. Added to the ready time it did nothing at
+        # all on the press that mattered - the first of a lap, where the ready
+        # time is already minutes in the past.
+        floor = m["FILL_EXTRA_PAUSE_MS"] / 1000.0
+        check("a quiet timer still waits the cushion",
+              abs(m["fill_gate"]("key", "x") - floor) < 0.3, True)
+
+        # And it never SHORTENS a wait the cooldown already demands.
         m["note_fill"]("key")
-        waited = m["fill_gate"]("key", "x")
-        want = (m["FILL_KEY_COOLDOWN_MS"] + m["FILL_EXTRA_PAUSE_MS"]) / 1000.0
-        check("the cushion is on top of the cooldown",
-              waited >= want - 0.5, True)
+        check("but the longer of the two wins",
+              m["fill_gate"]("key", "x")
+              >= (m["FILL_KEY_COOLDOWN_MS"] / 1000.0) - 0.3, True)
     finally:
         m["Misc"].Pause = saved_pause
         restore()
@@ -3970,6 +3986,67 @@ def test_a_station_says_when_it_was_refused(m):
           "refused the fill" in ctx, True)
     check("and reported as a failure, not a success",
           "return False" in ctx[ctx.index("refused the fill"):], True)
+
+
+def test_the_retry_waits_the_number_the_server_gave(m):
+    """From the journal, 2026-09-12:
+
+        [RO] == depositing 120 new order(s) ==
+        You must wait 0.4 more seconds before you can fill from backpack.
+        [RO] fill refused: You must wait 0.4 more seconds ...
+
+    Detection worked. What did not was the wait BEFORE the press - the cushion
+    was added to a ready time already minutes in the past, so it came to
+    nothing - and the wait after it, which was left to the next press's gate
+    and so depended on how long the book window happened to take.
+
+    Both are explicit now, and 120 deeds is worth more than three presses.
+    """
+    check("enough attempts for a real backlog", m["FILL_RETRIES"] >= 5, True)
+
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    dep = src[src.index("def deposit_new_orders("):
+              src.index("def visit_station(")]
+
+    guard = 'if _fill_wait["at"] > refused_before:'
+    check("the refusal is still acted on", guard in dep, True)
+    if guard in dep:
+        branch = dep[dep.index(guard):dep.index("in_bag = bag_deeds")]
+        check("it waits the server's own number",
+              '_fill_wait["seconds"]' in branch, True)
+        check("plus the cushion",
+              "FILL_EXTRA_PAUSE_MS" in branch, True)
+        check("in its own loop, not the next press's gate",
+              "while time.time() < deadline:" in branch, True)
+        check("and it keeps reading the journal while it waits",
+              "scan_journal()" in branch, True)
+        check("then goes round again", "continue" in branch, True)
+
+
+def test_the_floor_is_measured_from_now_not_from_the_last_fill(m):
+    """The bug this fixes, stated as a property: fill_gate must not be able to
+    return 0 while FILL_EXTRA_PAUSE_MS is set. The timer is spent by things the
+    script cannot see - the Auto Looter's overweight filling shares it - so a
+    quiet tracked timer proves nothing about the server."""
+    if not m["FILL_EXTRA_PAUSE_MS"]:
+        return
+    clock = _FakeClock()
+    saved_pause = m["Misc"].Pause
+    restore = _with_fakes(m, journal=_FakeJournal(), clock=clock)
+    try:
+        m["Misc"].Pause = lambda ms: clock.advance(ms / 1000.0)
+        m["_journal_cursor"][0] = 0.0
+        m["_fill_wait"]["at"] = 0.0
+        m["_fill_wait"]["seconds"] = 0.0
+        # As stale as it gets: the last fill this script made was an hour ago.
+        for timer in ("key", "master"):
+            m["_last_fill"][timer] = clock.time() - 3600.0
+            check("a %s timer quiet for an hour still waits" % timer,
+                  m["fill_gate"](timer, "x") > 0.0, True)
+    finally:
+        m["Misc"].Pause = saved_pause
+        restore()
 
 
 def main():
