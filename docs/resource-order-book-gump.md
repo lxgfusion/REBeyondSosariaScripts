@@ -1,57 +1,81 @@
 # Resource Order Book gump
 
-## THE LIST'S GUMP ID MOVES TOO — 2026-09-13
+## YOUR BOOK IS NOT THE ADMIN'S BOOK — 2026-09-13
+
+Confirmed by a live Gump Inspector capture: **pressing 17 sorted `Amt To
+Gather` lowest-first.** By the admin's own formula `17 = 10 + 6*1 + 1`, which
+puts `Amt To Gather` at **column 1**.
+
+The admin's published order puts it at column 2, which would make that button
+23. They said so themselves — *"CURRENT COLUMN ORDER (not the declared order —
+anyone can reorder it)"*. That list was their copy.
+
+| | admin's book | **this book** |
+|---|---|---|
+| 0 | Item | Item |
+| 1 | Completed | **Amt To Gather** |
+| 2 | Amt To Gather | **Amt Gathered** |
+| 3 | Amt Gathered | **Value Per** |
+| 4 | Value Per | **Completed** |
+
+So for this book:
+
+| | button |
+|---|---:|
+| Item filter | 12 |
+| **Amt To Gather, sort lowest-first** | **17** ← captured live |
+| Completed filter | **36** (field id **4**) |
+| Withdraw rows | 40–54 |
+| REMOVE COLUMN — never press | 15, 21, 27, 33, 39 |
+
+This is the order the 2026-07-27 dump recorded. **This book has never been
+reordered**; only the ids under it moved, when the stride went 10 → 6.
+
+`ORDERS_CONFIRMED` holds that capture and preflight checks it against whatever
+the column order derives. If they ever disagree, the log says so in red rather
+than quietly sorting the wrong column.
+
+## A HALF-READ HEADER ROW IS REFUSED
+
+`GetLineList` does not always return every header cell. A live dump of this
+book gave:
+
+```
+Item | 1v | Amt Gathered | Completed
+```
+
+for a window whose header plainly reads `Item / Amt To Gather / Amt Gathered /
+Value Per / Completed`.
+
+Three of five names is not a smaller answer, **it is a wrong one**: `Completed`
+comes out as column 2 instead of 4, so the finished-order filter gets pressed
+on `Amt Gathered`, returns nothing, and reads as *"no finished orders"* rather
+than as a mistake.
+
+> Unidentified must mean invisible, never mistaken for something else.
+
+The cross-check is `orders_column_count()` — **one filter text entry per
+column**. Those are layout *elements*, not strings, so unlike the labels they
+cannot come back half-read. When the header names and the box count disagree,
+the read is thrown away and the configured order is used, with a log line
+saying what it read.
+
+## The list's gump id moves too
 
 `0xB2F21F1A` → `0xC5F60B43`. Razor derives the id from what the server sent, so
-**changing the columns changes the id**. The book's own window (`0x6ABCE12`) has
-not moved, because its layout has not.
-
-When the id is wrong, nothing says so usefully:
+changing the columns changes it. When it was wrong:
 
 ```
 [RO] The order list never opened.
 [RO] closed 2 stray window(s) [fill done]: 0x6ABCE12, 0xC5F60B43
 ```
 
-The list *had* opened. `WaitForGump` sat out its full timeout on a window that
-was never coming, and `tidy_gumps` then closed the real one as a stray — with
-its id printed in that very line.
+The list *had* opened; `tidy_gumps` then closed it as a stray, printing its id
+in the line that reported the failure. It is now found by what is on it —
+`ORDERS_SIGNATURE = ["Displayed:", "Contents:"]`, **both** required, because the
+book's own window says "Resource Orders" as well.
 
-So the id is **found by what is on the window**, not configured:
-`ORDERS_SIGNATURE = ["Displayed:", "Contents:"]`, and **both** are required —
-the book's own window says "Resource Orders" as well, on the button that opens
-the list. `ORDERS_GUMP_HINT` is only a shortcut that saves the search.
-
-If the list is not found, `open_book` now dumps every open gump with its first
-lines, so the next report carries the answer instead of costing a round trip.
-
-## The live book is not the admin's five columns
-
-From the Gump Inspector, same session:
-
-```
-Gump ID: 0xc5f60b43
-Resource Orders | Contents: 29678/100000 | Displayed: 29678
-Item | Amt Gathered | Completed | Captured Essence | 0 | No | ...
-```
-
-Three columns — `Item`, `Amt Gathered`, `Completed` — in a different order from
-the published five, and with **no `Amt To Gather`**. Which is precisely why the
-ids are computed:
-
-| | admin's 5 columns | this book's 3 |
-|---|---|---|
-| Item filter | 12 | 12 |
-| Completed filter | 18 | **24** |
-| Completed field id | 1 | **2** |
-| Amt To Gather sort | 23 | **absent — sorting degrades** |
-| Withdraw rows | 40–54 | **28–42** |
-
-With no `Amt To Gather` column, `orders_ids()["amount_sort"]` is 0, sorting is
-reported unavailable, and the runner falls back to the smallest order it can
-see on the page. Re-add the column with button **9** to get smallest-first back.
-
-## THE IDS ARE NOT FIXED — the admin's formula, 2026-09-14
+## The admin's formula
 
 ```
 control button  = 10 + 6*column_index + type
@@ -64,7 +88,7 @@ row i details   = withdraw base + 100000 + i
 | type | meaning |
 |---|---|
 | 0 | sort — the arrow that **says** "asc", sorts DESC |
-| 1 | sort — the arrow that **says** "desc", sorts ASC ← smallest first |
+| 1 | sort — the arrow that **says** "desc", sorts ASC |
 | 2 | apply filter |
 | 3 | shift left |
 | 4 | shift right |
@@ -74,42 +98,21 @@ Global: `0` close · `1` Add · `2` Fill from backpack · `3` **Purge (bulk
 delete)** · `4` Previous Page (*not drawn on page 0*) · `5` Next Page (*not
 drawn on the last page*) · `6` Feed Crucible · `9` Add Column.
 
-### What this broke in the script
-
-| Constant | Was | Now means | Consequence |
-|---|---|---|---|
-| `ORDERS_GUMP` | 0xB2F21F1A | a window that does not exist | "the order list never opened", every lap |
-| `ORDERS_SORT_AMOUNT_BUTTON` | 21 | **remove the Completed column** | the book was stripped one pass at a time |
-| `ORDERS_COMPLETED_SUBMIT` | 52 | **withdraw row 12** | every "filter for finished orders" pulled the twelfth deed |
-| `ORDERS_COMPLETED_ENTRY` | 4 | Completed is not column 4 | filtered the wrong column |
-
-None of them failed loudly. **That is the whole problem with a hardcoded id.**
-
 ### Rules that are not about numbers
 
-- **Pressing a button the server did not draw disconnects you.** `press_orders`
-  checks the drawn set. Previous/Next Page are the live hazard.
-- **REMOVE COLUMN presses are refused**, for every column, computed rather than
-  listed because the ids move.
+- **Pressing a button the server did not draw disconnects you.**
+- **REMOVE COLUMN presses are refused**, computed per column.
 - **Purge (3) is refused.** It used to be Fill from backpack; they swapped.
-- **Any apply-filter press overwrites EVERY column's filter from your
-  response.** Empty = cleared. Filters persist on the book.
+- **Any apply-filter press overwrites EVERY column's filter.** Empty = cleared.
 - **Filters are substring** — "Amber" also matches "Brilliant Amber".
 - Sort arrows are inverted.
-
-### If something moved again
-
-Do not guess. `orders_ids()["source"]` says whether the numbers came from the
-live gump or the fallback; the sort-failure log prints the button it used and
-the column order it derived it from; and `report_open_gumps` names every window
-on screen with what it says.
 
 ---
 
 ## HISTORY — the 2026-07-27 dump
 
-Numbers below are superseded. Kept because the *shapes* still hold: two gumps,
-server-side paging, and the string-table gotcha.
+Numbers below are superseded. The column ORDER in it turned out to be current;
+the ids were not.
 
 Mapped from a live dump on 2026-07-27 (`diag_resource_orders.py`). The book is
 `0x404AC332`, ItemID `0x2259`, hue `0x04F7`, locked down and Blessed on the

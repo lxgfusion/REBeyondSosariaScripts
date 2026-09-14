@@ -2589,9 +2589,9 @@ def test_the_completed_filter_is_computed_not_remembered(m):
     the column layout and anyone can reorder it, so what is asserted is that
     the script computes them."""
     ids = m["orders_ids"]()
-    check("Completed is column 1 in the published layout",
-          ids["completed_field"], 1)
-    check("so its filter submit is 10 + 6*1 + 2", ids["completed_filter"], 18)
+    # Column 4 in THIS book - the admin's list was their own, reordered copy.
+    check("Completed is the last column here", ids["completed_field"], 4)
+    check("so its filter submit is 10 + 6*4 + 2", ids["completed_filter"], 36)
     check("not the Item box", ids["completed_field"] == ids["item_field"],
           False)
     check("not the Item submit",
@@ -2612,11 +2612,11 @@ def test_the_ids_follow_the_published_formula(m):
     Checked against every number the admin listed, so a typo in the arithmetic
     shows up here rather than as a disconnect in game."""
     ids = m["orders_ids"]()
-    check("columns as published", ids["columns"],
-          ["Item", "Completed", "Amt To Gather", "Amt Gathered", "Value Per"])
+    check("the columns this book actually has", ids["columns"],
+          ["Item", "Amt To Gather", "Amt Gathered", "Value Per", "Completed"])
     check("item filter = 12", ids["item_filter"], 12)
     check("item field = 0", ids["item_field"], 0)
-    check("amount sort ascending = 23", ids["amount_sort"], 23)
+    check("amount sort ascending = 17", ids["amount_sort"], 17)
     check("withdraw base = 40", ids["withdraw_base"], 40)
     check("details base = 100040", ids["details_base"], 100040)
     check("every REMOVE button is known",
@@ -3507,7 +3507,7 @@ def test_the_sort_button_is_no_longer_21(m):
     "Button 21 was the old ListEntryGump sort id - stale scripts strip the book
     one pass at a time." This script was one of them."""
     ids = m["orders_ids"]()
-    check("the sort is 23, not 21", ids["amount_sort"], 23)
+    check("the sort is 17, not 21", ids["amount_sort"], 17)
     check("21 is a REMOVE button now", 21 in ids["remove"], True)
     check("and the sort is not one of them",
           ids["amount_sort"] in ids["remove"], False)
@@ -4195,7 +4195,7 @@ def test_a_remove_column_press_is_refused(m):
         check("the real sort is allowed",
               m["press_orders"](m["orders_ids"]()["amount_sort"],
                                 what="test"), True)
-        check("and it was the one pressed", got, [23])
+        check("and it was the one pressed", got, [17])
     finally:
         restore()
 
@@ -4548,6 +4548,147 @@ def test_the_failure_names_what_is_actually_on_screen(m):
     rep = src[src.index("def report_open_gumps("):src.index("def layout_text_cells(")]
     check("naming each id", "0x%X" % 0 in rep or "0x%X" in rep, True)
     check("with what it says on it", "gump_lines(" in rep, True)
+
+
+def test_the_confirmed_capture_agrees_with_the_derivation(m):
+    """From the Gump Inspector, 2026-09-13: pressing button 17 sorted Amt To
+    Gather lowest-first. 17 = 10 + 6*1 + 1, so Amt To Gather is column 1.
+
+    This is the ONE cross-check on the whole derivation. The admin's published
+    order puts Amt To Gather at column 2, which would make the sort 23 - so
+    the two disagree, and the live capture wins. They said as much: "CURRENT
+    COLUMN ORDER (not the declared order - anyone can reorder it).
+    """
+    button, column, _how = m["ORDERS_CONFIRMED"]
+    check("the capture is button 17", button, 17)
+    check("on Amt To Gather", column, "Amt To Gather")
+
+    ids = m["orders_ids"]()
+    check("and that is what the column order derives", ids["amount_sort"],
+          button)
+    check("which puts it at column 1", ids["columns"].index(column), 1)
+    check("it is not a REMOVE button", button in ids["remove"], False)
+    check("nor Purge", button in m["ORDERS_NEVER_PRESS"], False)
+
+    # The admin's order would give 23. Kept as a live reminder that the two
+    # layouts differ and which one this script follows.
+    admin = ["Item", "Completed", "Amt To Gather", "Amt Gathered", "Value Per"]
+    check("the admin's order would have said 23",
+          10 + 6 * admin.index(column) + 1, 23)
+    check("and this book says otherwise", ids["amount_sort"] == 23, False)
+
+
+def test_a_half_read_header_row_is_refused(m):
+    """A live dump of this book returned "Item, 1v, Amt Gathered, Completed" for
+    a window whose header plainly reads Item / Amt To Gather / Amt Gathered /
+    Value Per / Completed. GetLineList does not always hand back every cell.
+
+    Three of five names is not a smaller answer, it is a WRONG one: Completed
+    comes out as column 2 instead of 4, so the finished-order filter gets
+    pressed on Amt Gathered, returns nothing, and reads as "no finished
+    orders" rather than as a mistake.
+
+    Unidentified must mean invisible, never mistaken for something else."""
+    saved = {k: m[k] for k in ("layout_text_cells", "orders_column_count",
+                               "log")}
+    try:
+        m["log"] = lambda *a, **k: None
+        # The half-read: three headers, on a gump with five filter boxes.
+        m["layout_text_cells"] = lambda gid: [
+            (60, 50, "Item"), (810, 50, "Amt Gathered"),
+            (1110, 50, "Completed")]
+        m["orders_column_count"] = lambda: 5
+        check("a partial read is thrown away", m["orders_column_order"](), [])
+
+        ids = m["orders_ids"]()
+        check("so the published order is used", ids["source"],
+              "published layout")
+        check("and Completed stays at column 4", ids["completed_field"], 4)
+        check("its filter stays 36", ids["completed_filter"], 36)
+        check("the rows stay at 40", ids["withdraw_base"], 40)
+
+        # A WHOLE read of the same five is accepted.
+        m["layout_text_cells"] = lambda gid: [
+            (60, 50, "Item"), (660, 50, "Amt To Gather"),
+            (810, 50, "Amt Gathered"), (960, 50, "Value Per"),
+            (1110, 50, "Completed")]
+        check("a complete read is trusted", m["orders_column_order"](),
+              ["Item", "Amt To Gather", "Amt Gathered", "Value Per",
+               "Completed"])
+
+        # And a genuinely four-column book, read whole, is trusted too.
+        m["orders_column_count"] = lambda: 4
+        m["layout_text_cells"] = lambda gid: [
+            (60, 50, "Item"), (660, 50, "Amt To Gather"),
+            (810, 50, "Amt Gathered"), (960, 50, "Completed")]
+        check("a real four-column book is not refused",
+              m["orders_column_order"](),
+              ["Item", "Amt To Gather", "Amt Gathered", "Completed"])
+
+        # No opinion from the box count = no veto.
+        m["orders_column_count"] = lambda: 0
+        m["layout_text_cells"] = lambda gid: [(60, 50, "Item")]
+        check("an unreadable layout does not veto the read",
+              m["orders_column_order"](), ["Item"])
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_the_column_count_comes_from_the_filter_boxes(m):
+    """One text ENTRY per column. They are layout elements, so unlike the
+    header labels they cannot come back half-read - which is the only reason
+    they can be the cross-check on the labels.
+
+    Counting text CELLS instead would count every order name on the page, and
+    counting headers would just re-ask the question that needed checking.
+    """
+    # A cut-down but real-shaped layout: five headers, five filter boxes,
+    # and a page of rows whose cells are text too.
+    layout = (
+        "{ page 0 }"
+        "{ croppedtext 60 50 100 20 0 3 }"
+        "{ croppedtext 660 50 100 20 0 4 }"
+        "{ croppedtext 810 50 100 20 0 5 }"
+        "{ croppedtext 960 50 100 20 0 6 }"
+        "{ croppedtext 1110 50 100 20 0 7 }"
+        "{ croppedtext 60 90 100 20 0 8 }"
+        "{ croppedtext 660 90 100 20 0 9 }"
+        "{ croppedtext 810 90 100 20 0 10 }"
+        "{ button 20 90 4005 4007 1 0 40 }"
+        "{ textentry 60 600 120 20 0 0 11 }"
+        "{ textentry 660 600 120 20 0 1 12 }"
+        "{ textentry 810 600 120 20 0 2 13 }"
+        "{ textentry 960 600 120 20 0 3 14 }"
+        "{ textentry 1110 600 120 20 0 4 15 }")
+
+    saved = {k: m[k] for k in ("raw_layout", "orders_gump")}
+    try:
+        m["raw_layout"] = lambda gid: layout
+        m["orders_gump"] = lambda: 0x1234
+        check("five columns, from five filter boxes",
+              m["orders_column_count"](), 5)
+
+        # Eight text cells on that layout - if it counted those it would say 8.
+        cells = [e for e in m["layout_elements"](layout)
+                 if e["kind"] in ("text", "croppedtext")]
+        check("and there are more text cells than that", len(cells) > 5, True)
+        check("so it is not counting them",
+              m["orders_column_count"]() == len(cells), False)
+
+        # A four-column book has four boxes.
+        m["raw_layout"] = lambda gid: layout.replace(
+            "{ textentry 1110 600 120 20 0 4 15 }", "")
+        check("four boxes, four columns", m["orders_column_count"](), 4)
+
+        # Nothing readable is NO OPINION, not "no columns" - it must not veto
+        # a header read it knows nothing about.
+        m["raw_layout"] = lambda gid: ""
+        check("an unreadable layout has no opinion",
+              m["orders_column_count"](), 0)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
 
 
 def main():

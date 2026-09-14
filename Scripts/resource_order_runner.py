@@ -89,7 +89,7 @@ import time
 # line in the journal says which copy is actually loaded - two separate
 # debugging rounds were spent on a bug that was already fixed on disk but not
 # in the Scripts folder.
-SCRIPT_VERSION = "2026-09-13.2"
+SCRIPT_VERSION = "2026-09-13.3"
 
 
 # =============================================================================
@@ -540,11 +540,26 @@ ORDERS_TYPE_SHIFT_LEFT = 3
 ORDERS_TYPE_SHIFT_RIGHT = 4
 ORDERS_TYPE_REMOVE = 5
 
-# The column order as published 2026-09-14, used ONLY when the live gump cannot
-# be read. Note Completed has moved from last to second since the 2026-07-27
-# dump, which is what moved its filter from 52 to 18.
-ORDERS_COLUMNS_EXPECTED = ["Item", "Completed", "Amt To Gather",
-                           "Amt Gathered", "Value Per"]
+# The column order of THIS book, used when the live header row cannot be read
+# whole. CONFIRMED BY A LIVE BUTTON CAPTURE, 2026-09-13: pressing 17 sorted
+# Amt To Gather lowest-first, and 17 = 10 + 6*1 + 1, which puts Amt To Gather
+# at column index 1.
+#
+# NOT the admin's published order. Theirs reads Item / Completed / Amt To
+# Gather / Amt Gathered / Value Per, which would make that sort 23 - and the
+# capture says otherwise. They said as much in the note: "CURRENT COLUMN ORDER
+# (not the declared order - anyone can reorder it)". It was their book.
+#
+# This order is the one the 2026-07-27 dump recorded, so this book has never
+# been reordered; only the ids under it changed, when the stride went 10 -> 6.
+ORDERS_COLUMNS_EXPECTED = ["Item", "Amt To Gather", "Amt Gathered",
+                           "Value Per", "Completed"]
+
+# A button whose meaning has been confirmed in game, checked at startup against
+# what the column order derives. If these disagree the columns have moved and
+# the log says so, rather than the script quietly sorting the wrong column.
+#   (button, column, what it did)
+ORDERS_CONFIRMED = (17, "Amt To Gather", "sorted lowest-first, 2026-09-13")
 
 # What a header cell may read for each column. "Item" was called "Name" in the
 # 2026-07-27 dump, and a rename must not read as "the column is gone".
@@ -2918,7 +2933,42 @@ def orders_column_order():
         if canon not in seen:
             seen.add(canon)
             order.append(canon)
+
+    # A PARTIAL READ IS REFUSED. GetLineList does not always hand back every
+    # header cell - a live dump of this book returned "Item, 1v, Amt Gathered,
+    # Completed" for a window whose header plainly reads Item / Amt To Gather /
+    # Amt Gathered / Value Per / Completed.
+    #
+    # Trusting three of five names is not a smaller answer, it is a WRONG one:
+    # Completed would come out as column 2 instead of 4, so the finished-order
+    # filter would be pressed on Amt Gathered, return nothing, and read as "no
+    # finished orders" rather than as a mistake. Unidentified must mean
+    # invisible, never mistaken for something else.
+    #
+    # The filter boxes are the count that cannot be partial - there is exactly
+    # one per column, and they are layout elements rather than strings.
+    boxes = orders_column_count()
+    if boxes and len(order) != boxes:
+        log("read %d column header(s) off a list with %d filter box(es) - the "
+            "header row did not come back whole, so the published order is "
+            "used instead. Read: %s"
+            % (len(order), boxes, order or "nothing"), HUE_WARN)
+        return []
     return order
+
+
+def orders_column_count():
+    """How many columns the list has, counted from its filter boxes.
+
+    One text entry per column, and they are layout ELEMENTS rather than
+    strings - so unlike the header labels they cannot come back half-read.
+    That makes this the cross-check on everything derived from the headers.
+
+    0 means the layout could not be read, which every caller treats as "no
+    opinion" rather than as "no columns".
+    """
+    return len([el for el in layout_elements(raw_layout(orders_gump()))
+                if el["kind"] == "textentry"])
 
 
 def orders_drawn_buttons():
@@ -5042,6 +5092,33 @@ def validate():
             log("station %r has no rune - it will be skipped."
                 % station.get("label", "?"), HUE_BAD)
             ok = False
+
+    # The order list's ids, and the one button whose meaning is confirmed.
+    ids = orders_ids()
+    log("order list columns (%s): %s" % (ids["source"], ", ".join(ids["columns"])))
+    log("  filters: Item=%d Completed=%d  sort smallest-first=%s  rows %d-%d"
+        % (ids["item_filter"], ids["completed_filter"],
+           ids["amount_sort"] or "unavailable",
+           ids["withdraw_base"], ids["withdraw_base"] + ROWS_PER_PAGE - 1))
+    want_button, want_column, how = ORDERS_CONFIRMED
+    got = 0
+    if want_column in ids["columns"]:
+        got = (ORDERS_CONTROL_BASE
+               + ORDERS_COLUMN_STRIDE * ids["columns"].index(want_column)
+               + ORDERS_TYPE_SORT_ASC)
+    if got != want_button:
+        # Not fatal - the live read may simply be right and the note stale -
+        # but it is the one cross-check there is on the whole derivation, and
+        # a silent disagreement here means sorting the wrong column.
+        log("  CHECK THIS: button %d %s, which puts %s at column %d. What is "
+            "derived now is %s. The columns have been reordered - confirm the "
+            "new sort button in the Gump Inspector before trusting it."
+            % (want_button, how, want_column,
+               (want_button - ORDERS_CONTROL_BASE) // ORDERS_COLUMN_STRIDE,
+               got or "nothing"), HUE_BAD)
+    else:
+        log("  sort button %d agrees with the %s capture." % (got, want_column),
+            HUE_GOOD)
 
     # The fill rate limits, said out loud. A silently refused fill is the
     # failure mode here, so the settings that guard against it are worth a line
