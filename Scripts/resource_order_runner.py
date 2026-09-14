@@ -89,7 +89,7 @@ import time
 # line in the journal says which copy is actually loaded - two separate
 # debugging rounds were spent on a bug that was already fixed on disk but not
 # in the Scripts folder.
-SCRIPT_VERSION = "2026-09-12.2"
+SCRIPT_VERSION = "2026-09-13.1"
 
 
 # =============================================================================
@@ -389,7 +389,7 @@ MAX_ORDER_SIZE = 80000
 # score is a count of orders handed in.
 #
 #   "smallest"  sort the list by Amt To Gather and take the first row. The
-#               SERVER does the sorting - see ORDERS_SORT_AMOUNT_BUTTON - so
+#               SERVER does the sorting - see ORDERS_SORT_ENABLED - so
 #               this costs one button press, not a second pass over the pages.
 #               If the sort is unavailable it degrades to the smallest on the
 #               page in hand rather than failing.
@@ -481,27 +481,87 @@ ORDER_BAG_HUE = 0x04F2
 STARTUP_HANDIN = True
 
 ORDERS_GUMP = 0xB2F21F1A
-ORDERS_NEXT_BUTTON = 5          # "Next Page"
-ORDERS_PREV_BUTTON = 4          # absent on page 1, where a static image sits
-ORDERS_TEXT_IDS = [0, 1, 2, 3, 4]
-ORDERS_SEARCH_ENTRY = 0         # the Name column's filter box
-ORDERS_FILTER_SUBMIT = 12       # its submit button
+ORDERS_NEXT_BUTTON = 5          # "Next Page" - NOT drawn on the last page
+ORDERS_PREV_BUTTON = 4          # NOT drawn on page 0
 
-# Column 5 is "Completed", with its own filter box and submit button. Used to
-# find orders the book already counts as finished.
-ORDERS_COMPLETED_ENTRY = 4
-ORDERS_COMPLETED_SUBMIT = 52
-
-# The arrow under the "Amt To Gather" column header, which sorts the list by
-# amount. Captured from Razor's Enhanced Gump Inspector on 2026-08-22 - its
-# response log showed Gump ID 0xB2F21F1A, Gump Button 21, with the Name filter
-# ("Bark Fragment") restated in Text ID 0 and the reply coming back as the same
-# filtered list, Displayed: 3. So the filter survives the sort.
+# ---------------------------------------------------------------------------
+# THE IDS ON THIS GUMP ARE NOT FIXED. From the server admin's button list,
+# verified live 2026-09-14 (StashEntryGump, item 0x2259 hue 1271):
 #
-# NOT probed, and not to be guessed at: button 2 on this gump is Purge and 3 is
-# Fill from backpack. Set to 0 to turn sorting off, in which case the runner
-# falls back to taking the smallest order it can see on one page.
-ORDERS_SORT_AMOUNT_BUTTON = 21
+#     control button  = ORDERS_CONTROL_BASE + ORDERS_COLUMN_STRIDE*col + type
+#     filter field id = col
+#     withdraw base   = ORDERS_CONTROL_BASE + ORDERS_COLUMN_STRIDE*col_count
+#     row i           = withdraw base + i        (15 rows per page)
+#     row i details   = withdraw base + 100000 + i
+#
+# Anyone can reorder or remove a column, and doing either RENUMBERS EVERY ID
+# AFTER IT. So the ids are computed from the live column order by orders_ids()
+# and these are only the arithmetic plus the fallback - see that function.
+#
+# What this replaced, and why it mattered:
+#
+#   ORDERS_SORT_AMOUNT_BUTTON was 21, captured from the Gump Inspector on
+#   2026-08-22 when the columns were laid out differently and the stride was
+#   10. Under the current layout 21 is 10 + 6*1 + 5 - the REMOVE button on the
+#   Completed column. The admin's note calls this out by name: "Button 21 was
+#   the old ListEntryGump sort id - stale scripts strip the book one pass at a
+#   time." This script was one of them.
+#
+#   ORDERS_COMPLETED_SUBMIT was 52, which is now 40 + 12 - WITHDRAW ROW 12.
+#   Every attempt to filter for finished orders was pulling whichever deed
+#   happened to be twelfth out of the book instead.
+#
+# Neither failed loudly. That is the whole problem with a hardcoded button id.
+ORDERS_CONTROL_BASE = 10
+ORDERS_COLUMN_STRIDE = 6
+ORDERS_DETAILS_OFFSET = 100000
+
+# type codes, from the same list
+ORDERS_TYPE_SORT_DESC = 0       # the arrow that SAYS "asc"
+ORDERS_TYPE_SORT_ASC = 1        # the arrow that SAYS "desc" - the arrows lie
+ORDERS_TYPE_FILTER = 2
+ORDERS_TYPE_SHIFT_LEFT = 3
+ORDERS_TYPE_SHIFT_RIGHT = 4
+ORDERS_TYPE_REMOVE = 5
+
+# The column order as published 2026-09-14, used ONLY when the live gump cannot
+# be read. Note Completed has moved from last to second since the 2026-07-27
+# dump, which is what moved its filter from 52 to 18.
+ORDERS_COLUMNS_EXPECTED = ["Item", "Completed", "Amt To Gather",
+                           "Amt Gathered", "Value Per"]
+
+# What a header cell may read for each column. "Item" was called "Name" in the
+# 2026-07-27 dump, and a rename must not read as "the column is gone".
+ORDERS_HEADER_ALIASES = [
+    ("Item", ["Item", "Name"]),
+    ("Completed", ["Completed", "Complete", "Done"]),
+    ("Amt To Gather", ["Amt To Gather", "Amount To Gather", "To Gather"]),
+    ("Amt Gathered", ["Amt Gathered", "Amount Gathered", "Gathered"]),
+    ("Value Per", ["Value Per", "Value", "Value Each"]),
+]
+
+# Global buttons on this gump, from the same list. Only the ones this script
+# has any business with are named.
+ORDERS_ADD_BUTTON = 1           # targets an item to add it
+ORDERS_FILL_BUTTON = 2          # "Fill from backpack"
+ORDERS_ADD_COLUMN_BUTTON = 9    # re-adds a removed column
+
+# NEVER pressed, whatever else happens. 3 is Purge, which opens a BULK DELETE
+# gump - there is no version of this script's job that wants it. The per-column
+# REMOVE buttons are refused too, but those are computed rather than listed
+# because their ids move with the layout.
+ORDERS_NEVER_PRESS = [3]
+
+# Check a button was actually DRAWN before pressing it. The admin's list says
+# pressing one the server did not draw disconnects you, and two of the buttons
+# this script uses are conditionally drawn: Previous Page is absent on page 0
+# and Next Page on the last page.
+ORDERS_VERIFY_DRAWN = True
+
+# Turn server-side sorting off - the runner then takes the smallest order it
+# can see on one page. Left on: sorting smallest-first is what maximises the
+# number of orders a lap can fill.
+ORDERS_SORT_ENABLED = True
 
 # =============================================================================
 # CONFIG - PULLING FINISHED ORDERS OUT OF THE BOOK
@@ -538,7 +598,10 @@ COMPLETED_MAX_PAGES = 40
 #     first row button of page N = ROW_BUTTON_BASE + (N - 1) * ROWS_PER_PAGE
 # Confirmed against live pages 1-4. Derived from the layout at runtime anyway;
 # these are only the sanity check.
-ROW_BUTTON_BASE = 100
+# The first withdraw button, = ORDERS_CONTROL_BASE + ORDERS_COLUMN_STRIDE*5.
+# Derived at runtime by orders_ids(); this is the expected value only, and it
+# moves the moment a column is added or removed.
+ROW_BUTTON_BASE = 40
 ROWS_PER_PAGE = 15
 
 # The Name filter is a SUBSTRING match, so the term is the resource's full name
@@ -1179,10 +1242,27 @@ def chat_say(text):
 
 
 def gump_lines(gump_id, data_only=False):
+    """The gump's strings, in layout order. [] when there is no gump.
+
+    The two-argument form is tried first and the one-argument form is the
+    fallback - the signature has had `dataOnly` throughout, but a TypeError
+    shim costs nothing and Razor has moved signatures between builds before.
+
+    A NULL return is treated as "no gump", not as an error. GetLineList returns
+    null for a gump id the client does not have open, and `list(None)` raises
+    TypeError deep inside whatever was asking - which is a traceback about
+    iteration rather than a message about a window that is not there.
+    """
     try:
-        return list(Gumps.GetLineList(gump_id, data_only))
+        raw = Gumps.GetLineList(gump_id, data_only)
     except TypeError:
-        return list(Gumps.GetLineList(gump_id))
+        try:
+            raw = Gumps.GetLineList(gump_id)
+        except Exception:
+            return []
+    except Exception:
+        return []
+    return list(raw or [])
 
 
 def has_gump(gump_id):
@@ -2636,6 +2716,205 @@ def open_book():
     return True
 
 
+def layout_text_cells(gump_id):
+    """(x, y, text) for every text cell on a gump, paired BY ORDER.
+
+    NOT by the text id in the layout. Razor drops empty strings out of a gump's
+    string table without leaving a gap, so one blank cell shifts every later id
+    down by one - see CLAUDE.md and docs/resource-order-book-gump.md. Pairing by
+    element order is the only safe reading, and GetLineList returns exactly one
+    entry per text/croppedtext element in layout order.
+    """
+    lines = gump_lines(gump_id)
+    cells = []
+    index = 0
+    for el in layout_elements(raw_layout(gump_id)):
+        if el["kind"] not in ("text", "croppedtext"):
+            continue
+        text = lines[index] if index < len(lines) else ""
+        index += 1
+        if len(el["nums"]) >= 2:
+            cells.append((el["nums"][0], el["nums"][1],
+                          str(text or "").strip()))
+    return cells
+
+
+def header_alias(text):
+    """Which column a header cell names, or None.
+
+    Aliased because the book has renamed this column already: the 2026-07-27
+    dump called it "Name" and the 2026-09-14 layout calls it "Item". A rename
+    must not read as "the column is gone".
+    """
+    low = (text or "").strip().lower()
+    for canon, names in ORDERS_HEADER_ALIASES:
+        for name in names:
+            if low == name.strip().lower():
+                return canon
+    return None
+
+
+def orders_column_order():
+    """The column names in X order, read off the live gump.
+
+    THE IDS ARE NOT FIXED - they come from the column layout, and anyone can
+    reorder or remove a column, which renumbers every id after it. The server
+    admin's instruction is explicit: read the header row, sort by X, recompute.
+    Do not guess.
+
+    Returns [] when the gump cannot be read, which every caller treats as
+    "fall back to the published layout" rather than as an empty book.
+    """
+    cells = layout_text_cells(ORDERS_GUMP)
+    if not cells:
+        return []
+
+    # Group the header cells by row, then take the row that names the most
+    # columns. Anchoring on one particular label does not work: the cell
+    # contents are order data too, and "Completed" appears in every row of the
+    # Completed column.
+    rows = {}
+    for x, y, text in cells:
+        canon = header_alias(text)
+        if canon is None:
+            continue
+        rows.setdefault(y, []).append((x, canon))
+    if not rows:
+        return []
+
+    best = max(rows.values(), key=len)
+    seen, order = set(), []
+    for _x, canon in sorted(best):
+        if canon not in seen:
+            seen.add(canon)
+            order.append(canon)
+    return order
+
+
+def orders_drawn_buttons():
+    """Every button id the server actually drew on the order list.
+
+    PRESSING A BUTTON THE SERVER DID NOT DRAW DISCONNECTS YOU. That is the
+    admin's wording, and it is why this exists rather than a comment saying to
+    be careful. Previous Page is not drawn on page 0 and Next Page is not drawn
+    on the last page, so both are a real hazard on a list the script pages
+    through.
+
+    An empty set means the layout could not be read, and press_orders treats
+    that as "cannot verify" rather than "nothing is drawn".
+    """
+    out = set()
+    for el in layout_elements(raw_layout(ORDERS_GUMP)):
+        if el["kind"] == "button" and len(el["nums"]) >= 3:
+            out.add(el["nums"][-1])
+    return out
+
+
+def orders_ids():
+    """Every button and field id this script needs on the order list.
+
+        control button  = ORDERS_CONTROL_BASE + stride*column + type
+        filter field id = column index
+        withdraw base   = ORDERS_CONTROL_BASE + stride*column_count
+
+    Resolved from the LIVE column order when the gump can be read, and from
+    ORDERS_COLUMNS_EXPECTED when it cannot. The fallback is the layout the
+    admin published on 2026-09-14; it is right until somebody reorders a
+    column, which is exactly the case the live read covers.
+    """
+    order = orders_column_order()
+    source = "live"
+    if not order:
+        order = list(ORDERS_COLUMNS_EXPECTED)
+        source = "published layout"
+
+    def control(columns, name, kind):
+        """The button for one column's control, or 0 if it has no such column.
+
+        `columns` is passed in rather than closed over: the project's own
+        unassigned-local check reads each function on its own, and a closure
+        looks to it exactly like a name used before it is set. Being explicit
+        costs one argument and keeps that check honest.
+        """
+        if name not in columns:
+            return 0
+        return (ORDERS_CONTROL_BASE
+                + ORDERS_COLUMN_STRIDE * columns.index(name) + kind)
+
+    base = ORDERS_CONTROL_BASE + ORDERS_COLUMN_STRIDE * len(order)
+    ids = {
+        "source": source,
+        "columns": list(order),
+        "item_field": order.index("Item") if "Item" in order else 0,
+        "item_filter": control(order, "Item", ORDERS_TYPE_FILTER),
+        "completed_field": (order.index("Completed")
+                            if "Completed" in order else 0),
+        "completed_filter": control(order, "Completed", ORDERS_TYPE_FILTER),
+        # SORT ASC IS THE SMALLEST FIRST ONE, and the arrow lies about it: the
+        # admin's note says the arrow that reads "desc" is the one that sorts
+        # ascending. Smallest first is what maximises orders filled per lap.
+        "amount_sort": control(order, "Amt To Gather", ORDERS_TYPE_SORT_ASC),
+        "withdraw_base": base,
+        "details_base": base + ORDERS_DETAILS_OFFSET,
+        # Every column's REMOVE button, so none of them can ever be pressed by
+        # accident. 21 was the old sort id and it removes the Completed column.
+        "remove": set(ORDERS_CONTROL_BASE + ORDERS_COLUMN_STRIDE * i
+                      + ORDERS_TYPE_REMOVE for i in range(len(order))),
+        "field_ids": list(range(len(order))),
+    }
+    return ids
+
+
+def press_orders(button, filter_text=None, entry=None, what=""):
+    """Press a button on the order list, with the two refusals that matter.
+
+    A REMOVE COLUMN press is refused outright. Button 21 used to be the sort
+    this script wanted and is now "remove the Completed column" - the admin's
+    note says stale scripts strip the book one pass at a time, and this script
+    was one of them. Removing a column also renumbers every id after it, so
+    anything reading that column reads the wrong cell until it is put back.
+
+    A button the server did not draw is refused too, because pressing one
+    disconnects you. When the layout cannot be read at all the press goes ahead
+    - refusing everything would be worse than the risk it guards against - but
+    it says so.
+    """
+    button = int(button)
+    if not button:
+        log("refusing to press button 0 on the order list (%s) - that is "
+            "close." % (what or "no reason given"), HUE_BAD)
+        return False
+
+    ids = orders_ids()
+    if button in ids["remove"]:
+        log("REFUSED: button %d removes the %s column from the book. %s"
+            % (button,
+               ids["columns"][(button - ORDERS_CONTROL_BASE)
+                              // ORDERS_COLUMN_STRIDE],
+               what or ""), HUE_BAD)
+        return False
+    if button in [int(b) for b in ORDERS_NEVER_PRESS]:
+        log("REFUSED: button %d is on ORDERS_NEVER_PRESS. %s"
+            % (button, what or ""), HUE_BAD)
+        return False
+
+    if ORDERS_VERIFY_DRAWN:
+        drawn = orders_drawn_buttons()
+        if drawn and button not in drawn:
+            # Not a warning. The server drops the connection for this, and the
+            # usual cause is real: Previous Page on page 0, Next Page on the
+            # last page.
+            log("REFUSED: the server did not draw button %d on this page, and "
+                "pressing one it did not draw disconnects you. %s"
+                % (button, what or ""), HUE_WARN)
+            return False
+        if not drawn:
+            log("  could not read the order list's buttons - pressing %d "
+                "unverified." % button, HUE_WARN)
+
+    return orders_action(button, filter_text, entry)
+
+
 def orders_action(button, filter_text=None, entry=None):
     """Press a button on the order list, restating the filter.
 
@@ -2647,12 +2926,18 @@ def orders_action(button, filter_text=None, entry=None):
     other box is submitted empty, which is what keeps two filters from stacking
     up by accident.
     """
+    ids_map = orders_ids()
     if entry is None:
-        entry = ORDERS_SEARCH_ENTRY
+        entry = ids_map["item_field"]
     if filter_text is None:
         Gumps.SendAction(ORDERS_GUMP, button)
     else:
-        ids = list(ORDERS_TEXT_IDS)
+        # EVERY column's field, because any apply-filter press overwrites
+        # every column's filter from the response - so a field left out of
+        # the reply is a filter cleared, and one left in is a filter kept.
+        # Sending all of them, with only `entry` populated, is what stops two
+        # filters stacking up by accident.
+        ids = list(ids_map["field_ids"])
         values = [filter_text if i == entry else "" for i in ids]
         try:
             Gumps.SendAdvancedAction(ORDERS_GUMP, button, [], ids, values)
@@ -2726,8 +3011,10 @@ def rewind_to_first_page(filter_text, entry=None):
         % current, HUE_WARN)
     if not open_book():
         return False
-    submit = ORDERS_FILTER_SUBMIT if entry in (None, ORDERS_SEARCH_ENTRY)         else ORDERS_COMPLETED_SUBMIT
-    return orders_action(submit, filter_text, entry)
+    ids = orders_ids()
+    submit = (ids["item_filter"] if entry in (None, ids["item_field"])
+              else ids["completed_filter"])
+    return press_orders(submit, filter_text, entry, what="re-apply the filter")
 
 
 def parse_rows_detailed(strings):
@@ -2787,8 +3074,10 @@ def pull_one_completed():
     was finished, and read_deed says whether it really was. If they disagree
     the parse is wrong and this stops rather than emptying the book.
     """
-    if not orders_action(ORDERS_COMPLETED_SUBMIT, COMPLETED_FILTER_TEXT,
-                         ORDERS_COMPLETED_ENTRY):
+    ids = orders_ids()
+    if not press_orders(ids["completed_filter"], COMPLETED_FILTER_TEXT,
+                        ids["completed_field"],
+                        what="filter for finished orders"):
         log("The list closed while filtering for finished orders.", HUE_BAD)
         return None, "stop"
 
@@ -2797,7 +3086,7 @@ def pull_one_completed():
     if displayed == 0:
         return None, "none"
 
-    if not rewind_to_first_page(COMPLETED_FILTER_TEXT, ORDERS_COMPLETED_ENTRY):
+    if not rewind_to_first_page(COMPLETED_FILTER_TEXT, ids["completed_field"]):
         return None, "stop"
 
     for page in range(1, COMPLETED_MAX_PAGES + 1):
@@ -2833,8 +3122,8 @@ def pull_one_completed():
         current, total = page_counter(strings)
         if total is None or current is None or current >= total:
             break
-        if not orders_action(ORDERS_NEXT_BUTTON, COMPLETED_FILTER_TEXT,
-                             ORDERS_COMPLETED_ENTRY):
+        if not press_orders(ORDERS_NEXT_BUTTON, COMPLETED_FILTER_TEXT,
+                            ids["completed_field"], what="next page"):
             break
     return None, "none"
 
@@ -2875,12 +3164,13 @@ def pull_completed_orders():
             after = parse_header(gump_lines(ORDERS_GUMP)).get("displayed")
             if (unfiltered is not None and after is not None
                     and after >= unfiltered and after > 0):
-                log("The Completed filter (%r in filter box %d, the last "
-                    "column) did not narrow the "
-                    "list - %s rows before, %s after. Nothing was pulled. If "
-                    "that column reads something other than %r, set "
-                    "COMPLETED_FILTER_TEXT."
-                    % (COMPLETED_FILTER_TEXT, ORDERS_COMPLETED_ENTRY,
+                ids = orders_ids()
+                log("The Completed filter (%r in filter box %d, column %d of "
+                    "%s, read from the %s) did not narrow the list - %s rows "
+                    "before, %s after. Nothing was pulled. If that column "
+                    "reads something other than %r, set COMPLETED_FILTER_TEXT."
+                    % (COMPLETED_FILTER_TEXT, ids["completed_field"],
+                       ids["completed_field"], ids["columns"], ids["source"],
                        unfiltered, after, COMPLETED_FILTER_TEXT), HUE_WARN)
         break
 
@@ -2930,10 +3220,15 @@ def sort_by_amount(term, anchor, exact):
     presses cannot produce an ascending page, sorting is reported as
     unavailable and the caller falls back to picking the smallest it can see.
     """
-    if not ORDERS_SORT_AMOUNT_BUTTON:
+    if not ORDERS_SORT_ENABLED:
+        return False
+    button = orders_ids()["amount_sort"]
+    if not button:
+        log("The book has no 'Amt To Gather' column to sort by - taking the "
+            "smallest order on the page instead.", HUE_WARN)
         return False
     for _attempt in (1, 2):
-        if not orders_action(ORDERS_SORT_AMOUNT_BUTTON, term):
+        if not press_orders(button, term, what="sort smallest first"):
             log("The list closed while sorting %r by amount." % term, HUE_WARN)
             return False
         # Sorting may or may not reset the page; make sure of it either way,
@@ -2945,9 +3240,11 @@ def sort_by_amount(term, anchor, exact):
             return True         # nothing on the page can contradict it
         if seen == sorted(seen):
             return True
+    ids = orders_ids()
     log("%r would not sort ascending - taking the smallest in view instead. "
-        "If this keeps happening, ORDERS_SORT_AMOUNT_BUTTON may be wrong for "
-        "your build." % term, HUE_WARN)
+        "The sort button was %d, computed from the %s column order %s. If the "
+        "book's columns have been reordered again, that is where to look."
+        % (term, ids["amount_sort"], ids["source"], ids["columns"]), HUE_WARN)
     return False
 
 
@@ -2989,7 +3286,8 @@ def find_first_order(resource, budget, refilter=True):
     exact = re.compile(r"^%ss?$" % re.escape(anchor.rstrip("s")), re.I)
 
     if refilter:
-        if not orders_action(ORDERS_FILTER_SUBMIT, term):
+        if not press_orders(orders_ids()["item_filter"], term,
+                            what="filter by name"):
             log("The list closed while filtering for %r." % term, HUE_BAD)
             return None
 

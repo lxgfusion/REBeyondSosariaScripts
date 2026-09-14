@@ -2579,16 +2579,85 @@ def test_a_page_with_nothing_finished_yields_nothing(m):
     check("none completed", [r["completed"] for r in rows], [False, False])
 
 
-def test_the_completed_filter_targets_column_five(m):
-    """Column 5 is Completed: entry id 4, submit button 52. Getting this wrong
-    would filter the Name column with "Yes" and return nothing, which reads as
-    "no finished orders" rather than as a mistake."""
-    check("entry 4", m["ORDERS_COMPLETED_ENTRY"], 4)
-    check("submit 52", m["ORDERS_COMPLETED_SUBMIT"], 52)
-    check("not the Name box",
-          m["ORDERS_COMPLETED_ENTRY"] == m["ORDERS_SEARCH_ENTRY"], False)
-    check("not the Name submit",
-          m["ORDERS_COMPLETED_SUBMIT"] == m["ORDERS_FILTER_SUBMIT"], False)
+def test_the_completed_filter_is_computed_not_remembered(m):
+    """Completed was column 5 with entry id 4 and submit 52. It is column 1 now,
+    entry id 1 and submit 18 - and 52 under the current layout is WITHDRAW ROW
+    12. Every attempt to filter for finished orders was pulling whichever deed
+    happened to be twelfth out of the book instead.
+
+    The numbers are not pinned here. The admin's list says the ids come from
+    the column layout and anyone can reorder it, so what is asserted is that
+    the script computes them."""
+    ids = m["orders_ids"]()
+    check("Completed is column 1 in the published layout",
+          ids["completed_field"], 1)
+    check("so its filter submit is 10 + 6*1 + 2", ids["completed_filter"], 18)
+    check("not the Item box", ids["completed_field"] == ids["item_field"],
+          False)
+    check("not the Item submit",
+          ids["completed_filter"] == ids["item_filter"], False)
+
+    # 52 is a withdraw button now. Pressing it does not filter anything.
+    check("the old submit is inside the row range",
+          ids["withdraw_base"] <= 52 < ids["withdraw_base"] + 15, True)
+
+
+def test_the_ids_follow_the_published_formula(m):
+    """    control button  = base + stride*column + type
+    filter field id = column index
+    withdraw base   = base + stride*column_count
+    row i           = withdraw base + i
+    row i details   = withdraw base + 100000 + i
+
+    Checked against every number the admin listed, so a typo in the arithmetic
+    shows up here rather than as a disconnect in game."""
+    ids = m["orders_ids"]()
+    check("columns as published", ids["columns"],
+          ["Item", "Completed", "Amt To Gather", "Amt Gathered", "Value Per"])
+    check("item filter = 12", ids["item_filter"], 12)
+    check("item field = 0", ids["item_field"], 0)
+    check("amount sort ascending = 23", ids["amount_sort"], 23)
+    check("withdraw base = 40", ids["withdraw_base"], 40)
+    check("details base = 100040", ids["details_base"], 100040)
+    check("every REMOVE button is known",
+          sorted(ids["remove"]), [15, 21, 27, 33, 39])
+    check("one filter field per column", ids["field_ids"], [0, 1, 2, 3, 4])
+    check("and ROW_BUTTON_BASE agrees with the arithmetic",
+          m["ROW_BUTTON_BASE"], ids["withdraw_base"])
+
+
+def test_the_ids_move_when_a_column_moves(m):
+    """"Shifting or removing a column renumbers every id after it." The whole
+    reason the ids are computed rather than remembered - so this drives a
+    reordered and a shortened book through the same arithmetic."""
+    saved = m["ORDERS_COLUMNS_EXPECTED"]
+    saved_order = m["orders_column_order"]
+    try:
+        m["orders_column_order"] = lambda: []      # force the fallback
+
+        # Completed shifted to the end.
+        m["ORDERS_COLUMNS_EXPECTED"] = ["Item", "Amt To Gather",
+                                        "Amt Gathered", "Value Per",
+                                        "Completed"]
+        ids = m["orders_ids"]()
+        check("Completed's field follows it", ids["completed_field"], 4)
+        check("and its filter is 10 + 6*4 + 2", ids["completed_filter"], 36)
+        check("Amt To Gather's sort moved too", ids["amount_sort"], 17)
+        check("the withdraw base is unchanged at 5 columns",
+              ids["withdraw_base"], 40)
+
+        # Completed removed entirely - four columns, so the rows move.
+        m["ORDERS_COLUMNS_EXPECTED"] = ["Item", "Amt To Gather",
+                                        "Amt Gathered", "Value Per"]
+        ids = m["orders_ids"]()
+        check("a missing column has no filter", ids["completed_filter"], 0)
+        check("and the withdraw base moves to 10 + 6*4",
+              ids["withdraw_base"], 34)
+        check("with the remove set shrinking to match",
+              sorted(ids["remove"]), [15, 21, 27, 33])
+    finally:
+        m["ORDERS_COLUMNS_EXPECTED"] = saved
+        m["orders_column_order"] = saved_order
 
 
 def test_orders_action_puts_the_text_in_the_box_it_was_given(m):
@@ -2612,19 +2681,24 @@ def test_orders_action_puts_the_text_in_the_box_it_was_given(m):
     saved = m["Gumps"]
     try:
         m["Gumps"] = FakeGumps()
-        m["orders_action"](m["ORDERS_COMPLETED_SUBMIT"], "Yes",
-                           m["ORDERS_COMPLETED_ENTRY"])
+        ids = m["orders_ids"]()
+        box = ids["completed_field"]
+        m["orders_action"](ids["completed_filter"], "Yes", box)
         check("all five boxes submitted", len(sent["values"]), 5)
-        check("Yes went in box 4",
-              sent["values"][sent["ids"].index(4)], "Yes")
+        check("Yes went in the Completed box",
+              sent["values"][sent["ids"].index(box)], "Yes")
+        # "Any apply-filter press overwrites EVERY column's filter from your
+        # response" - so a box left out is a filter cleared, and the empties
+        # are what stop two filters stacking up.
         check("every other box is empty",
-              [v for i, v in zip(sent["ids"], sent["values"]) if i != 4],
+              [v for i, v in zip(sent["ids"], sent["values"]) if i != box],
               ["", "", "", ""])
 
         sent.clear()
-        m["orders_action"](m["ORDERS_FILTER_SUBMIT"], "Copper Ingots")
-        check("the name still defaults to box 0",
-              sent["values"][sent["ids"].index(0)], "Copper Ingots")
+        m["orders_action"](ids["item_filter"], "Copper Ingots")
+        check("the name defaults to the Item box",
+              sent["values"][sent["ids"].index(ids["item_field"])],
+              "Copper Ingots")
     finally:
         m["Gumps"] = saved
 
@@ -3130,8 +3204,8 @@ def test_the_burst_reuses_the_hot_filter(m):
     for node in _ast.walk(finder):
         if isinstance(node, _ast.If):
             for inner in _ast.walk(node):
-                if isinstance(inner, _ast.Name) \
-                        and inner.id == "ORDERS_FILTER_SUBMIT":
+                if isinstance(inner, _ast.Call) \
+                        and getattr(inner.func, "id", None) == "press_orders":
                     submits.append(node)
     check("the filter submit sits behind an if", len(submits) >= 1, True)
 
@@ -3426,20 +3500,31 @@ def test_max_order_size_is_still_a_sanity_ceiling(m):
 # from a fixed stock.
 # ---------------------------------------------------------------------------
 
-def test_the_sort_button_is_the_captured_one(m):
-    check("button 21, from the Gump Inspector",
-          m["ORDERS_SORT_AMOUNT_BUTTON"], 21)
-    check("the gump id matches the capture", m["ORDERS_GUMP"], 0xB2F21F1A)
+def test_the_sort_button_is_no_longer_21(m):
+    """21 WAS the sort, captured from the Gump Inspector on 2026-08-22 when the
+    stride was 10. Under the 2026-09-14 layout it is 10 + 6*1 + 5 - the REMOVE
+    button on the Completed column. The admin's note names this exact failure:
+    "Button 21 was the old ListEntryGump sort id - stale scripts strip the book
+    one pass at a time." This script was one of them."""
+    ids = m["orders_ids"]()
+    check("the sort is 23, not 21", ids["amount_sort"], 23)
+    check("21 is a REMOVE button now", 21 in ids["remove"], True)
+    check("and the sort is not one of them",
+          ids["amount_sort"] in ids["remove"], False)
+    check("the gump id is unchanged", m["ORDERS_GUMP"], 0xB2F21F1A)
 
-    # It must not collide with anything destructive on the same gump.
-    for name in ("ORDERS_FILTER_SUBMIT", "ORDERS_NEXT_BUTTON",
-                 "ORDERS_PREV_BUTTON", "ORDERS_COMPLETED_SUBMIT"):
-        check("21 is not also %s" % name,
-              m["ORDERS_SORT_AMOUNT_BUTTON"] == m[name], False)
-    # Purge is 2 and Fill from backpack is 3 on this gump - documented in
-    # CLAUDE.md as the reason never to guess a button here.
-    check("and it is not Purge (2) or Fill from backpack (3)",
-          m["ORDERS_SORT_AMOUNT_BUTTON"] in (2, 3), False)
+    for name, value in (("item_filter", ids["item_filter"]),
+                        ("completed_filter", ids["completed_filter"]),
+                        ("ORDERS_NEXT_BUTTON", m["ORDERS_NEXT_BUTTON"]),
+                        ("ORDERS_PREV_BUTTON", m["ORDERS_PREV_BUTTON"])):
+        check("the sort is not also %s" % name,
+              ids["amount_sort"] == value, False)
+
+    # Purge is 3 on this gump and Fill from backpack is 2 - they SWAPPED since
+    # the old note, which is its own reason never to guess a button here.
+    check("and it is not Purge (3) or Fill from backpack (2)",
+          ids["amount_sort"] in (2, 3), False)
+    check("Purge is refused outright", 3 in m["ORDERS_NEVER_PRESS"], True)
 
 
 class SortingList(object):
@@ -3467,9 +3552,13 @@ class SortingList(object):
 def _sorting_module(listing):
     """A module whose gump reads come from `listing`."""
     module = load()
+    sort_button = module["orders_ids"]()["amount_sort"]
     module["orders_action"] = lambda button, text=None, entry=None: (
-        listing.press() or True) if button == module["ORDERS_SORT_AMOUNT_BUTTON"] \
-        else True
+        listing.press() or True) if button == sort_button else True
+    # press_orders normally verifies the button was drawn; there is no gump
+    # here, so it is short-circuited to the action it wraps.
+    module["press_orders"] = lambda button, text=None, entry=None, what="": \
+        module["orders_action"](button, text, entry)
     module["rewind_to_first_page"] = lambda *a, **k: True
     module["gump_lines"] = lambda *a, **k: ["ROWS"]
     module["parse_order_rows"] = lambda strings, anchor: [
@@ -3526,14 +3615,26 @@ def test_sorting_can_be_switched_off(m):
     exact = _re.compile(r"^iron ingots?$", _re.I)
     listing = SortingList([500, 100])
     mod = _sorting_module(listing)
-    saved = mod["ORDERS_SORT_AMOUNT_BUTTON"]
+    saved = mod["ORDERS_SORT_ENABLED"]
     try:
-        mod["ORDERS_SORT_AMOUNT_BUTTON"] = 0
-        check("no button, no sorting",
+        mod["ORDERS_SORT_ENABLED"] = False
+        check("switched off, no sorting",
               mod["sort_by_amount"]("Iron Ingots", "iron ingots", exact), False)
         check("and nothing was pressed", listing.presses, 0)
+
+        # And a book with no Amt To Gather column to sort by.
+        mod["ORDERS_SORT_ENABLED"] = True
+        saved_order = mod["orders_column_order"]
+        try:
+            mod["orders_column_order"] = lambda: ["Item", "Completed"]
+            check("no such column, no sorting",
+                  mod["sort_by_amount"]("Iron Ingots", "iron ingots", exact),
+                  False)
+            check("and still nothing pressed", listing.presses, 0)
+        finally:
+            mod["orders_column_order"] = saved_order
     finally:
-        mod["ORDERS_SORT_AMOUNT_BUTTON"] = saved
+        mod["ORDERS_SORT_ENABLED"] = saved
 
 
 def test_page_amounts_ignores_other_resources(m):
@@ -4047,6 +4148,168 @@ def test_the_floor_is_measured_from_now_not_from_the_last_fill(m):
     finally:
         m["Misc"].Pause = saved_pause
         restore()
+
+
+# --------------------------------------------------------------------------
+# The two refusals
+#
+# From the admin's list:
+#   "21 / 27 / 33 / 39 REMOVE a column. Recoverable with button 9, but anything
+#    reading that column reads the wrong cell until you put it back."
+#   "Pressing a button the server did not draw disconnects you."
+#
+# Correct numbers are not enough for either. The first needs a refusal, because
+# the correct number today is a destructive one tomorrow. The second needs a
+# check against what was actually drawn, because Previous Page and Next Page
+# are conditionally drawn on a list this script pages through.
+# --------------------------------------------------------------------------
+
+def _pressed(m, drawn=None, columns=None):
+    """Drive press_orders with a fake gump and collect what got through."""
+    got = []
+    saved = {k: m[k] for k in ("orders_action", "orders_drawn_buttons",
+                               "orders_column_order", "log")}
+    m["orders_action"] = lambda b, text=None, entry=None: got.append(b) or True
+    m["orders_drawn_buttons"] = lambda: set(drawn if drawn is not None
+                                            else range(0, 200))
+    if columns is not None:
+        m["orders_column_order"] = lambda: list(columns)
+    m["log"] = lambda *a, **k: None
+    return got, lambda: [m.__setitem__(k, v) for k, v in saved.items()]
+
+
+def test_a_remove_column_press_is_refused(m):
+    """The one that already happened. 21 was this script's sort button and it
+    removes the Completed column - "stale scripts strip the book one pass at a
+    time", and this was one of them."""
+    got, restore = _pressed(m)
+    try:
+        for button in sorted(m["orders_ids"]()["remove"]):
+            check("button %d is refused" % button,
+                  m["press_orders"](button, what="test"), False)
+        check("none of them got through", got, [])
+
+        # And the sort that replaced 21 does get through.
+        check("the real sort is allowed",
+              m["press_orders"](m["orders_ids"]()["amount_sort"],
+                                what="test"), True)
+        check("and it was the one pressed", got, [23])
+    finally:
+        restore()
+
+
+def test_purge_is_refused(m):
+    """Button 3 opens a bulk delete gump. Nothing this script does wants it, and
+    it used to be Fill from backpack - the two SWAPPED, which is its own reason
+    never to guess a button on this window."""
+    got, restore = _pressed(m)
+    try:
+        check("Purge is on the never list", 3 in m["ORDERS_NEVER_PRESS"], True)
+        check("and pressing it is refused",
+              m["press_orders"](3, what="test"), False)
+        check("nothing was sent", got, [])
+    finally:
+        restore()
+
+
+def test_button_zero_is_refused(m):
+    """0 closes the gump, and it is also what a missing column resolves to. A
+    press of 0 therefore means "the id could not be worked out" - shutting the
+    window is the wrong answer to that."""
+    got, restore = _pressed(m)
+    try:
+        check("0 is refused", m["press_orders"](0, what="test"), False)
+        check("nothing was sent", got, [])
+    finally:
+        restore()
+
+
+def test_an_undrawn_button_is_refused(m):
+    """Pressing one disconnects you. Previous Page is not drawn on page 0 and
+    Next Page is not drawn on the last page, so this is not hypothetical - it
+    is every first and last page of every filter the script applies."""
+    # A page 0: Next drawn, Previous not.
+    got, restore = _pressed(m, drawn={2, 5, 12, 18, 23, 40, 41})
+    try:
+        check("Next Page goes through",
+              m["press_orders"](m["ORDERS_NEXT_BUTTON"], what="test"), True)
+        check("Previous Page on page 0 is refused",
+              m["press_orders"](m["ORDERS_PREV_BUTTON"], what="test"), False)
+        check("only the drawn one was sent", got, [m["ORDERS_NEXT_BUTTON"]])
+    finally:
+        restore()
+
+
+def test_an_unreadable_layout_presses_anyway(m):
+    """Refusing everything when the layout cannot be read would be worse than
+    the risk it guards against - the script would simply stop working. It
+    presses, and says it could not verify."""
+    got, restore = _pressed(m, drawn=set())
+    try:
+        check("it still presses", m["press_orders"](23, what="test"), True)
+        check("and it went out", got, [23])
+    finally:
+        restore()
+
+
+def test_the_column_order_is_read_off_the_header_row(m):
+    """"Read the header row; each header's X is its column's X. Sort headers by
+    X = the column index order." Anchoring on one label does not work: the cell
+    CONTENTS are data too, and "Completed" appears in every row of that column."""
+    HEADERS = [(60, 50, "Item"), (460, 50, "Completed"),
+               (560, 50, "Amt To Gather"), (660, 50, "Amt Gathered"),
+               (760, 50, "Value Per")]
+    ROWS = [(60, 90, "Iron Ingots"), (460, 90, "No"), (560, 90, "1200"),
+            (60, 110, "Completed"), (460, 110, "Yes")]
+
+    saved = m["layout_text_cells"]
+    try:
+        # Deliberately shuffled, and with a row cell that reads "Completed".
+        m["layout_text_cells"] = lambda gid: list(reversed(HEADERS)) + ROWS
+        check("read in X order, not layout order", m["orders_column_order"](),
+              ["Item", "Completed", "Amt To Gather", "Amt Gathered",
+               "Value Per"])
+
+        # A reordered book.
+        moved = [(60, 50, "Item"), (200, 50, "Amt To Gather"),
+                 (400, 50, "Completed")]
+        m["layout_text_cells"] = lambda gid: moved
+        check("a reordered header gives a reordered index",
+              m["orders_column_order"](),
+              ["Item", "Amt To Gather", "Completed"])
+
+        # "Name" was this column's old label; a rename is not a removal.
+        m["layout_text_cells"] = lambda gid: [(60, 50, "Name"),
+                                              (460, 50, "Completed")]
+        check("the old Name header still reads as Item",
+              m["orders_column_order"](), ["Item", "Completed"])
+
+        # Nothing readable -> [] so the caller falls back, rather than
+        # concluding the book has no columns.
+        m["layout_text_cells"] = lambda gid: []
+        check("unreadable gives nothing to guess from",
+              m["orders_column_order"](), [])
+    finally:
+        m["layout_text_cells"] = saved
+
+
+def test_the_live_order_beats_the_published_one(m):
+    """The published layout is a fallback. When the gump can be read, what it
+    says wins - that is the difference between fixing today's numbers and
+    surviving the next reorder."""
+    saved = m["orders_column_order"]
+    try:
+        m["orders_column_order"] = lambda: ["Item", "Amt To Gather"]
+        ids = m["orders_ids"]()
+        check("the live order is used", ids["source"], "live")
+        check("and the ids follow it", ids["amount_sort"], 17)
+        check("with the rows after two columns", ids["withdraw_base"], 22)
+
+        m["orders_column_order"] = lambda: []
+        check("the fallback is named as such",
+              m["orders_ids"]()["source"], "published layout")
+    finally:
+        m["orders_column_order"] = saved
 
 
 def main():

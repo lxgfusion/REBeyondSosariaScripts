@@ -1,5 +1,88 @@
 # Resource Order Book gump
 
+## THE IDS ON THE ORDER LIST ARE NOT FIXED — 2026-09-14
+
+From the server admin's button list (`StashEntryGump`, item 8793/`0x2259`
+hue 1271), verified live. Everything below §1 that gives a number is history.
+
+```
+control button  = 10 + 6*column_index + type
+filter field id = column_index
+withdraw base   = 10 + 6*column_count
+row i           = withdraw base + i            (15 rows per page)
+row i details   = withdraw base + 100000 + i
+```
+
+| type | meaning |
+|---|---|
+| 0 | sort — the arrow that **says** "asc", sorts DESC |
+| 1 | sort — the arrow that **says** "desc", sorts ASC ← smallest first |
+| 2 | apply filter |
+| 3 | shift left |
+| 4 | shift right |
+| 5 | **REMOVE COLUMN** |
+
+Current column order — *not* the declared order, anyone can reorder it:
+
+| # | Column | x | sort desc | sort asc | filter | remove |
+|---|---|---:|---:|---:|---:|---:|
+| 0 | Item | 60 | 10 | 11 | **12** | 15 |
+| 1 | Completed | 460 | 16 | 17 | **18** | 21 |
+| 2 | Amt To Gather | 560 | 22 | **23** | 24 | 27 |
+| 3 | Amt Gathered | 660 | 28 | 29 | 30 | 33 |
+| 4 | Value Per | 760 | 34 | 35 | 36 | 39 |
+
+Withdraw rows **40–54**, details **100040–100054**.
+
+Global: `0` close · `1` Add · `2` Fill from backpack · `3` **Purge (bulk
+delete)** · `4` Previous Page (*not drawn on page 0*) · `5` Next Page (*not
+drawn on the last page*) · `6` Feed Crucible (not on this book) · `9` Add
+Column.
+
+### What this broke in the script
+
+| Constant | Was | Now means | Consequence |
+|---|---|---|---|
+| `ORDERS_SORT_AMOUNT_BUTTON` | 21 | **remove the Completed column** | the book was stripped one pass at a time |
+| `ORDERS_COMPLETED_SUBMIT` | 52 | **withdraw row 12** | every "filter for finished orders" pulled the twelfth deed instead |
+| `ORDERS_COMPLETED_ENTRY` | 4 | Completed is column 1 | filtered the wrong column |
+| `ROW_BUTTON_BASE` | 100 | 40 | sanity check only; rows are read from the layout |
+
+Neither of the first two failed loudly. **That is the whole problem with a
+hardcoded button id**, and it is why `orders_ids()` now computes them from the
+live header row and falls back to the published order only when the gump cannot
+be read.
+
+### Rules that are not about numbers
+
+- **Pressing a button the server did not draw disconnects you.** `press_orders`
+  checks the drawn set first. Previous/Next Page are the live hazard.
+- **21 / 27 / 33 / 39 remove a column.** Refused outright. Recoverable with
+  button 9, but until it is put back anything reading that column reads the
+  wrong cell — and removing one renumbers every id after it.
+- **Purge (3) is refused outright.** It used to be Fill from backpack; the two
+  swapped.
+- **Any apply-filter press overwrites EVERY column's filter from your
+  response.** Applying with no text clears all filters. Filters persist on the
+  book. So every submit sends all field ids, with only the wanted one populated.
+- **Filters are substring** — "Amber" also matches "Brilliant Amber", which is
+  why every row is still checked exactly afterwards.
+- Sort arrows are inverted; the "ascending" arrow sorts descending.
+
+### If a column has moved again
+
+Do not guess. Read the header row, sort the headers by X, and recompute — which
+is what `orders_column_order()` does. `orders_ids()["source"]` says whether the
+numbers came from the live gump or the fallback, and the sort-failure log prints
+both the button it used and the column order it derived it from.
+
+---
+
+## HISTORY — the 2026-07-27 dump
+
+Numbers below are superseded. Kept because the *shapes* still hold: two gumps,
+server-side paging, and the string-table gotcha.
+
 Mapped from a live dump on 2026-07-27 (`diag_resource_orders.py`). The book is
 `0x404AC332`, ItemID `0x2259`, hue `0x04F7`, locked down and Blessed on the
 ground at (1282, 1192, -85). The chest beside it is `0x400CEF90`.
