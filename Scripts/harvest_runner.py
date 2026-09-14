@@ -50,7 +50,7 @@ Misc.Pause(5000)
 # This script has FOUR copies that differ on purpose (repo, main character,
 # MrGatherer, Mystic Gatherer). Give each a distinct SCRIPT_TAG so the banner
 # also says which copy is running, not just which version.
-SCRIPT_VERSION = "2026-09-04.1"
+SCRIPT_VERSION = "2026-09-14.1"
 SCRIPT_TAG = "repo"
 
 
@@ -757,6 +757,31 @@ STUCK_GIVE_UP = 3
 #
 # 0 disables it and leaves those three as the only bounds.
 AREA_NO_PROGRESS_MS = 30000
+
+# ---------------------------------------------------------------------------
+# THE STALL WATCHDOG - the one that runs while something else is stuck.
+#
+# Every other guard in this file is a Python check BETWEEN calls, and that is
+# exactly what they cannot cover. The waypoint cap is tested between task()
+# calls, the spot cap between swings, the idle clock at the top of a sweep -
+# so anything that hangs INSIDE one of those is invisible to all of them. Mr
+# Gatherer sat on one tile for over an hour with every one of them armed.
+#
+# This one runs from interruptible_pause, which every wait in the script goes
+# through, so it keeps ticking while anything else is stuck.
+#
+# WHAT COUNTS AS PROGRESS: the character MOVED, or something was harvested.
+# Neither alone will do - mining stands still and produces, walking moves and
+# produces nothing - so the clock is reset by either and runs only when there
+# is neither.
+#
+# It escalates rather than acting at once, because the cheap answer usually
+# works: first it says "stuck" to itself, which every handler in this file
+# already honours; only if that changes nothing does it force the next rune.
+#
+# 0 disables it and leaves the between-calls guards as the only ones.
+STALL_STUCK_MS = 300000           # 5 min of neither -> say "stuck" internally
+STALL_RECALL_MS = 600000          # 10 min -> force the next waypoint
 
 # The same clock on a mythril rune. A mythril swing takes eight seconds and
 # legitimately finds nothing most of the time, so 30s there is two or three
@@ -1735,6 +1760,20 @@ _stuck_at_rune = {}
 # walk_to is called from outside a sweep.
 _spot_progress_at = [0.0]
 
+# THE STALL WATCHDOG's state. "where" is the tile progress was last seen on,
+# "at" is when, "said" is how far the escalation has gone so each step speaks
+# once and only once.
+#
+# BELOW THE SEAM, like every other piece of runtime state - the config half is
+# carried forward from each live copy and the code half is replaced, so a name
+# the code uses that is declared above the seam never travels. That is not
+# hypothetical; it is how "move" shipped as a NameError in every live copy.
+_stall = {"at": 0.0, "where": None, "said": 0}
+
+# Set by the watchdog when even saying "stuck" did not break the stall. The job
+# loop reads it and forces the next rune.
+_force_waypoint = [False]
+
 _transcript = []
 
 
@@ -2207,6 +2246,77 @@ def heartbeat():
             % (_phase[0], quiet / 1000.0), HUE_INFO)
 
 
+def note_progress():
+    """Something real happened. Restarts the stall watchdog.
+
+    Called for a harvested swing and for an arrival. Movement is picked up by
+    the watchdog itself, from the character's own position.
+    """
+    _stall["at"] = time.time()
+    _stall["said"] = 0
+
+
+def stall_watchdog():
+    """Escalate when NOTHING is happening anywhere. Runs from every pause.
+
+    This is the guard that keeps ticking while another one is stuck. The
+    waypoint cap is checked between task() calls, the spot cap between swings,
+    the idle clock at the top of a sweep - so a stall INSIDE any of those is
+    invisible to every one of them, which is how a character sat on one tile
+    for an hour with all of them armed.
+
+    Progress is MOVING or HARVESTING. Neither on its own will do: mining stands
+    still and produces, walking moves and produces nothing, and only the
+    absence of both is a stall.
+
+    It escalates rather than acting at once, because the cheap answer usually
+    works:
+
+      STALL_STUCK_MS   say "stuck" internally. Every handler in this file
+                       already honours it - the walk abandons the spot, the
+                       sweep writes it off, the long waits bail.
+      STALL_RECALL_MS  that did not work either. Force the next rune.
+    """
+    global _stuck_pending
+    if not STALL_STUCK_MS:
+        return
+
+    now = time.time()
+    try:
+        here = (int(Player.Position.X), int(Player.Position.Y))
+    except Exception:
+        return                      # no position to judge by - not a stall
+
+    if here != _stall["where"]:
+        _stall["where"] = here
+        _stall["at"] = now
+        _stall["said"] = 0
+        return
+    if not _stall["at"]:
+        _stall["at"] = now
+        return
+
+    idle = (now - _stall["at"]) * 1000.0
+
+    if (STALL_RECALL_MS and idle >= STALL_RECALL_MS
+            and _stall["said"] < 2):
+        _stall["said"] = 2
+        log("STALL: %d minutes on %d,%d with nothing harvested and no step "
+            "taken, and saying \"stuck\" did not shift it. Forcing the next "
+            "rune. What it was doing: %s"
+            % (idle / 60000.0, here[0], here[1], _phase[0]), HUE_BAD)
+        _force_waypoint[0] = True
+        _stuck_pending = True
+        return
+
+    if idle >= STALL_STUCK_MS and _stall["said"] < 1:
+        _stall["said"] = 1
+        log("STALL: %d minutes on %d,%d with nothing harvested and no step "
+            "taken. Saying \"stuck\" to break it out. What it was doing: %s"
+            % (idle / 60000.0, here[0], here[1], _phase[0]), HUE_WARN)
+        _stuck_pending = True
+
+
 def bail_requested():
     """Has a "skip" or "move" been said? Does NOT consume it.
 
@@ -2287,6 +2397,9 @@ def interruptible_pause(total_ms, slice_ms=250):
         # through a poller that can decline to scan is what hid them.
         scan_journal()
         heartbeat()
+        # THE ONLY GUARD THAT RUNS WHILE ANOTHER ONE IS STUCK. Everything else
+        # is checked between calls; this is checked during them.
+        stall_watchdog()
 
 
 def checkGreyskull():
@@ -4902,6 +5015,9 @@ def arrived():
     See player_ready() for why walking too early kills the client.
     """
     wait_for_player()
+    # Arriving somewhere is progress even if the new tile happens to read the
+    # same as the old one, which it can after a failed recall.
+    note_progress()
     return True
 
 
@@ -5012,6 +5128,10 @@ def area_is_idle(state):
 def note_area_yield(state):
     """Reset the idle clock. Called for every swing that produced something."""
     state["last_yield"] = time.time()
+    # And the global one. Standing still and producing is not a stall, which
+    # is the whole reason the watchdog needs more than the character's
+    # position to judge by.
+    note_progress()
 
 
 def budget_ms(deadline, most_ms):
@@ -5609,6 +5729,12 @@ def run_job(job, resume=False):
 
     need_waypoint = True
     hostile_skips = 0
+    # A stall forced on the way out of the LAST job has nothing to act on here
+    # - the first thing this loop does is take a waypoint anyway - and left set
+    # it would be spent on the first rune of this one.
+    _force_waypoint[0] = False
+    _stall["at"] = time.time()
+    _stall["said"] = 0
     at_waypoint_since = time.time()
     watched_waypoint = None
     unloads_here = 0
@@ -5620,6 +5746,15 @@ def run_job(job, resume=False):
             return "timer"
         if not Timer.Check("harvest vendors"):
             return "vendors"
+
+        # THE STALL WATCHDOG gave up on breaking it out with "stuck". It runs
+        # from inside the pauses, so unlike the waypoint cap below it can fire
+        # while task() is still running - and this is where that is cashed in.
+        if _force_waypoint[0]:
+            _force_waypoint[0] = False
+            log("%s: the stall watchdog is forcing the next rune." % name,
+                HUE_BAD)
+            need_waypoint = True
 
         if need_waypoint:
             # Checked BEFORE recalling. Doing it after meant the final goNext

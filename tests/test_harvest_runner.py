@@ -4875,6 +4875,206 @@ def test_a_recall_forgets_a_pending_stuck(m):
         m["_stuck_pending"] = saved
 
 
+# --------------------------------------------------------------------------
+# The stall watchdog
+#
+# Mr Gatherer sat on one tile at 1185,460 for over an HOUR with every guard in
+# the file armed. That is the tell: the waypoint cap is 3 minutes and the spot
+# cap 2, so neither was being reached.
+#
+# They are all Python checks BETWEEN calls - the waypoint cap between task()
+# calls, the spot cap between swings, the idle clock at the top of a sweep - so
+# a stall INSIDE any of them is invisible to all of them. This one runs from
+# interruptible_pause, which every wait goes through, so it keeps ticking while
+# something else is stuck.
+# --------------------------------------------------------------------------
+
+class _StallPlayer(object):
+    def __init__(self, x=100, y=100):
+        self.move(x, y)
+        self.IsGhost = False
+
+    def move(self, x, y):
+        self.Position = type("P", (), {"X": x, "Y": y})()
+
+
+def _stall_module(m, now):
+    """Drive the watchdog with a clock we control."""
+    saved = {k: m[k] for k in ("Player", "time", "log")}
+    said = []
+    m["log"] = lambda text, hue=None: said.append(text)
+    m["time"] = type("T", (), {"time": staticmethod(lambda: now[0])})()
+    return said, lambda: [m.__setitem__(k, v) for k, v in saved.items()]
+
+
+def _reset_stall(m):
+    m["_stall"].update({"at": 0.0, "where": None, "said": 0})
+    m["_force_waypoint"][0] = False
+    m["_stuck_pending"] = False
+
+
+def test_the_watchdog_runs_from_the_one_place_that_keeps_running(m):
+    """Every other guard is checked between calls. interruptible_pause is what
+    runs during them."""
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def interruptible_pause("):
+               src.index("def checkGreyskull(")]
+    check("the pause calls it", "stall_watchdog()" in body, True)
+    check("alongside the journal scan", "scan_journal()" in body, True)
+
+    job = src[src.index("def run_job("):]
+    check("and the job loop TESTS the flag",
+          "if _force_waypoint[0]:" in job, True)
+    check("clearing it as it does, so it fires once",
+          "_force_waypoint[0] = False" in job, True)
+    # Mentioning the name is not acting on it. An earlier version of this
+    # check passed against a loop that only ever cleared the flag.
+    if "if _force_waypoint[0]:" in job:
+        acted = job[job.index("if _force_waypoint[0]:"):][:400]
+        check("by asking for the next rune", "need_waypoint = True" in acted,
+              True)
+
+
+def test_moving_or_harvesting_both_count_as_progress(m):
+    """Neither alone will do. Mining stands still and produces; walking moves
+    and produces nothing. Only the absence of BOTH is a stall."""
+    now = [1000.0]
+    player = _StallPlayer()
+    said, restore = _stall_module(m, now)
+    try:
+        m["Player"] = player
+        _reset_stall(m)
+
+        m["stall_watchdog"]()                      # first look, arms it
+        now[0] += m["STALL_STUCK_MS"] / 1000.0 - 1
+        m["stall_watchdog"]()
+        check("just under the limit is not a stall", m["_stuck_pending"],
+              False)
+
+        # MOVING resets it.
+        player.move(101, 100)
+        m["stall_watchdog"]()
+        now[0] += m["STALL_STUCK_MS"] / 1000.0 - 1
+        m["stall_watchdog"]()
+        check("a step resets the clock", m["_stuck_pending"], False)
+
+        # HARVESTING resets it, without moving. Driven through the REAL
+        # note_area_yield, which is what the sweep calls - calling
+        # note_progress directly would test the watchdog and not the wiring
+        # that feeds it, and the wiring is the half that can be dropped.
+        now[0] += 10
+        m["note_area_yield"]({})
+        now[0] += m["STALL_STUCK_MS"] / 1000.0 - 1
+        m["stall_watchdog"]()
+        check("so does a yield, standing still", m["_stuck_pending"], False)
+
+        # Neither, for long enough, IS a stall.
+        now[0] += 10
+        m["stall_watchdog"]()
+        check("but neither one is", m["_stuck_pending"], True)
+    finally:
+        restore()
+        _reset_stall(m)
+
+
+def test_it_escalates_rather_than_recalling_at_once(m):
+    """The cheap answer usually works: say "stuck", which every handler in the
+    file already honours. Only if that changes nothing force the rune."""
+    now = [1000.0]
+    player = _StallPlayer()
+    said, restore = _stall_module(m, now)
+    try:
+        m["Player"] = player
+        _reset_stall(m)
+
+        m["stall_watchdog"]()
+        now[0] += m["STALL_STUCK_MS"] / 1000.0 + 1
+        m["stall_watchdog"]()
+        check("first it says stuck", m["_stuck_pending"], True)
+        check("and does NOT force a rune yet", m["_force_waypoint"][0], False)
+        check("saying so once", len([s for s in said if "STALL" in s]), 1)
+
+        # Said once, not once per 250ms slice of every pause.
+        m["stall_watchdog"]()
+        m["stall_watchdog"]()
+        check("and not again at the same level",
+              len([s for s in said if "STALL" in s]), 1)
+
+        now[0] += (m["STALL_RECALL_MS"] - m["STALL_STUCK_MS"]) / 1000.0 + 1
+        m["stall_watchdog"]()
+        check("then it forces the rune", m["_force_waypoint"][0], True)
+        check("saying so once more", len([s for s in said if "STALL" in s]), 2)
+
+        # And THAT level is said once too. The watchdog runs every 250ms slice
+        # of every pause, so a message without a said-guard is not a message,
+        # it is a flood - four a second for as long as the stall lasts.
+        m["_force_waypoint"][0] = False
+        now[0] += 60
+        m["stall_watchdog"]()
+        m["stall_watchdog"]()
+        check("and not once per slice after that",
+              len([s for s in said if "STALL" in s]), 2)
+        check("nor re-forcing the rune it already forced",
+              m["_force_waypoint"][0], False)
+        check("and the message says where",
+              any("100,100" in s for s in said if "STALL" in s), True)
+    finally:
+        restore()
+        _reset_stall(m)
+
+
+def test_the_watchdog_can_be_switched_off(m):
+    now = [1000.0]
+    player = _StallPlayer()
+    said, restore = _stall_module(m, now)
+    saved = m["STALL_STUCK_MS"]
+    try:
+        m["Player"] = player
+        m["STALL_STUCK_MS"] = 0
+        _reset_stall(m)
+        m["stall_watchdog"]()
+        now[0] += 3600
+        m["stall_watchdog"]()
+        check("off means off", m["_stuck_pending"], False)
+        check("and nothing was said", [s for s in said if "STALL" in s], [])
+    finally:
+        m["STALL_STUCK_MS"] = saved
+        restore()
+        _reset_stall(m)
+
+
+def test_the_stall_limits_are_longer_than_every_other_guard(m):
+    """It is the BACKSTOP. Firing before the guard that should have handled the
+    case would steal the work from one that knows more about it."""
+    check("longer than a spot's hard cap",
+          m["STALL_STUCK_MS"] > m["AREA_SPOT_HARD_CAP_MS"], True)
+    check("longer than a whole waypoint's cap",
+          m["STALL_STUCK_MS"] > m["WAYPOINT_HARD_CAP_MS"], True)
+    check("longer than the longest meditation",
+          m["STALL_STUCK_MS"] > m["MEDITATION_TIMEOUT"], True)
+    check("and the recall step is later still",
+          m["STALL_RECALL_MS"] > m["STALL_STUCK_MS"], True)
+
+
+def test_the_new_state_is_below_the_seam(m):
+    """The rule this file learned the hard way: the config half is carried
+    forward per copy and the code half is replaced, so state declared above the
+    seam never travels."""
+    import re as _re
+    with open(SCRIPT, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    lines = src.splitlines(True)
+    seam = [i for i, l in enumerate(lines) if l.startswith("# HELPERS")][0]
+    cfg, code = "".join(lines[:seam]), "".join(lines[seam:])
+    for name in ("_stall", "_force_waypoint"):
+        pat = "^" + name + chr(92) + "s*="
+        check("%s is declared in the code half" % name,
+              len(_re.findall(pat, code, _re.M)), 1)
+        check("%s is not in config" % name,
+              bool(_re.search(pat, cfg, _re.M)), False)
+
+
 def main():
     module = load_script()
     test_stop_button_is_not_a_crash(module)
@@ -4891,6 +5091,12 @@ def main():
     test_move_is_self_only(module)
     test_move_and_skip_are_different_words(module)
     test_take_move_fires_once(module)
+    test_the_watchdog_runs_from_the_one_place_that_keeps_running(module)
+    test_moving_or_harvesting_both_count_as_progress(module)
+    test_it_escalates_rather_than_recalling_at_once(module)
+    test_the_watchdog_can_be_switched_off(module)
+    test_the_stall_limits_are_longer_than_every_other_guard(module)
+    test_the_new_state_is_below_the_seam(module)
     test_stuck_is_matched_on_the_whole_line(module)
     test_stuck_is_self_only(module)
     test_the_three_words_are_distinct(module)
