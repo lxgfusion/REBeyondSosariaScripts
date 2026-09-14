@@ -89,7 +89,7 @@ import time
 # line in the journal says which copy is actually loaded - two separate
 # debugging rounds were spent on a bug that was already fixed on disk but not
 # in the Scripts folder.
-SCRIPT_VERSION = "2026-09-13.1"
+SCRIPT_VERSION = "2026-09-13.2"
 
 
 # =============================================================================
@@ -480,7 +480,23 @@ ORDER_BAG_HUE = 0x04F2
 # it for nothing.
 STARTUP_HANDIN = True
 
-ORDERS_GUMP = 0xB2F21F1A
+# The order list's gump id. A HINT, not a fact - see orders_gump().
+#
+# It was 0xB2F21F1A and is 0xC5F60B43 as of 2026-09-13. Razor derives this id
+# from the gump the server sends, so CHANGING THE COLUMNS CHANGES IT. The book
+# window's id has not moved because its layout has not; the list's has, twice.
+#
+# When it is wrong nothing says so usefully: WaitForGump waits out its timeout
+# on a window that is not coming, the script reports "The order list never
+# opened", and tidy_gumps then closes the real list as a stray window. That is
+# exactly what the 2026-09-13 journal showed, with the real id printed in the
+# "closed 2 stray window(s)" line.
+ORDERS_GUMP_HINT = 0xC5F60B43
+
+# What the order list says that nothing else does. Matched case-insensitively
+# against the gump's text, and BOTH are required: the book's own window also
+# carries the words "Resource Orders", on the button that opens the list.
+ORDERS_SIGNATURE = ["Displayed:", "Contents:"]
 ORDERS_NEXT_BUTTON = 5          # "Next Page" - NOT drawn on the last page
 ORDERS_PREV_BUTTON = 4          # NOT drawn on page 0
 
@@ -2697,7 +2713,7 @@ def open_book():
     # WaitForGump returns True for a gump that is already open, so any leftover
     # window has to go before the one we want is requested.
     Gumps.CloseGump(BOOK_GUMP)
-    Gumps.CloseGump(ORDERS_GUMP)
+    Gumps.CloseGump(orders_gump())
     Misc.Pause(SETTLE_MS)
 
     Items.UseItem(book)
@@ -2708,12 +2724,126 @@ def open_book():
         return False
 
     Gumps.SendAction(BOOK_GUMP, BOOK_ORDERS_BUTTON)
-    Gumps.WaitForGump(ORDERS_GUMP, GUMP_TIMEOUT_MS)
-    Misc.Pause(SETTLE_MS)
-    if not has_gump(ORDERS_GUMP):
+    if not wait_for_orders_gump(GUMP_TIMEOUT_MS):
+        # NOT just "it never opened". That message was true and useless: the
+        # list HAD opened, under an id the script was not watching, and the
+        # next tidy_gumps closed it as a stray. Say what is actually on screen.
         log("The order list never opened.", HUE_BAD)
+        report_open_gumps("after pressing 'Resource Orders...'")
+        log("  If one of those is the order list, put its id in "
+            "ORDERS_GUMP_HINT - or check ORDERS_SIGNATURE still matches what "
+            "it says.", HUE_WARN)
         return False
+    Misc.Pause(SETTLE_MS)
     return True
+
+
+# The order list's id, once it has been found. Below the config on purpose:
+# this is runtime state, not a setting.
+_orders_gump = [0]
+
+
+def gump_carries(gump_id, phrases):
+    """Does this gump's text contain every one of `phrases`?
+
+    Every one, not any: the book's own window and the order list both say
+    "Resource Orders", and telling them apart is the entire job.
+    """
+    if not gump_id:
+        return False
+    try:
+        text = " | ".join(str(line or "") for line in gump_lines(gump_id))
+    except Exception:
+        return False
+    low = text.lower()
+    for phrase in phrases:
+        phrase = str(phrase or "").strip().lower()
+        if not phrase or phrase not in low:
+            return False
+    return True
+
+
+def find_orders_gump():
+    """The order list's gump id, found by WHAT IS ON IT. 0 if it is not open.
+
+    Razor derives a gump's id from what the server sent, so changing the book's
+    columns changes the id - it has moved twice now. A hardcoded one fails in
+    the least helpful way available: WaitForGump waits out its full timeout on
+    a window that is never coming, the caller reports "the order list never
+    opened", and tidy_gumps then closes the real list as a stray.
+
+    Looked for in the order that costs least: the one already found, then the
+    configured hint, then every open gump.
+    """
+    for known in (_orders_gump[0], ORDERS_GUMP_HINT):
+        if known and has_gump(known) and gump_carries(known, ORDERS_SIGNATURE):
+            _orders_gump[0] = known
+            return known
+
+    try:
+        open_ids = [int(g) for g in (Gumps.AllGumpIDs() or [])]
+    except Exception as err:
+        log("could not list open gumps while looking for the order list: %s"
+            % err, HUE_WARN)
+        return 0
+
+    for gump_id in open_ids:
+        if not gump_carries(gump_id, ORDERS_SIGNATURE):
+            continue
+        if gump_id != _orders_gump[0]:
+            log("the order list is gump 0x%X (the hint says 0x%X). Found it by "
+                "its contents; update ORDERS_GUMP_HINT to save the search."
+                % (gump_id, ORDERS_GUMP_HINT), HUE_WARN)
+        _orders_gump[0] = gump_id
+        return gump_id
+    return 0
+
+
+def wait_for_orders_gump(timeout_ms):
+    """Wait for the order list, WHATEVER id it comes back under.
+
+    WaitForGump can only wait on one id, and the id is the thing that moved -
+    so the cheap wait on the hint goes first (it does all the waiting when
+    nothing has changed) and the poll behind it covers the case where it has.
+    """
+    Gumps.WaitForGump(ORDERS_GUMP_HINT, min(1500, int(timeout_ms)))
+    deadline = time.time() + int(timeout_ms) / 1000.0
+    while time.time() < deadline:
+        if find_orders_gump():
+            return True
+        Misc.Pause(250)
+    return bool(find_orders_gump())
+
+
+def orders_gump():
+    """The order list's id. Never 0 - callers pass it straight to has_gump.
+
+    Cached while the window stays open, because the search reads every open
+    gump's text and this is asked for on nearly every line of the order work.
+    """
+    cached = _orders_gump[0]
+    if cached and has_gump(cached):
+        return cached
+    return find_orders_gump() or ORDERS_GUMP_HINT
+
+
+def report_open_gumps(why):
+    """Name every open gump and its first line. The diagnostic for "the window
+    I wanted is not the window that opened", which otherwise costs a round trip
+    with the user to answer."""
+    try:
+        open_ids = [int(g) for g in (Gumps.AllGumpIDs() or [])]
+    except Exception:
+        open_ids = []
+    if not open_ids:
+        log("  %s: no gumps are open at all." % why, HUE_WARN)
+        return
+    log("  %s: %d gump(s) open -" % (why, len(open_ids)), HUE_WARN)
+    for gump_id in open_ids[:8]:
+        lines = [str(l or "").strip() for l in gump_lines(gump_id)]
+        lines = [l for l in lines if l][:3]
+        log("    0x%X  %s" % (gump_id, " | ".join(lines) or "(no text)"),
+            HUE_WARN)
 
 
 def layout_text_cells(gump_id):
@@ -2765,7 +2895,7 @@ def orders_column_order():
     Returns [] when the gump cannot be read, which every caller treats as
     "fall back to the published layout" rather than as an empty book.
     """
-    cells = layout_text_cells(ORDERS_GUMP)
+    cells = layout_text_cells(orders_gump())
     if not cells:
         return []
 
@@ -2804,7 +2934,7 @@ def orders_drawn_buttons():
     that as "cannot verify" rather than "nothing is drawn".
     """
     out = set()
-    for el in layout_elements(raw_layout(ORDERS_GUMP)):
+    for el in layout_elements(raw_layout(orders_gump())):
         if el["kind"] == "button" and len(el["nums"]) >= 3:
             out.add(el["nums"][-1])
     return out
@@ -2930,7 +3060,7 @@ def orders_action(button, filter_text=None, entry=None):
     if entry is None:
         entry = ids_map["item_field"]
     if filter_text is None:
-        Gumps.SendAction(ORDERS_GUMP, button)
+        Gumps.SendAction(orders_gump(), button)
     else:
         # EVERY column's field, because any apply-filter press overwrites
         # every column's filter from the response - so a field left out of
@@ -2940,14 +3070,14 @@ def orders_action(button, filter_text=None, entry=None):
         ids = list(ids_map["field_ids"])
         values = [filter_text if i == entry else "" for i in ids]
         try:
-            Gumps.SendAdvancedAction(ORDERS_GUMP, button, [], ids, values)
+            Gumps.SendAdvancedAction(orders_gump(), button, [], ids, values)
         except Exception as err:
             log("SendAdvancedAction failed (%s); the filter will be lost." % err,
                 HUE_WARN)
-            Gumps.SendAction(ORDERS_GUMP, button)
-    Gumps.WaitForGump(ORDERS_GUMP, GUMP_TIMEOUT_MS)
+            Gumps.SendAction(orders_gump(), button)
+    Gumps.WaitForGump(orders_gump(), GUMP_TIMEOUT_MS)
     Misc.Pause(SETTLE_MS)
-    return has_gump(ORDERS_GUMP)
+    return has_gump(orders_gump())
 
 
 def colliding_names(resource):
@@ -2987,7 +3117,7 @@ def rewind_to_first_page(filter_text, entry=None):
     is past page 1. If it will not converge, the book is reopened, which lands
     on page 1 and needs the filter applied again.
     """
-    current, _total = page_counter(gump_lines(ORDERS_GUMP))
+    current, _total = page_counter(gump_lines(orders_gump()))
     if current is None:
         # No counter to trust. Reading what is there is no worse than the
         # behaviour this replaced.
@@ -3000,7 +3130,7 @@ def rewind_to_first_page(filter_text, entry=None):
             log("The list closed while rewinding to page 1.", HUE_WARN)
             return False
         before = current
-        current, _total = page_counter(gump_lines(ORDERS_GUMP))
+        current, _total = page_counter(gump_lines(orders_gump()))
         if current is None or current >= before:
             break               # not moving - stop pressing and reopen instead
 
@@ -3081,7 +3211,7 @@ def pull_one_completed():
         log("The list closed while filtering for finished orders.", HUE_BAD)
         return None, "stop"
 
-    header = parse_header(gump_lines(ORDERS_GUMP))
+    header = parse_header(gump_lines(orders_gump()))
     displayed = header.get("displayed")
     if displayed == 0:
         return None, "none"
@@ -3090,9 +3220,9 @@ def pull_one_completed():
         return None, "stop"
 
     for page in range(1, COMPLETED_MAX_PAGES + 1):
-        strings = gump_lines(ORDERS_GUMP)
+        strings = gump_lines(orders_gump())
         rows = parse_rows_detailed(strings)
-        buttons = row_buttons(raw_layout(ORDERS_GUMP))
+        buttons = row_buttons(raw_layout(orders_gump()))
 
         if len(rows) != len(buttons):
             log("finished orders page %d: %d rows but %d buttons - skipping "
@@ -3137,12 +3267,12 @@ def pull_completed_orders():
     """
     if not PULL_COMPLETED:
         return []
-    if not has_gump(ORDERS_GUMP) and not open_book():
+    if not has_gump(orders_gump()) and not open_book():
         log("Could not open the order list - no finished orders pulled.",
             HUE_WARN)
         return []
 
-    unfiltered = parse_header(gump_lines(ORDERS_GUMP)).get("displayed")
+    unfiltered = parse_header(gump_lines(orders_gump())).get("displayed")
 
     pulled = []
     hit_ceiling = True
@@ -3161,7 +3291,7 @@ def pull_completed_orders():
         # something, rather than believing an empty result from a filter the
         # book ignored.
         if not pulled:
-            after = parse_header(gump_lines(ORDERS_GUMP)).get("displayed")
+            after = parse_header(gump_lines(orders_gump())).get("displayed")
             if (unfiltered is not None and after is not None
                     and after >= unfiltered and after > 0):
                 ids = orders_ids()
@@ -3194,7 +3324,7 @@ def page_amounts(anchor, exact):
     unsorted.
     """
     out = []
-    for row in parse_order_rows(gump_lines(ORDERS_GUMP), anchor):
+    for row in parse_order_rows(gump_lines(orders_gump()), anchor):
         amount = row["amount"]
         if not amount:
             continue
@@ -3304,7 +3434,7 @@ def find_first_order(resource, budget, refilter=True):
     # A name that is not the book's own returns an empty list, which otherwise
     # looks exactly like "this resource has no orders right now". The book calls
     # Shadow Iron "Shadow Ingots"; that mismatch cost a debugging round.
-    header = parse_header(gump_lines(ORDERS_GUMP))
+    header = parse_header(gump_lines(orders_gump()))
     if header.get("displayed") == 0:
         log("%r matched NOTHING in the book. If you expect orders for it, the "
             "book's name is different - run diag_resource_orders.py, which "
@@ -3341,9 +3471,9 @@ def find_first_order(resource, budget, refilter=True):
     over_budget = []        # more than the chest can spend right now
     matched = 0             # rows that really are this resource
     for page in range(1, pages_to_scan + 1):
-        strings = gump_lines(ORDERS_GUMP)
+        strings = gump_lines(orders_gump())
         rows = parse_order_rows(strings, anchor)
-        buttons = row_buttons(raw_layout(ORDERS_GUMP))
+        buttons = row_buttons(raw_layout(orders_gump()))
 
         if len(rows) != len(buttons):
             log("%s page %d: %d rows but %d buttons - skipping this page rather "
@@ -4414,7 +4544,7 @@ def deposit_new_orders():
         # WaitForGump returns True for a gump that is already open, so any
         # leftover window has to go before this one is asked for.
         Gumps.CloseGump(BOOK_GUMP)
-        Gumps.CloseGump(ORDERS_GUMP)
+        Gumps.CloseGump(orders_gump())
         Misc.Pause(SETTLE_MS)
         Items.UseItem(book_item)
         Gumps.WaitForGump(BOOK_GUMP, GUMP_TIMEOUT_MS)
@@ -4752,7 +4882,7 @@ def work_one_order(resource, chests, budget, completed, withdrawn, hot=False):
     find a matching row and the resource reports "none", because selection is
     an exact match on the name either way; it cannot pull the wrong order.
     """
-    if not has_gump(ORDERS_GUMP):
+    if not has_gump(orders_gump()):
         if not open_book():
             log("Could not reopen the order list - stopping %s." % resource,
                 HUE_WARN)

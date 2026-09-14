@@ -2209,15 +2209,15 @@ def test_a_late_warning_shortens_the_wait_it_does_not_extend_it(m):
 def test_tidy_gumps_closes_strays_but_keeps_what_is_asked(m):
     """THE REPORTED FAILURE: a screen stacked with windows after an unattended
     run. Every id except the keep-list has to go."""
-    gumps = _FakeGumps([0x1111, 0x2222, 0x3333, m["ORDERS_GUMP"]])
+    gumps = _FakeGumps([0x1111, 0x2222, 0x3333, m["ORDERS_GUMP_HINT"]])
     restore = _with_fakes(m, gumps=gumps)
     try:
-        closed = m["tidy_gumps"](keep=[m["ORDERS_GUMP"]])
+        closed = m["tidy_gumps"](keep=[m["ORDERS_GUMP_HINT"]])
         check("three closed", closed, 3)
         check("the kept one is still open",
-              m["ORDERS_GUMP"] in gumps.open_ids, True)
+              m["ORDERS_GUMP_HINT"] in gumps.open_ids, True)
         check("the kept one was never closed",
-              m["ORDERS_GUMP"] in gumps.closed, False)
+              m["ORDERS_GUMP_HINT"] in gumps.closed, False)
         check("strays all closed", sorted(gumps.closed),
               [0x1111, 0x2222, 0x3333])
     finally:
@@ -3511,7 +3511,9 @@ def test_the_sort_button_is_no_longer_21(m):
     check("21 is a REMOVE button now", 21 in ids["remove"], True)
     check("and the sort is not one of them",
           ids["amount_sort"] in ids["remove"], False)
-    check("the gump id is unchanged", m["ORDERS_GUMP"], 0xB2F21F1A)
+    # The gump id is NOT a constant any more - see the discovery tests below.
+    check("the hint is the id last seen in game", m["ORDERS_GUMP_HINT"],
+          0xC5F60B43)
 
     for name, value in (("item_filter", ids["item_filter"]),
                         ("completed_filter", ids["completed_filter"]),
@@ -4310,6 +4312,242 @@ def test_the_live_order_beats_the_published_one(m):
               m["orders_ids"]()["source"], "published layout")
     finally:
         m["orders_column_order"] = saved
+
+
+# --------------------------------------------------------------------------
+# Finding the order list at all
+#
+# From the journal and the Gump Inspector, 2026-09-13:
+#
+#     [RO] The order list never opened.
+#     [RO] closed 2 stray window(s) [fill done]: 0x6ABCE12, 0xC5F60B43
+#
+#     Gump ID: 0xc5f60b43
+#     Resource Orders | Contents: 29678/100000 | Displayed: 29678
+#     Item | Amt Gathered | Completed | Captured Essence | 0 | No | ...
+#
+# The list HAD opened. It came back as 0xC5F60B43 and the script was waiting on
+# 0xB2F21F1A, so WaitForGump sat out its timeout on a window that was never
+# coming - and then tidy_gumps closed the real one as a stray. Razor derives
+# the id from what the server sent, so changing the columns changes it.
+# --------------------------------------------------------------------------
+
+# The real dump, in the order the inspector printed it.
+LIVE_ORDERS_GUMP = 0xC5F60B43
+LIVE_ORDERS_TEXT = ["Resource Orders", "Contents: 29678/100000",
+                    "Displayed: 29678", "Item", "Amt Gathered", "Completed",
+                    "Captured Essence", "0", "No",
+                    "Light Medusa Scales", "5", "0"]
+# The book's own window says "Resource Orders" too - on the button that opens
+# the list. That is why the signature needs both phrases.
+LIVE_BOOK_TEXT = ["Resource Orders... 29678", "Withdrawal Amount",
+                  "Maximum Storage:", "Add", "Rename Book",
+                  "Fill from backpack"]
+
+
+def _with_gumps(m, table):
+    """Make the module see `table` - {gump_id: [lines]} - as the open gumps."""
+    saved = {k: m[k] for k in ("gump_lines", "has_gump", "Gumps", "log")}
+
+    class FakeGumps(object):
+        def AllGumpIDs(self):
+            return list(table)
+
+        def WaitForGump(self, gid, ms):
+            return gid in table
+
+        def CloseGump(self, gid):
+            table.pop(gid, None)
+
+    m["gump_lines"] = lambda gid, data_only=False: list(table.get(gid, []))
+    m["has_gump"] = lambda gid: gid in table
+    m["Gumps"] = FakeGumps()
+    m["log"] = lambda *a, **k: None
+    m["_orders_gump"][0] = 0
+    return lambda: ([m.__setitem__(k, v) for k, v in saved.items()],
+                    m["_orders_gump"].__setitem__(0, 0))
+
+
+def test_the_order_list_is_found_by_its_contents(m):
+    """The id moved. What is ON the window did not."""
+    table = {0x6ABCE12: LIVE_BOOK_TEXT, LIVE_ORDERS_GUMP: LIVE_ORDERS_TEXT}
+    restore = _with_gumps(m, table)
+    try:
+        check("found at the id the inspector showed",
+              m["find_orders_gump"](), LIVE_ORDERS_GUMP)
+        check("and orders_gump() agrees", m["orders_gump"](),
+              LIVE_ORDERS_GUMP)
+        # THE TRAP: the book's window says "Resource Orders" as well.
+        check("the book's own window is not mistaken for it",
+              m["gump_carries"](0x6ABCE12, m["ORDERS_SIGNATURE"]), False)
+        check("but the list is", m["gump_carries"](LIVE_ORDERS_GUMP,
+                                                   m["ORDERS_SIGNATURE"]),
+              True)
+    finally:
+        restore()
+
+    # EVERY phrase, not any. A window carrying one of them is not the list -
+    # a chest says "Contents:" too.
+    decoy = {0x9999: ["Contents: 12/125"],
+             0x8888: ["Displayed: 4"],
+             LIVE_ORDERS_GUMP: LIVE_ORDERS_TEXT}
+    restore = _with_gumps(m, decoy)
+    try:
+        check("one phrase is not enough",
+              m["gump_carries"](0x9999, m["ORDERS_SIGNATURE"]), False)
+        check("nor the other",
+              m["gump_carries"](0x8888, m["ORDERS_SIGNATURE"]), False)
+        check("the list, which has both, is the one found",
+              m["find_orders_gump"](), LIVE_ORDERS_GUMP)
+    finally:
+        restore()
+
+
+def test_open_book_finds_a_list_that_moved(m):
+    """The reported failure end to end: press "Resource Orders...", and the list
+    comes back under an id nobody is watching. Waiting on one id sits out the
+    whole timeout on a window that is never coming."""
+    table = {0x6ABCE12: LIVE_BOOK_TEXT}
+    restore = _with_gumps(m, table)
+    saved = {k: m[k] for k in ("find_world_item", "Items", "Misc", "Gumps",
+                               "ORDERS_GUMP_HINT")}
+    try:
+        m["ORDERS_GUMP_HINT"] = 0xB2F21F1A          # stale
+        m["find_world_item"] = lambda *a, **k: object()
+
+        class FakeItems(object):
+            def UseItem(self, item):
+                # open_book closes the book's window before asking for it, so
+                # using the book is what puts it back - as in game.
+                table[0x6ABCE12] = LIVE_BOOK_TEXT
+
+        class FakeMisc(object):
+            def Pause(self, ms):
+                pass
+
+            def SendMessage(self, *a, **k):
+                pass
+
+        # Pressing "Resource Orders..." is what makes the list appear, and it
+        # appears at the NEW id.
+        real_gumps = m["Gumps"]
+
+        class PressingGumps(object):
+            def AllGumpIDs(self):
+                return real_gumps.AllGumpIDs()
+
+            def WaitForGump(self, gid, ms):
+                return gid in table
+
+            def CloseGump(self, gid):
+                table.pop(gid, None)
+
+            def SendAction(self, gid, button):
+                table[LIVE_ORDERS_GUMP] = LIVE_ORDERS_TEXT
+
+        m["Items"] = FakeItems()
+        m["Misc"] = FakeMisc()
+        m["Gumps"] = PressingGumps()
+        check("open_book succeeds", m["open_book"](), True)
+        check("and it is looking at the moved id", m["orders_gump"](),
+              LIVE_ORDERS_GUMP)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+        restore()
+
+
+def test_a_stale_hint_does_not_stop_it(m):
+    """The hint being wrong is the whole failure. It must cost a search, not the
+    run."""
+    table = {LIVE_ORDERS_GUMP: LIVE_ORDERS_TEXT}
+    restore = _with_gumps(m, table)
+    saved_hint = m["ORDERS_GUMP_HINT"]
+    try:
+        m["ORDERS_GUMP_HINT"] = 0xB2F21F1A      # the id before this one
+        check("found anyway", m["find_orders_gump"](), LIVE_ORDERS_GUMP)
+    finally:
+        m["ORDERS_GUMP_HINT"] = saved_hint
+        restore()
+
+
+def test_a_closed_list_is_reported_as_closed(m):
+    """0 means "not open", and orders_gump() falls back to the hint so callers
+    can hand it straight to has_gump without a special case."""
+    restore = _with_gumps(m, {0x6ABCE12: LIVE_BOOK_TEXT})
+    try:
+        check("not found", m["find_orders_gump"](), 0)
+        check("and orders_gump() still returns a number",
+              m["orders_gump"](), m["ORDERS_GUMP_HINT"])
+    finally:
+        restore()
+
+
+def test_the_id_is_cached_while_the_window_stays_open(m):
+    """The search reads every open gump's text and orders_gump() is asked on
+    nearly every line of the order work."""
+    table = {LIVE_ORDERS_GUMP: LIVE_ORDERS_TEXT}
+    restore = _with_gumps(m, table)
+    try:
+        m["orders_gump"]()
+        reads = []
+        saved = m["gump_lines"]
+        m["gump_lines"] = lambda gid, data_only=False: (
+            reads.append(gid) or list(table.get(gid, [])))
+        try:
+            m["orders_gump"]()
+            check("a cached, still-open id costs no text reads", reads, [])
+        finally:
+            m["gump_lines"] = saved
+    finally:
+        restore()
+
+
+def test_the_columns_come_off_the_live_book_not_the_published_list(m):
+    """The live book shows Item / Amt Gathered / Completed - three columns, in a
+    different order from the admin's five. Which is exactly why the ids are
+    computed: with three columns the withdraw base is 10 + 6*3 = 28, not 40."""
+    saved = m["layout_text_cells"]
+    try:
+        m["layout_text_cells"] = lambda gid: [
+            (60, 50, "Item"), (460, 50, "Amt Gathered"),
+            (560, 50, "Completed"),
+            (60, 90, "Captured Essence"), (460, 90, "0"), (560, 90, "No")]
+        ids = m["orders_ids"]()
+        check("three columns, in the book's order", ids["columns"],
+              ["Item", "Amt Gathered", "Completed"])
+        # column 2 -> 10 + 6*2 + 2
+        check("Completed's filter follows it", ids["completed_filter"], 24)
+        check("its field id too", ids["completed_field"], 2)
+        check("the rows start after three columns", ids["withdraw_base"], 28)
+        check("and there is no Amt To Gather to sort by", ids["amount_sort"],
+              0)
+    finally:
+        m["layout_text_cells"] = saved
+
+
+def test_a_missing_sort_column_degrades_instead_of_pressing_something(m):
+    """amount_sort of 0 must not become a press. 0 closes the gump."""
+    got, restore = _pressed(m)
+    try:
+        check("button 0 is refused", m["press_orders"](0, what="sort"), False)
+        check("nothing was sent", got, [])
+    finally:
+        restore()
+
+
+def test_the_failure_names_what_is_actually_on_screen(m):
+    """"The order list never opened" was true and useless - the list HAD opened,
+    under an id nobody was watching. The next report has to carry the answer."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def open_book("):src.index("def wait_for_orders_gump(")]
+    check("it dumps the open gumps", "report_open_gumps(" in body, True)
+    check("and says where to put the id", "ORDERS_GUMP_HINT" in body, True)
+
+    rep = src[src.index("def report_open_gumps("):src.index("def layout_text_cells(")]
+    check("naming each id", "0x%X" % 0 in rep or "0x%X" in rep, True)
+    check("with what it says on it", "gump_lines(" in rep, True)
 
 
 def main():
