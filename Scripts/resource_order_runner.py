@@ -89,7 +89,7 @@ import time
 # line in the journal says which copy is actually loaded - two separate
 # debugging rounds were spent on a bug that was already fixed on disk but not
 # in the Scripts folder.
-SCRIPT_VERSION = "2026-09-13.3"
+SCRIPT_VERSION = "2026-09-13.4"
 
 
 # =============================================================================
@@ -555,11 +555,22 @@ ORDERS_TYPE_REMOVE = 5
 ORDERS_COLUMNS_EXPECTED = ["Item", "Amt To Gather", "Amt Gathered",
                            "Value Per", "Completed"]
 
-# A button whose meaning has been confirmed in game, checked at startup against
-# what the column order derives. If these disagree the columns have moved and
-# the log says so, rather than the script quietly sorting the wrong column.
-#   (button, column, what it did)
-ORDERS_CONFIRMED = (17, "Amt To Gather", "sorted lowest-first, 2026-09-13")
+# Buttons and fields whose meaning has been CONFIRMED IN GAME, from the Gump
+# Inspector on gump 0xC5F60B43, 2026-09-13. Checked at startup against what the
+# column order derives - they are the only cross-check there is on the whole
+# derivation, and a silent disagreement means pressing the wrong thing.
+#
+#   ("what", expected value, how it was confirmed)
+ORDERS_CONFIRMED = [
+    ("amount_sort", 17,
+     "pressing 17 sorted Amt To Gather lowest-first"),
+    ("withdraw_base", 40,
+     "pressing 40 withdrew the top row"),
+    ("item_field", 0,
+     'the Item filter "Bloodwood Boards" came back in Text ID 0'),
+    ("column_count", 5,
+     "the response carried Text IDs 0-4, one per column"),
+]
 
 # What a header cell may read for each column. "Item" was called "Name" in the
 # 2026-07-27 dump, and a rename must not read as "the column is gone".
@@ -2628,17 +2639,43 @@ def layout_elements(layout):
 
 
 def row_buttons(layout, x_max=60, y_min=80, y_max=400):
-    """The 15 per-row buttons, top to bottom.
+    """The per-row WITHDRAW buttons, top to bottom.
 
-    Taken from the left margin between the header and the filter row, which
-    excludes the column sorters at y=70 and the page nav at y=440.
+    Selected by ID RANGE, because that is what the admin's list actually
+    defines - everything below the withdraw base is a column control, and
+    every row carries TWO buttons:
+
+        row i withdraw = withdraw_base + i
+        row i details  = withdraw_base + 100000 + i
+
+    Taking every button in the left margin counted both, which is why a
+    fifteen-row page reported "14 rows but 30 buttons" and was skipped. The
+    geometry could not tell them apart: they sit on the same row, a few pixels
+    apart, and both are inside any band wide enough to hold the rows.
+
+    The geometry arguments are the FALLBACK, for a layout whose ids cannot be
+    worked out. They are also magic numbers tuned to a gump that has since
+    grown wider and taller, which is its own reason to prefer the ids.
     """
+    base = 0
+    try:
+        base = int(orders_ids()["withdraw_base"])
+    except Exception:
+        base = 0
+
     found = []
     for el in layout_elements(layout):
         if el["kind"] != "button" or len(el["nums"]) < 3:
             continue
         x, y, button = el["nums"][0], el["nums"][1], el["nums"][-1]
-        if x <= x_max and y_min <= y <= y_max:
+        if base:
+            # Wide on purpose. Row buttons may run continuously across pages -
+            # page 2 starting at base + 15 - so the range cannot be capped at
+            # one page's worth. What it has to exclude is the controls below
+            # it and the details buttons 100000 above it.
+            if base <= button < base + ORDERS_DETAILS_OFFSET:
+                found.append((y, button))
+        elif x <= x_max and y_min <= y <= y_max:
             found.append((y, button))
     return [b for _y, b in sorted(found)]
 
@@ -3045,6 +3082,44 @@ def orders_ids():
     return ids
 
 
+def confirmed_disagreements(ids):
+    """Which confirmed captures the derived ids do NOT match.
+
+    [] means everything lines up. Each entry is (what, wanted, got, how), so
+    the caller can say what was expected and on whose authority.
+    """
+    out = []
+    for what, want, how in ORDERS_CONFIRMED:
+        if what == "column_count":
+            got = len(ids["columns"])
+        else:
+            got = ids.get(what)
+        if got != want:
+            out.append((what, want, got, how))
+    return out
+
+
+def row_button_note(buttons):
+    """What the row buttons actually were, for the mismatch message.
+
+    A bare "14 rows but 30 buttons" says something is wrong and nothing about
+    what - and 30 for a 15-row page has one obvious cause, which naming the
+    ids makes plain: every row carries a withdraw button AND a details button
+    100000 above it.
+    """
+    if not buttons:
+        return "no row buttons were found at all."
+    base = orders_ids()["withdraw_base"]
+    details = [b for b in buttons if b >= base + ORDERS_DETAILS_OFFSET]
+    low = [b for b in buttons if b < base]
+    note = "base %d, ids %s" % (base, sorted(buttons)[:6])
+    if details:
+        note += "; %d of them are DETAILS buttons" % len(details)
+    if low:
+        note += "; %d are below the base and should be column controls" % len(low)
+    return note + "."
+
+
 def press_orders(button, filter_text=None, entry=None, what=""):
     """Press a button on the order list, with the two refusals that matter.
 
@@ -3276,8 +3351,9 @@ def pull_one_completed():
 
         if len(rows) != len(buttons):
             log("finished orders page %d: %d rows but %d buttons - skipping "
-                "rather than risk pressing the wrong one."
-                % (page, len(rows), len(buttons)), HUE_BAD)
+                "rather than risk pressing the wrong one. %s"
+                % (page, len(rows), len(buttons), row_button_note(buttons)),
+                HUE_BAD)
         else:
             for row, button in zip(rows, buttons):
                 if row.get("completed") is not True:
@@ -3526,9 +3602,10 @@ def find_first_order(resource, budget, refilter=True):
         buttons = row_buttons(raw_layout(orders_gump()))
 
         if len(rows) != len(buttons):
-            log("%s page %d: %d rows but %d buttons - skipping this page rather "
-                "than risk pressing the wrong one."
-                % (resource, page, len(rows), len(buttons)), HUE_BAD)
+            log("%s page %d: %d rows but %d buttons - skipping this page "
+                "rather than risk pressing the wrong one. %s"
+                % (resource, page, len(rows), len(buttons),
+                   row_button_note(buttons)), HUE_BAD)
             log("  rows:    %s" % ", ".join(
                 "%s x%s" % (r["name"][:18], r["amount"]) for r in rows[:8]))
             log("  buttons: %s" % ", ".join(str(b) for b in buttons[:8]))
@@ -5100,25 +5177,17 @@ def validate():
         % (ids["item_filter"], ids["completed_filter"],
            ids["amount_sort"] or "unavailable",
            ids["withdraw_base"], ids["withdraw_base"] + ROWS_PER_PAGE - 1))
-    want_button, want_column, how = ORDERS_CONFIRMED
-    got = 0
-    if want_column in ids["columns"]:
-        got = (ORDERS_CONTROL_BASE
-               + ORDERS_COLUMN_STRIDE * ids["columns"].index(want_column)
-               + ORDERS_TYPE_SORT_ASC)
-    if got != want_button:
-        # Not fatal - the live read may simply be right and the note stale -
-        # but it is the one cross-check there is on the whole derivation, and
-        # a silent disagreement here means sorting the wrong column.
-        log("  CHECK THIS: button %d %s, which puts %s at column %d. What is "
-            "derived now is %s. The columns have been reordered - confirm the "
-            "new sort button in the Gump Inspector before trusting it."
-            % (want_button, how, want_column,
-               (want_button - ORDERS_CONTROL_BASE) // ORDERS_COLUMN_STRIDE,
-               got or "nothing"), HUE_BAD)
-    else:
-        log("  sort button %d agrees with the %s capture." % (got, want_column),
-            HUE_GOOD)
+    disagreed = confirmed_disagreements(ids)
+    for what, want, got, how in disagreed:
+        # Not fatal - the live read may be right and the note stale - but a
+        # silent disagreement means pressing the wrong thing, so it is said in
+        # red and it names the evidence.
+        log("  CHECK THIS: %s should be %s - %s. Derived: %s. Confirm it in "
+            "the Gump Inspector before trusting the run."
+            % (what, want, how, got), HUE_BAD)
+    if not disagreed:
+        log("  all %d confirmed capture(s) agree with the derived columns."
+            % len(ORDERS_CONFIRMED), HUE_GOOD)
 
     # The fill rate limits, said out loud. A silently refused fill is the
     # failure mode here, so the settings that guard against it are worth a line

@@ -1673,10 +1673,15 @@ def test_zero_row_still_consumes_a_button_slot(m):
     rows = m["parse_order_rows"](REAL_PAGE1)
     buttons = m["row_buttons"](REAL_LAYOUT)
     check("counts line up", len(rows), len(buttons))
+    # Reported, never raised. A change that empties the button list must show
+    # as a failed check, not as a traceback that hides every check after it -
+    # and "no buttons" is exactly how a too-narrow id range looks.
     paired = list(zip(rows, buttons))
-    check("zero row owns button 100", paired[0][1], 100)
-    check("155 belongs to 101", (paired[1][0]["amount"], paired[1][1]),
-          (155, 101))
+    check("zero row owns button 100",
+          paired[0][1] if len(paired) > 0 else "<no rows paired>", 100)
+    check("155 belongs to 101",
+          (paired[1][0]["amount"], paired[1][1]) if len(paired) > 1
+          else "<no second pair>", (155, 101))
 
 
 def test_header_anchor_covers_all_five_columns(m):
@@ -4559,22 +4564,42 @@ def test_the_confirmed_capture_agrees_with_the_derivation(m):
     the two disagree, and the live capture wins. They said as much: "CURRENT
     COLUMN ORDER (not the declared order - anyone can reorder it).
     """
-    button, column, _how = m["ORDERS_CONFIRMED"]
-    check("the capture is button 17", button, 17)
-    check("on Amt To Gather", column, "Amt To Gather")
+    caps = dict((what, want) for what, want, _how in m["ORDERS_CONFIRMED"])
+    for key, want, how in (("amount_sort", 17, "17 sorted Amt To Gather "
+                            "lowest-first"),
+                           ("withdraw_base", 40, "40 withdrew the top row"),
+                           ("item_field", 0, "the Item filter came back in "
+                            "Text ID 0"),
+                           ("column_count", 5, "there were five filter "
+                            "fields")):
+        check(how, caps.get(key, "<capture missing>"), want)
 
     ids = m["orders_ids"]()
-    check("and that is what the column order derives", ids["amount_sort"],
-          button)
-    check("which puts it at column 1", ids["columns"].index(column), 1)
-    check("it is not a REMOVE button", button in ids["remove"], False)
-    check("nor Purge", button in m["ORDERS_NEVER_PRESS"], False)
+    check("every capture agrees with the derivation",
+          m["confirmed_disagreements"](ids), [])
+    check("Amt To Gather is column 1",
+          ids["columns"].index("Amt To Gather"), 1)
+    check("the sort is not a REMOVE button",
+          caps["amount_sort"] in ids["remove"], False)
+    check("nor Purge", caps["amount_sort"] in m["ORDERS_NEVER_PRESS"], False)
+
+    # A disagreement must be REPORTED, not shrugged off.
+    saved = m["ORDERS_CONFIRMED"]
+    try:
+        m["ORDERS_CONFIRMED"] = [("amount_sort", 23, "the admin's layout")]
+        bad = m["confirmed_disagreements"](ids)
+        check("a wrong capture is caught", len(bad), 1)
+        check("and it says what was wanted and what was got",
+              (bad[0][1], bad[0][2]) if bad else "<nothing reported>",
+              (23, 17))
+    finally:
+        m["ORDERS_CONFIRMED"] = saved
 
     # The admin's order would give 23. Kept as a live reminder that the two
     # layouts differ and which one this script follows.
     admin = ["Item", "Completed", "Amt To Gather", "Amt Gathered", "Value Per"]
     check("the admin's order would have said 23",
-          10 + 6 * admin.index(column) + 1, 23)
+          10 + 6 * admin.index("Amt To Gather") + 1, 23)
     check("and this book says otherwise", ids["amount_sort"] == 23, False)
 
 
@@ -4686,6 +4711,92 @@ def test_the_column_count_comes_from_the_filter_boxes(m):
         m["raw_layout"] = lambda gid: ""
         check("an unreadable layout has no opinion",
               m["orders_column_count"](), 0)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_row_buttons_exclude_the_details_button_on_each_row(m):
+    """THE REPORTED FAILURE:
+
+        Frostwood Boards page 4: 14 rows but 30 buttons - skipping this page
+        rather than risk pressing the wrong one.
+
+    30 for a fifteen-row page, because every row carries TWO buttons:
+
+        row i withdraw = withdraw_base + i
+        row i details  = withdraw_base + 100000 + i
+
+    Geometry could not tell them apart - they sit on the same row a few pixels
+    apart, and both are inside any band wide enough to hold the rows. The id
+    range can, and the ids are what the admin's list actually defines.
+
+    Button 40 withdrawing the top row is confirmed live (2026-09-13), which is
+    what makes the base trustworthy enough to select on.
+    """
+    rows = []
+    for i in range(15):
+        y = 90 + i * 30
+        rows.append("{ button 12 %d 4005 4007 1 0 %d }" % (y, 40 + i))
+        rows.append("{ button 40 %d 4011 4012 1 0 %d }" % (y, 100040 + i))
+    layout = ("{ button 300 70 250 251 1 0 17 }"        # a column sorter
+              "{ button 20 640 4014 4015 1 0 4 }"       # Previous Page
+              "{ button 560 640 4005 4006 1 0 5 }"      # Next Page
+              + "".join(rows))
+
+    saved = {k: m[k] for k in ("orders_column_order", "orders_column_count")}
+    try:
+        m["orders_column_order"] = lambda: ["Item", "Amt To Gather",
+                                            "Amt Gathered", "Value Per",
+                                            "Completed"]
+        m["orders_column_count"] = lambda: 5
+        got = m["row_buttons"](layout)
+        check("fifteen rows give fifteen buttons", len(got), 15)
+        check("and they are the withdraw ones", got, list(range(40, 55)))
+        check("no details button came through",
+              [b for b in got if b >= 100000], [])
+        check("nor the sorter, nor the page nav",
+              [b for b in got if b in (4, 5, 17)], [])
+
+        # Page 2 may continue the numbering rather than restart it. The range
+        # has to be wide enough for that, or every page after the first is
+        # thrown away.
+        page2 = "".join("{ button 12 %d 4005 4007 1 0 %d }" % (90 + i * 30,
+                                                               55 + i)
+                        for i in range(15))
+        # Page 2 may continue the numbering. A range capped at one page's
+        # worth throws every page after the first away - and does it silently,
+        # because an empty button list just looks like an empty page.
+        check("a continued page is still read", m["row_buttons"](page2),
+              list(range(55, 70)))
+        check("and it is not empty", len(m["row_buttons"](page2)), 15)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_the_mismatch_message_names_the_cause(m):
+    """"14 rows but 30 buttons" says something is wrong and nothing about
+    what. 30 on a fifteen-row page has one obvious cause, and naming the ids
+    makes it plain."""
+    saved = {k: m[k] for k in ("orders_column_order", "orders_column_count")}
+    try:
+        m["orders_column_order"] = lambda: ["Item", "Amt To Gather",
+                                            "Amt Gathered", "Value Per",
+                                            "Completed"]
+        m["orders_column_count"] = lambda: 5
+        note = m["row_button_note"](list(range(40, 55))
+                                    + list(range(100040, 100055)))
+        check("it counts the details buttons", "15 of them are DETAILS" in note,
+              True)
+        check("and gives the base it used", "base 40" in note, True)
+
+        note = m["row_button_note"]([17, 40, 41])
+        check("a control button is called out",
+              "below the base" in note, True)
+
+        check("and no buttons at all is its own answer",
+              "no row buttons" in m["row_button_note"]([]), True)
     finally:
         for k, v in saved.items():
             m[k] = v

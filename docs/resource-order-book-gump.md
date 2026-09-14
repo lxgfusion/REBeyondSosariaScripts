@@ -1,77 +1,77 @@
 # Resource Order Book gump
 
-## YOUR BOOK IS NOT THE ADMIN'S BOOK — 2026-09-13
+## CONFIRMED IN GAME — gump `0xC5F60B43`, 2026-09-13
 
-Confirmed by a live Gump Inspector capture: **pressing 17 sorted `Amt To
-Gather` lowest-first.** By the admin's own formula `17 = 10 + 6*1 + 1`, which
-puts `Amt To Gather` at **column 1**.
+Four Gump Inspector captures, and they all agree on one column order:
 
-The admin's published order puts it at column 2, which would make that button
-23. They said so themselves — *"CURRENT COLUMN ORDER (not the declared order —
-anyone can reorder it)"*. That list was their copy.
+| capture | what it proves |
+|---|---|
+| button **17** sorted `Amt To Gather` lowest-first | `Amt To Gather` is column **1** (`10+6*1+1`) |
+| button **40** withdrew the top row | withdraw base **40**, so **5 columns** (`10+6*5`) |
+| Item filter came back in **Text ID 0** | `Item` is column **0** |
+| response carried **Text IDs 0–4** | five filter fields, five columns |
 
-| | admin's book | **this book** |
-|---|---|---|
-| 0 | Item | Item |
-| 1 | Completed | **Amt To Gather** |
-| 2 | Amt To Gather | **Amt Gathered** |
-| 3 | Amt Gathered | **Value Per** |
-| 4 | Value Per | **Completed** |
-
-So for this book:
+```
+Item | Amt To Gather | Amt Gathered | Value Per | Completed
+```
 
 | | button |
 |---|---:|
 | Item filter | 12 |
-| **Amt To Gather, sort lowest-first** | **17** ← captured live |
+| **Amt To Gather, sort lowest-first** | **17** ✔ |
 | Completed filter | **36** (field id **4**) |
-| Withdraw rows | 40–54 |
+| Withdraw rows | **40–54** ✔ |
+| Row details | 100040–100054 |
 | REMOVE COLUMN — never press | 15, 21, 27, 33, 39 |
 
-This is the order the 2026-07-27 dump recorded. **This book has never been
-reordered**; only the ids under it moved, when the stride went 10 → 6.
+`ORDERS_CONFIRMED` holds all four and preflight checks them against whatever
+the live columns derive. A disagreement is printed in red and names the
+evidence, rather than the script quietly pressing the wrong thing.
 
-`ORDERS_CONFIRMED` holds that capture and preflight checks it against whatever
-the column order derives. If they ever disagree, the log says so in red rather
-than quietly sorting the wrong column.
+**This is NOT the admin's published order** — theirs puts `Completed` at column
+1, which would make that sort 23. They said so: *"CURRENT COLUMN ORDER (not the
+declared order — anyone can reorder it)."* That was their copy.
+
+## EVERY ROW HAS TWO BUTTONS
+
+```
+row i withdraw = withdraw_base + i          40..54
+row i details  = withdraw_base + 100000 + i 100040..100054
+```
+
+Which is why a full page reported:
+
+```
+Frostwood Boards page 4: 14 rows but 30 buttons - skipping this page
+```
+
+30 = 15 rows × 2. Geometry cannot separate them — they sit on the same row a
+few pixels apart, inside any band wide enough to hold the rows. `row_buttons()`
+now selects by **id range**: `base <= id < base + 100000`, which excludes the
+column controls below and the details buttons above.
+
+The range is deliberately wide rather than one page's worth, because row
+buttons may continue across pages (page 2 starting at `base + 15`). Capping it
+throws every page after the first away, and does it *silently* — an empty
+button list just looks like an empty page.
 
 ## A HALF-READ HEADER ROW IS REFUSED
 
-`GetLineList` does not always return every header cell. A live dump of this
-book gave:
+`GetLineList` does not always return every header cell. Two live dumps of this
+book gave `Item | 1v | Amt Gathered | Completed` and
+`[Item, Amt To Gather, Value Per]` for a window whose header plainly reads five
+names.
 
-```
-Item | 1v | Amt Gathered | Completed
-```
-
-for a window whose header plainly reads `Item / Amt To Gather / Amt Gathered /
-Value Per / Completed`.
-
-Three of five names is not a smaller answer, **it is a wrong one**: `Completed`
-comes out as column 2 instead of 4, so the finished-order filter gets pressed
-on `Amt Gathered`, returns nothing, and reads as *"no finished orders"* rather
-than as a mistake.
+Three of five is not a smaller answer, **it is a wrong one**. The cross-check is
+`orders_column_count()` — one filter text entry per column, and those are layout
+*elements*, not strings, so they cannot come back half-read.
 
 > Unidentified must mean invisible, never mistaken for something else.
 
-The cross-check is `orders_column_count()` — **one filter text entry per
-column**. Those are layout *elements*, not strings, so unlike the labels they
-cannot come back half-read. When the header names and the box count disagree,
-the read is thrown away and the configured order is used, with a log line
-saying what it read.
-
 ## The list's gump id moves too
 
-`0xB2F21F1A` → `0xC5F60B43`. Razor derives the id from what the server sent, so
-changing the columns changes it. When it was wrong:
-
-```
-[RO] The order list never opened.
-[RO] closed 2 stray window(s) [fill done]: 0x6ABCE12, 0xC5F60B43
-```
-
-The list *had* opened; `tidy_gumps` then closed it as a stray, printing its id
-in the line that reported the failure. It is now found by what is on it —
+`0xB2F21F1A` → `0xC5F60B43`. Razor derives it from what the server sent, so
+changing the columns changes it. Found by content now —
 `ORDERS_SIGNATURE = ["Displayed:", "Contents:"]`, **both** required, because the
 book's own window says "Resource Orders" as well.
 
@@ -81,38 +81,28 @@ book's own window says "Resource Orders" as well.
 control button  = 10 + 6*column_index + type
 filter field id = column_index
 withdraw base   = 10 + 6*column_count
-row i           = withdraw base + i            (15 rows per page)
-row i details   = withdraw base + 100000 + i
 ```
 
 | type | meaning |
 |---|---|
-| 0 | sort — the arrow that **says** "asc", sorts DESC |
-| 1 | sort — the arrow that **says** "desc", sorts ASC |
+| 0 | sort — arrow **says** "asc", sorts DESC |
+| 1 | sort — arrow **says** "desc", sorts ASC |
 | 2 | apply filter |
-| 3 | shift left |
-| 4 | shift right |
+| 3 | shift left · 4 shift right |
 | 5 | **REMOVE COLUMN** |
 
 Global: `0` close · `1` Add · `2` Fill from backpack · `3` **Purge (bulk
 delete)** · `4` Previous Page (*not drawn on page 0*) · `5` Next Page (*not
-drawn on the last page*) · `6` Feed Crucible · `9` Add Column.
+drawn on the last page*) · `9` Add Column.
 
-### Rules that are not about numbers
-
-- **Pressing a button the server did not draw disconnects you.**
-- **REMOVE COLUMN presses are refused**, computed per column.
-- **Purge (3) is refused.** It used to be Fill from backpack; they swapped.
-- **Any apply-filter press overwrites EVERY column's filter.** Empty = cleared.
-- **Filters are substring** — "Amber" also matches "Brilliant Amber".
-- Sort arrows are inverted.
+Refused outright: every REMOVE COLUMN id, Purge, button 0, and anything the
+server did not draw (pressing one disconnects you).
 
 ---
 
 ## HISTORY — the 2026-07-27 dump
 
-Numbers below are superseded. The column ORDER in it turned out to be current;
-the ids were not.
+Superseded. The column ORDER in it turned out to be current; the ids were not.
 
 Mapped from a live dump on 2026-07-27 (`diag_resource_orders.py`). The book is
 `0x404AC332`, ItemID `0x2259`, hue `0x04F7`, locked down and Blessed on the
