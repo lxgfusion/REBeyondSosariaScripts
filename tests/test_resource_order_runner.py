@@ -4802,6 +4802,114 @@ def test_the_mismatch_message_names_the_cause(m):
             m[k] = v
 
 
+def test_a_short_page_takes_the_first_row_instead_of_nothing(m):
+    """THE REPORTED FAILURE, second round:
+
+        Citrine page 1: 14 rows but 15 buttons - skipping this page ...
+          rows:    Ecru Citrine x11, Ecru Citrine x14, ...
+          buttons: 40, 41, 42, 43, 44, 45, 46, 47
+
+    The details buttons are gone - 40..54 is right - so the page really does
+    parse one row short. Razor drops EMPTY strings out of a gump's string
+    table without leaving a gap, so one blank cell costs a row.
+
+    Skipping is safe and fills nothing. On a book where every page does it,
+    that is the whole run. Taking the FIRST row is safe for a reason rather
+    than out of optimism: a dropped string shifts the rows AFTER it, never the
+    one before, so rows[0] and buttons[0] still belong together - and
+    work_one_order checks the deed's own resource and amount afterwards and
+    declines it if either is not what the row promised.
+    """
+    check("the default is to salvage the first row",
+          m["ORDERS_ON_MISMATCH"], "first")
+
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def find_first_order("):src.index("def live_stacks(")]
+
+    check("the mismatch is still noticed",
+          "if len(rows) != len(buttons):" in body, True)
+    check("and it narrows to one pair",
+          "rows[:1], buttons[:1]" in body, True)
+    check("the skip is still there for anyone who wants it",
+          "rows, buttons = [], []" in body, True)
+    check("and the shift is explained",
+          "string_shift_note()" in body, True)
+
+    # The pairing that survives a short page is the FIRST one. Reported, never
+    # raised - a mutation that removes the narrowing must show as a failed
+    # check, not as a traceback that hides every check after it.
+    narrow = "rows[:1], buttons[:1]"
+    check("first row with first button",
+          narrow in body
+          and body.index(narrow)
+          < body.index("for row, button in zip(rows, buttons)"), True)
+
+
+def test_the_deed_is_what_actually_decides(m):
+    """Which is what makes salvaging the first row safe. Neither failure is
+    destructive: the deed stays in the pack and says so."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def work_one_order("):src.index("def validate(")]
+    check("the deed's own resource is checked",
+          "deed_matches_resource(fields, resource)" in body, True)
+    check("a wrong one is declined, not filled",
+          'return "declined"' in body, True)
+    check("and its real size is checked against the budget",
+          "short > budget.get(resource, 0)" in body, True)
+    check("the row's amount is not trusted for that",
+          "needed - (filled or 0)" in body, True)
+
+
+def test_the_string_table_shortfall_is_named(m):
+    """A row count that is short says something is wrong and nothing about
+    what. Counting the layout's text cells against the strings returned says
+    it plainly."""
+    layout = ("{ croppedtext 60 50 100 20 0 3 }"
+              "{ croppedtext 660 50 100 20 0 4 }"
+              "{ croppedtext 810 50 100 20 0 5 }")
+    saved = {k: m[k] for k in ("raw_layout", "gump_lines", "orders_gump")}
+    try:
+        m["orders_gump"] = lambda: 0x1234
+        m["raw_layout"] = lambda gid: layout
+
+        m["gump_lines"] = lambda gid, data_only=False: ["a", "b", "c"]
+        note = m["string_shift_note"]()
+        check("a whole table says so", "the table is whole" in note, True)
+
+        m["gump_lines"] = lambda gid, data_only=False: ["a", "b"]
+        note = m["string_shift_note"]()
+        check("a short one says how short", "1 short" in note, True)
+        check("and why", "drops empty strings" in note, True)
+
+        m["raw_layout"] = lambda gid: ""
+        check("an unreadable layout says that instead",
+              "could not be read" in m["string_shift_note"](), True)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_the_repeated_header_warning_is_said_once(m):
+    """It was logged on every orders_ids() call - which is nearly every line of
+    the order work - and filled the journal with the same sentence."""
+    said = []
+    saved = {k: m[k] for k in ("log",)}
+    try:
+        m["log"] = lambda text, hue=None: said.append(text)
+        m["_said_once"].clear()
+        check("the first time it speaks", m["say_once"]("k", "hello"), True)
+        check("the second time it does not", m["say_once"]("k", "hello"), False)
+        check("only one line came out", len(said), 1)
+        check("a different key still speaks",
+              m["say_once"]("other", "hello"), True)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+        m["_said_once"].clear()
+
+
 def main():
     module = load()
     for name, test in sorted(globals().items()):

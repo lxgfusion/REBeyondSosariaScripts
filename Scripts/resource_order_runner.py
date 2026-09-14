@@ -89,7 +89,7 @@ import time
 # line in the journal says which copy is actually loaded - two separate
 # debugging rounds were spent on a bug that was already fixed on disk but not
 # in the Scripts folder.
-SCRIPT_VERSION = "2026-09-13.4"
+SCRIPT_VERSION = "2026-09-13.5"
 
 
 # =============================================================================
@@ -604,6 +604,29 @@ ORDERS_VERIFY_DRAWN = True
 # can see on one page. Left on: sorting smallest-first is what maximises the
 # number of orders a lap can fill.
 ORDERS_SORT_ENABLED = True
+
+# What to do when a page parses fewer rows than it has row buttons.
+#
+# It happens, and it is not the gump's fault: Razor drops EMPTY strings out of
+# a gump's string table without leaving a gap, so one blank cell costs a row
+# and shifts everything after it. A live page of 15 Ecru Citrine orders came
+# back as 14 rows against 15 buttons.
+#
+#   "skip"   leave the page alone. Safe, and fills nothing - which on a book
+#            where every page does it means the run does nothing at all.
+#   "first"  consider ONLY the first row, paired with the first button.
+#
+# "first" is the default, and it is safe for a specific reason rather than an
+# optimistic one: a dropped string can only shift the rows AFTER it, so the
+# first row and the first button still belong together. Everything downstream
+# is verified against the deed itself - work_one_order reads the deed's own
+# resource and amount and DECLINES it, leaving it in the pack, if either is
+# not what the row promised. The cost of being wrong is one wasted withdrawal
+# that announces itself; the cost of "skip" is the whole run.
+#
+# It also costs nothing in efficiency when the list is sorted smallest-first,
+# because the first row IS the one this script wants.
+ORDERS_ON_MISMATCH = "first"
 
 # =============================================================================
 # CONFIG - PULLING FINISHED ORDERS OUT OF THE BOOK
@@ -2986,10 +3009,13 @@ def orders_column_order():
     # one per column, and they are layout elements rather than strings.
     boxes = orders_column_count()
     if boxes and len(order) != boxes:
-        log("read %d column header(s) off a list with %d filter box(es) - the "
-            "header row did not come back whole, so the published order is "
-            "used instead. Read: %s"
-            % (len(order), boxes, order or "nothing"), HUE_WARN)
+        say_once("header-short-%d-%d" % (len(order), boxes),
+                 "read %d column header(s) off a list with %d filter box(es) - "
+                 "the header row did not come back whole, so the confirmed "
+                 "order is used instead. Read: %s. This is expected and "
+                 "harmless: every button is checked against ORDERS_CONFIRMED "
+                 "at startup." % (len(order), boxes, order or "nothing"),
+                 HUE_WARN)
         return []
     return order
 
@@ -3097,6 +3123,50 @@ def confirmed_disagreements(ids):
         if got != want:
             out.append((what, want, got, how))
     return out
+
+
+def string_shift_note():
+    """Whether the gump's string table came back short, and by how much.
+
+    THE ROOT CAUSE of a page parsing fewer rows than it has buttons. Razor
+    drops EMPTY strings out of the table without leaving a gap - confirmed in
+    Razor/Network/Handlers.cs, where the read loop only advances its index when
+    the string has length - so one blank cell costs a row and shifts every cell
+    after it.
+
+    Counting the text elements in the layout against the strings returned says
+    so plainly, instead of leaving it to be inferred from a row count.
+    """
+    try:
+        cells = len([el for el in layout_elements(raw_layout(orders_gump()))
+                     if el["kind"] in ("text", "croppedtext")])
+        strings = len(gump_lines(orders_gump()))
+    except Exception:
+        return "could not compare the layout with the string table."
+    if not cells:
+        return "the layout could not be read."
+    if strings == cells:
+        return ("%d text cell(s), %d string(s) - the table is whole, so the "
+                "row count is short for some other reason." % (cells, strings))
+    return ("%d text cell(s) but only %d string(s): the table is %d short, so "
+            "every cell after the gap is paired with the wrong text. Razor "
+            "drops empty strings without leaving a gap."
+            % (cells, strings, cells - strings))
+
+
+# Said once, not once per call. orders_ids() is asked on nearly every line of
+# the order work, and a refused header read was filling the journal with the
+# same sentence.
+_said_once = set()
+
+
+def say_once(key, text, hue=None):
+    """Log `text` the first time `key` comes up, and never again."""
+    if key in _said_once:
+        return False
+    _said_once.add(key)
+    log(text, hue if hue is not None else HUE_INFO)
+    return True
 
 
 def row_button_note(buttons):
@@ -3602,44 +3672,59 @@ def find_first_order(resource, budget, refilter=True):
         buttons = row_buttons(raw_layout(orders_gump()))
 
         if len(rows) != len(buttons):
-            log("%s page %d: %d rows but %d buttons - skipping this page "
-                "rather than risk pressing the wrong one. %s"
+            log("%s page %d: %d rows but %d buttons. %s"
                 % (resource, page, len(rows), len(buttons),
-                   row_button_note(buttons)), HUE_BAD)
+                   row_button_note(buttons)), HUE_WARN)
             log("  rows:    %s" % ", ".join(
                 "%s x%s" % (r["name"][:18], r["amount"]) for r in rows[:8]))
             log("  buttons: %s" % ", ".join(str(b) for b in buttons[:8]))
-        else:
-            page_pick = None
-            for row, button in zip(rows, buttons):
-                amount = row["amount"]
-                if not amount:
-                    continue          # the amt-0 row every page opens with
-                if not exact.match(row["name"].strip()):
-                    rejected += 1
-                    continue          # another resource the filter let in
-                matched += 1
-                # Split, because the two need OPPOSITE fixes: too big means
-                # raise MAX_ORDER_SIZE, over budget means gather more stock.
-                if amount > MAX_ORDER_SIZE:
-                    too_big.append(amount)
-                    continue
-                if amount > budget:
-                    over_budget.append(amount)
-                    continue
+            log("  %s" % string_shift_note(), HUE_WARN)
 
-                candidate = {"button": button, "name": row["name"],
-                             "amount": amount, "term": term}
-                if sorted_ok or ORDER_PICK == "first":
-                    # Sorted ascending, so the first acceptable row is the
-                    # smallest there is. Nothing later can beat it.
-                    return candidate
-                if page_pick is None or amount < page_pick["amount"]:
-                    page_pick = candidate
+            if ORDERS_ON_MISMATCH == "first" and rows and buttons:
+                # ONLY the first pair. A dropped string shifts the rows after
+                # it, never the one before it, so rows[0] and buttons[0] still
+                # belong together - and the deed itself is checked afterwards.
+                log("  taking the FIRST row only (%s x%s on button %d); the "
+                    "rest of this page is left alone."
+                    % (rows[0]["name"][:18], rows[0]["amount"], buttons[0]),
+                    HUE_WARN)
+                rows, buttons = rows[:1], buttons[:1]
+            else:
+                log("  skipping this page rather than risk pressing the wrong "
+                    "one.", HUE_BAD)
+                rows, buttons = [], []
 
-            if page_pick is not None:
-                # Unsorted: the best this page holds, pressed on this page.
-                return page_pick
+
+        page_pick = None
+        for row, button in zip(rows, buttons):
+            amount = row["amount"]
+            if not amount:
+                continue          # the amt-0 row every page opens with
+            if not exact.match(row["name"].strip()):
+                rejected += 1
+                continue          # another resource the filter let in
+            matched += 1
+            # Split, because the two need OPPOSITE fixes: too big means
+            # raise MAX_ORDER_SIZE, over budget means gather more stock.
+            if amount > MAX_ORDER_SIZE:
+                too_big.append(amount)
+                continue
+            if amount > budget:
+                over_budget.append(amount)
+                continue
+
+            candidate = {"button": button, "name": row["name"],
+                         "amount": amount, "term": term}
+            if sorted_ok or ORDER_PICK == "first":
+                # Sorted ascending, so the first acceptable row is the
+                # smallest there is. Nothing later can beat it.
+                return candidate
+            if page_pick is None or amount < page_pick["amount"]:
+                page_pick = candidate
+
+        if page_pick is not None:
+            # Unsorted: the best this page holds, pressed on this page.
+            return page_pick
 
         current, total = page_counter(strings)
         if total is None or current is None or current >= total:

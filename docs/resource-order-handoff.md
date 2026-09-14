@@ -1,75 +1,72 @@
 # Resource order handoff
 
-## `.2026-09-12.2` — the cushion was never actually waiting
-
-From the journal:
+## `.2026-09-13.5` — a short page no longer means a wasted page
 
 ```
-[RO] == depositing 120 new order(s) ==
-You must wait 0.4 more seconds before you can fill from backpack.
-[RO] fill refused: You must wait 0.4 more seconds before you can fill from backpack.
+Citrine page 1: 14 rows but 15 buttons - skipping this page ...
+  rows:    Ecru Citrine x11, Ecru Citrine x14, Ecru Citrine x16, ...
+  buttons: 40, 41, 42, 43, 44, 45, 46, 47
 ```
 
-Detection worked. **The wait did not.** `FILL_EXTRA_PAUSE_MS` was added to the
-ready time:
+The buttons are right — 40..54, details excluded. The page really does parse
+one row short.
 
-```python
-ready = _last_fill[timer] + cooldown
-ready += FILL_EXTRA_PAUSE_MS / 1000.0     # <- did nothing
-```
+**Why:** Razor drops EMPTY strings out of a gump's string table *without
+leaving a gap* — confirmed in `Razor/Network/Handlers.cs`, where the read loop
+only advances its index when the string has length. One blank cell costs a row
+and shifts every cell after it. It is the same fault that makes the header row
+come back as three names out of five.
 
-The first press of a lap is *minutes* after the last fill the script made, so
-`ready` sits far in the past and `ready + 0.7` is still in the past. The gate
-returned 0 and pressed immediately. **It is a floor measured from now**, and
-the property worth remembering is: `fill_gate` must never be able to return 0
-while `FILL_EXTRA_PAUSE_MS` is set.
+Skipping is safe and fills nothing. On a book where every page does it, that is
+the whole run — which is what "there are enough resources but it isn't pulling"
+was.
 
-Why it has to be unconditional: the timer is spent by things the script cannot
-see. The patch notes say the Auto Looter's overweight key filling shares it,
-and the character arrives at Start Fill with a full pack every lap. **"Nothing
-I did was recent" is no evidence that the server is ready.**
+`ORDERS_ON_MISMATCH = "first"` takes the **first row only**. Safe for a reason
+rather than out of optimism:
 
-The retry also waits explicitly now, in its own loop, rather than leaving it to
-the next press's `fill_gate` — `press_fill` spends over a second closing and
-reopening the book before it reaches the gate, so the real delay was an
-accident of how long the window took. `FILL_RETRIES` is 5; 120 deeds is worth
-more than three presses.
+- a dropped string shifts the rows **after** it, never the one before, so
+  `rows[0]` and `buttons[0]` still belong together;
+- the list is sorted smallest-first, so the first row is the one we want anyway;
+- and nothing downstream trusts the row. `work_one_order` reads the deed's own
+  resource and its own size, and **declines** it — leaving it in the pack with
+  a message — if either is not what the row promised.
 
-## The refusal message
+Set it to `"skip"` for the old behaviour.
 
-Read off the journal 2026-09-12:
+`string_shift_note()` now prints the layout's text-cell count against the
+strings returned, so the shortfall is stated rather than inferred.
+
+The repeated "read 3 column headers off a list with 5 filter boxes" is said
+**once** now. It was logged on every `orders_ids()` call. It is expected and
+harmless — every button is checked against `ORDERS_CONFIRMED` at startup.
+
+## Fill rate limits
+
+See `docs/resource-order-book-gump.md` for the button map. The refusal message
+is:
 
 ```
 You must wait 0.4 more seconds before you can fill from backpack
 ```
 
-**`FILL_WAIT_MESSAGES` stores the part without the number** —
-`"before you can fill from backpack"`. The full line went in first and carried
-the `0.4` with it, so it matched a 0.4-second refusal and nothing else.
-`seconds_in()` reads the number separately. A test forbids a digit in any
-stored phrase.
+`FILL_WAIT_MESSAGES` stores the part **without** the number —
+`"before you can fill from backpack"` — because the full line matches a
+0.4-second refusal and nothing else. `seconds_in()` reads the number.
 
-`FILL_WAIT_PATTERN` covers the wordings nobody has read yet (the Master Keys
-and storage keys presumably say something similar about *refill from stock*).
-Its first version required the number to butt up against `second` — the real
-message says "wait 0.4 **more** seconds" — so it failed to match the one line
-it was written for.
-
-## A refusal and an out-of-reach bag have OPPOSITE fixes
-
-Tipping the deeds out of the order bag is the recovery for a button that cannot
-reach inside it. For a rate limit it does nothing — the next press is refused
-just the same, and now the orders are loose in the pack. `deposit_new_orders`
-tests for a refusal **first**, and its only answer is to wait.
+`FILL_EXTRA_PAUSE_MS` is a **floor measured from now**, not an addition to the
+ready time: the first press of a lap is minutes after the last fill the script
+made, so a ready time in the past plus a cushion is still in the past. The
+timer is spent by things the script cannot see — the Auto Looter's overweight
+key filling shares it — so a quiet tracked timer proves nothing.
 
 ## Still unconfirmed
 
-- Which timer the book's button actually spends. `BOOK_FILL_TIMER = "key"` is a
-  reading of the patch notes ("a key, stash or **list** window"), not a
-  measurement. Wrong costs waiting time, not correctness.
-- The Master Keys and storage-key refusal wordings.
-- Whether the refusals stop now. If they persist, the next thing to try is
-  `BOOK_FILL_TIMER = "master"` and a larger `FILL_EXTRA_PAUSE_MS`.
+- Which timer the book's Fill-from-backpack button spends
+  (`BOOK_FILL_TIMER = "key"` is a reading of the patch notes, not a
+  measurement).
+- Whether the string-table shortfall has a pattern worth exploiting — if a
+  future dump shows *which* cell goes blank, rows could be paired by Y instead
+  of by index and the whole page salvaged rather than one row.
 
 ---
 
