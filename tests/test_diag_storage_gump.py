@@ -148,8 +148,9 @@ def test_it_presses_nothing(m):
         src = fh.read()
     code = re.sub(r'"""[\s\S]*?"""', "", src)
     code = "\n".join(l.split("#")[0] for l in code.splitlines())
-    for call in ("SendAction", "SendAdvancedAction", "Items.Move",
-                 "TargetExecute"):
+    # CALLS, not words - the report itself warns about SendAdvancedAction.
+    for call in ("Gumps.SendAction(", "Gumps.SendAdvancedAction(",
+                 "Items.Move(", "Target.TargetExecute("):
         check("no %s" % call, call in code, False)
 
 

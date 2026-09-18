@@ -1,0 +1,128 @@
+read-only - nothing will be pressed, typed or moved.
+Target the storage key.
+inspecting 0x4017817A, ItemID 0xA54A, hue 0x0000
+gump 0x6ABCE12: 13 button(s), 0 text entr(y/ies), 27 text cell(s), 27 string(s)
+
+TEXT CELLS, top to bottom, with where they sit:
+  at   20,25    Stone Storage
+  at   75,50    Plain
+  at  215,50    59998
+  at  315,50    Gold
+  at  455,50    0
+  at   75,90    Dull
+  at  215,90    0
+  at  315,90    Agapite
+  at  455,90    0
+  at   75,130   Shadow
+  at  215,130   0
+  at  315,130   Verite
+  at  455,130   0
+  at   75,170   Copper
+  at  215,170   0
+  at  315,170   Valorite
+  at  455,170   0
+  at   75,210   Bronze
+  at  215,210   0
+  at  315,210   Mythril
+  at  455,210   0
+  at   15,305   Withdrawal Amount:
+  at  150,305   1
+  at  325,305   Add
+  at   15,335   Maximum Storage:
+  at  150,335   999999
+  at  325,335   Fill from backpack
+
+No text entries - nothing on this window takes a typed amount.
+WITHDRAWAL AMOUNT reads '1' (the string after the label).
+
+BUTTONS THE SERVER DREW - the label on EACH side, nearest first:
+  button 1      at   35,55         left: -   right: Plain @x75
+  button 6      at  275,55         left: 59998 @x215   right: Gold @x315
+  button 2      at   35,95         left: -   right: Dull @x75
+  button 7      at  275,95         left: 0 @x215   right: Agapite @x315
+  button 3      at   35,135        left: -   right: Shadow @x75
+  button 8      at  275,135        left: 0 @x215   right: Verite @x315
+  button 4      at   35,175        left: -   right: Copper @x75
+  button 9      at  275,175        left: 0 @x215   right: Valorite @x315
+  button 5      at   35,215        left: -   right: Bronze @x75
+  button 10     at  275,215        left: 0 @x215   right: Mythril @x315
+  button 21     at  225,308        left: 1 @x150   right: Add @x325
+  button 22     at  305,310        left: 1 @x150   right: Add @x325
+  button 23     at  305,340        left: 999999 @x150   right: Fill from backpack @x325
+
+Window left open and untouched. Close it yourself.
+
+==== RAW LAYOUT ====
+{ page 0 }
+{ resizepic 0 0 9270 510 365 }
+{ gumppictiled 11 10 487 345 2624 }
+{ checkertrans 11 10 488 345 }
+{ text 20 25 88 0 }
+{ text 75 50 1158 1 }
+{ text 215 50 1152 2 }
+{ button 35 55 1209 1210 1 0 1 }
+{ text 75 90 1158 3 }
+{ text 215 90 1152 4 }
+{ button 35 95 1209 1210 1 0 2 }
+{ text 75 130 1158 5 }
+{ text 215 130 1152 6 }
+{ button 35 135 1209 1210 1 0 3 }
+{ text 75 170 1158 7 }
+{ text 215 170 1152 8 }
+{ button 35 175 1209 1210 1 0 4 }
+{ text 75 210 1158 9 }
+{ text 215 210 1152 10 }
+{ button 35 215 1209 1210 1 0 5 }
+{ text 315 50 1158 11 }
+{ text 455 50 1152 12 }
+{ button 275 55 1209 1210 1 0 6 }
+{ text 315 90 1158 13 }
+{ text 455 90 1152 14 }
+{ button 275 95 1209 1210 1 0 7 }
+{ text 315 130 1158 15 }
+{ text 455 130 1152 16 }
+{ button 275 135 1209 1210 1 0 8 }
+{ text 315 170 1158 17 }
+{ text 455 170 1152 18 }
+{ button 275 175 1209 1210 1 0 9 }
+{ text 315 210 1158 19 }
+{ text 455 210 1152 20 }
+{ button 275 215 1209 1210 1 0 10 }
+{ text 15 305 88 21 }
+{ text 150 305 1153 22 }
+{ button 225 308 11410 11411 1 0 21 }
+{ text 325 305 1153 23 }
+{ button 305 310 1209 1210 1 0 22 }
+{ text 15 335 88 24 }
+{ text 150 335 1152 25 }
+{ text 325 335 1153 26 }
+{ button 305 340 1209 1210 1 0 23 }
+
+==== STRING TABLE (GetLineList) ====
+  0  'Stone Storage'
+  1  'Plain'
+  2  '59998'
+  3  'Dull'
+  4  '0'
+  5  'Shadow'
+  6  '0'
+  7  'Copper'
+  8  '0'
+  9  'Bronze'
+ 10  '0'
+ 11  'Gold'
+ 12  '0'
+ 13  'Agapite'
+ 14  '0'
+ 15  'Verite'
+ 16  '0'
+ 17  'Valorite'
+ 18  '0'
+ 19  'Mythril'
+ 20  '0'
+ 21  'Withdrawal Amount: '
+ 22  '1'
+ 23  'Add'
+ 24  'Maximum Storage: '
+ 25  '999999'
+ 26  'Fill from backpack'

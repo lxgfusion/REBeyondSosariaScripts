@@ -13,7 +13,7 @@ detail lives in the handoffs named below; this file is the map and the state.
 | `TameAndFill.py` | `2026-09-04.1` | in step | working; Leatherman merged in |
 | `Leatherman.py` | `2026-09-04.1` | in step | **superseded** — retire once the merge is confirmed |
 | `resource_order_runner.py` | `2026-09-13.5` | in step | partly tested; see below |
-| `Sandmaker.py` | `2026-09-18.2` | in step | **DISCONNECTED THE CLIENT** — see its handoff |
+| `Sandmaker.py` | `2026-09-18.3` | in step | disconnect **cause found** (text entry on a window with none); fix untested |
 | `diag_storage_gump.py` | — | deployed 2026-09-18 | **the live copy was stale** — see below |
 | `diag_taming_levels.py` | — | n/a | never run |
 
@@ -28,7 +28,7 @@ there and should be deleted.
 
 ## The three things that still need doing
 
-1. **Sandmaker disconnected the client.** The fix shipped untested.
+1. **Sandmaker disconnected the client.** Cause found from the dump; the fix is untested.
    → `docs/sandmaker-handoff.md`
 2. **`harvest_runner`'s stall watchdog is unproven.** It exists because
    Mr Gatherer sat on one tile for over an hour with every other guard armed;

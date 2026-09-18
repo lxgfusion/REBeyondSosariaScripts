@@ -21,10 +21,11 @@ walk to the platform and pick up the sand
 | Tests | `tests/test_sandmaker.py` — 86 checks; `tests/test_diag_storage_gump.py` — 20 |
 | Diagnostic | `Scripts/diag_storage_gump.py`, live as `diag_storage_gump.py` since 2026-09-18 |
 
-## STILL BROKEN — read this first
+## The disconnect — CAUSE FOUND, fix untested in game
 
-**Running it disconnected the client on 2026-09-18.** The fix shipped in the
-same session has NOT been tested in game.
+**Running it disconnected the client on 2026-09-18.** The cause is now known
+from a live dump plus ServUO source. Version `2026-09-18.3` fixes it; it has
+**not** been run in game yet.
 
 What happened:
 
@@ -36,47 +37,52 @@ What happened:
         ... disconnect ...
 ```
 
-`find_stone_row()` inferred **button 6** for the `Plain` row. The Gump
-Inspector had said **1**. The search was believed, 6 was pressed, and the
-client dropped.
+### Why it dropped: a text entry the window does not have
 
-### What was changed in response
+The press was `Gumps.SendAdvancedAction(0x6ABCE12, 6, [], [0], ["1"])` — one
+text entry. The dump (`docs/stone-storage-gump-dump-2026-09-18.txt`) shows the
+Stone Storage draws **zero** `textentry` elements: the `1` beside
+`Withdrawal Amount:` is a plain `{ text 150 305 1153 22 }`. ServUO's
+`DisplayGumpResponse` disconnects any reply carrying **more text entries than
+the gump drew**. That was the drop, and **button 1 would have dropped just the
+same.** The recorded macro's first line, `SendAdvancedAction(0x6abce12, 21,
+[], [0], ["1"])`, is the identical mistake.
 
-`choose_button()` precedence is now **inverted**:
+That also answers "why did a drawn button disconnect": it wasn't the button.
+
+### Why the search said 6: two columns, buttons on the left
+
+```
+button 1 @x35   Plain @x75   59998 @x215   button 6 @x275   Gold @x315
+button 2 @x35   Dull  @x75   0     @x215   button 7 @x275   Agapite @x315
+...                                         ...
+button 5 @x35   Bronze        0             button 10        Mythril
+button 21 @225,308 (arrow beside the amount)   22 Add   23 Fill from backpack
+```
+
+`find_stone_row()` preferred the button to the **right** of the label, walked
+past Plain's own button (left) and took Gold's. The five-row offset is the
+column width. The label/count pairing was always right.
+
+### What 2026-09-18.3 changed
 
 | | |
 |---|---|
-| `WITHDRAW_BUTTON` | an explicit override, if set. Usually 0. |
-| `WITHDRAW_BUTTON_CONFIRMED = 1` | **wins.** Read off a real click in the Gump Inspector. |
-| `find_stone_row()` | a **cross-check only**. Decides nothing. |
-| neither set | nothing is pressed. |
+| the press | `Gumps.SendAction(STASH_GUMP, button)` — **no text entry, no switches** |
+| before the press | refuses if the window now draws any text entry (`text_entry_count`) |
+| the amount | `check_amount()` **refuses** unless the window already reads `1`, and refuses when it can't read it. Nothing is sent with the press, so what the window says is what comes out. |
+| `find_stone_row()` | nearest button to the label's **left**, and after the previous cell on the row — so a row missing its own button gets none, not its neighbour's. Still a cross-check only; the Inspector's `1` is what is pressed. It now agrees. |
+| button parsing | id is the 7th number of `button` and `buttontileart` (was: the last) |
 
-The reasoning, which is the thing to keep: the search infers a button from
-**geometry** — a label's Y, a tolerance, a preference for whatever sits to its
-right. Every one of those is a guess about how the window is drawn. A Gump
-Inspector reading is the id the server received when a human clicked the thing
-they meant. `CLAUDE.md` says shard data comes from source or a live dump; the
-Inspector *is* the live dump.
+Every guard was mutation-tested; putting the old right-hand search back
+reproduces `(6, '59998')` for Plain on the live layout.
 
-### What is NOT known
-
-- **Why pressing 6 disconnected.** It was in the drawn set — `drawn_buttons()`
-  did not object. So a drawn button on this window can still drop you, which
-  means "verify it was drawn" is necessary and not sufficient.
-- **What button 6 actually is.** If the ten stones are buttons 1–10 in listed
-  order (Plain, Dull, Shadow, Copper, Bronze, Gold, Agapite, Verite, Valorite,
-  Mythril) then 6 is *Gold* — a five-row offset, which would point at a
-  systematic error in the label→button pairing rather than a near miss.
-- **Why the search was five rows out.** The label/count pairing was RIGHT
-  (`Plain` / `59998` came back correctly), so the text-cell reading is sound.
-  It is the button-to-row step that is wrong. Most likely the withdraw buttons
-  are not drawn on the same Y as their labels.
-
-**The user reports this has bitten other keys too** and that those needed
-fixing as well — so whatever is wrong here is probably not specific to the
-Stone Storage.
+**If the amount ever needs changing**, button 21 is the arrow beside it — it
+probably opens a prompt. Not investigated; set it by hand.
 
 ### What the source says (checked 2026-09-18, second session)
+
+*Written before the dump arrived. The "one of these is true" list below was answered by the dump: rule 3, text entries.*
 
 **What stock ServUO disconnects for.** `Server/Network/PacketHandlers.cs`,
 `DisplayGumpResponse`, has exactly four drops, all checked against the gump
@@ -196,20 +202,11 @@ items every run** and must never be config. Only containers are stable.
 
 ## Next steps, in order
 
-1. **Get the dump.** Run `diag_storage_gump.py` (NOT the comma-named copy),
-   target the Stone Storage, and send `%TEMP%\storage_gump_dump.txt` — its
-   path is the last line printed. It settles whether the buttons sit on their
-   labels' rows, which side of the label, and whether any are `buttontileart`.
-   Also ask: did anyone else drop at the same moment, and did
-   `Stopping after 0 stone(s)` print before the disconnect?
-2. **Then fix `find_stone_row()`** — or delete it. It has been wrong once on a
-   window where wrong means disconnected, and a cross-check that cannot be
-   trusted is worth less than no cross-check.
-3. **Then test one round** with `RUNS = 1`.
-4. Only then raise `RUNS`.
-
-Do **not** re-enable the search as the decider without evidence that the
-button/label pairing is sound.
+1. **Test one round** with `RUNS = 1`. Check the journal says
+   `Sandmaker v2026-09-18.3` first — Razor caches scripts; Reload if not.
+   Expect `Withdrawal Amount reads 1.` and `withdrawing 1 Plain (button 1)`.
+2. Only then raise `RUNS`.
+3. Delete the stale `diag_storage_gump,py.py` from the live folder.
 
 ## The rest of the script
 

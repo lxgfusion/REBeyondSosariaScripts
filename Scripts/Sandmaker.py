@@ -23,29 +23,30 @@ recording:
     Gumps.WaitForGump(0x6abce12, 10000)      <- the window is GONE by now
     Gumps.SendAction(0x6abce12, 1)           <- answering a window that closed
 
+  * THE DISCONNECT: the first line sends a TEXT ENTRY ([0], ["1"]) to a
+    window that draws none. ServUO drops any reply carrying more text entries
+    than the gump drew. The "1" beside "Withdrawal Amount:" is plain text,
+    not a box. Sandmaker made the same mistake on 2026-09-18 and dropped too.
   * A gump response CLOSES the gump, so the third line answers a window the
-    server no longer holds. Stock ServUO IGNORES that rather than dropping
-    you (DisplayGumpResponse only matches gumps it still has) - so this is a
-    press that does nothing, not proven to be the disconnect. The WaitForGump
-    between them does not help either way: nothing reads what it returned.
+    server no longer holds. Stock ServUO IGNORES that (DisplayGumpResponse
+    only matches gumps it still has) - a press that does nothing, not a drop.
   * Four Player.Run/Walk calls back to back with no delay. Servers have
     fastwalk protection and a recorder replays keystrokes instantly.
   * Three Items.Move with no pause, against a ~900ms drag limit.
-
-Which of the three dropped the macro was never established.
 
 And the serials in it cannot be reused. 0x40BB6349 was that one withdrawal's
 granite and 0x40BB64E1 was that one piece of sand; both are new items every
 time. Only the CONTAINERS are stable, so only containers are configured by
 serial here - the stone is found by graphic and the sand by diffing the ground.
 
-WHAT IS STILL UNKNOWN
----------------------
-Why pressing a button the server DREW disconnected the client on 2026-09-18.
-See docs/sandmaker-handoff.md. The button pressed now is the one the Gump
-Inspector read off a real click (WITHDRAW_BUTTON_CONFIRMED); with neither
-that nor WITHDRAW_BUTTON set the script REFUSES TO RUN, because the Stone
-Storage lists ten granite types and the wrong row is the wrong stone.
+THE WITHDRAW
+------------
+One plain press of the row's button, with NO text entry, and only when the
+window's Withdrawal Amount already reads 1. See check_amount() and
+docs/sandmaker-handoff.md for the disconnect that taught both. The button is
+the Gump Inspector's (WITHDRAW_BUTTON_CONFIRMED); with neither that nor
+WITHDRAW_BUTTON set the script REFUSES TO RUN, because the Stone Storage lists
+ten granite types and the wrong row is the wrong stone.
 """
 
 import re
@@ -57,7 +58,7 @@ import time
 # has already lost two debugging rounds to a bug that was fixed on disk and not
 # in the folder Razor reads. If this line does not say what you expect, hit
 # Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-09-18.2"
+SCRIPT_VERSION = "2026-09-18.3"
 
 
 # =============================================================================
@@ -94,8 +95,10 @@ WITHDRAW_BUTTON = 0
 #
 # 0 here, with WITHDRAW_BUTTON also 0, means nothing is pressed at all.
 #
-# The recorded macro sent button 21 with the amount and THEN button 1, which
-# fits 1 being the withdraw and 21 being whatever sits by the amount box.
+# The live dump agrees: button 1 is at 35,55, just left of the "Plain" label.
+# The rows are two columns of five, 1-5 down the left (Plain, Dull, Shadow,
+# Copper, Bronze) and 6-10 down the right (Gold .. Mythril). 21 is the arrow
+# beside the Withdrawal Amount, 22 is Add, 23 is Fill from backpack.
 WITHDRAW_BUTTON_CONFIRMED = 1
 
 # How far apart, vertically, a label and its button may sit and still be on the
@@ -291,15 +294,21 @@ def find_stone_row(label):
     """(button, count) for the row named `label`. (0, "") if it is not there.
 
     A CROSS-CHECK ONLY. It decides nothing - choose_button() presses the
-    Gump Inspector's number whatever this says. It returned 6 for "Plain" on
-    2026-09-18 when the answer was 1, and the press dropped the client.
+    Gump Inspector's number whatever this says.
 
-    SUSPECT: it prefers a button to the RIGHT of the label. On the Resource
-    Order Book, the only live dump of this gump class in the repo, every
-    button sits to the LEFT of its label (docs/resource-order-book-gump.md).
-    On a window drawn in two columns that would pick the next column's button.
-    Unconfirmed until the diag_storage_gump dump of the Stone Storage arrives;
-    do not "fix" the preference on that inference alone.
+    THE BUTTON IS TO THE LEFT OF ITS LABEL. From the live dump of the Stone
+    Storage, 2026-09-18 - two columns of five rows:
+
+        button 1 @x35   Plain @x75   59998 @x215   button 6 @x275   Gold @x315
+
+    This used to prefer a button to the RIGHT of the label, which walked past
+    Plain's own button and took Gold's. That is where "6" came from.
+
+    So: the nearest button to the label's left, and it must sit AFTER the
+    previous cell on the row. If Gold's button were missing, the nearest one
+    to its left would be Plain's, far across the window - and a button
+    belonging to someone else is worse than none. Nothing qualifies, nothing
+    is returned.
 
     Refuses rather than guesses when the string table is short. A shifted table
     puts the wrong label on every row after the gap, which would point this
@@ -323,14 +332,14 @@ def find_stone_row(label):
         count = ""
         if i + 1 < len(cells) and abs(cells[i + 1][1] - cy) <= ROW_TOLERANCE:
             count = cells[i + 1][2]
-        # The button on that row, preferring one to the right of the label.
-        same_row = [(bx, bid) for bx, by, bid in layout_buttons(STASH_GUMP)
-                    if abs(by - cy) <= ROW_TOLERANCE]
-        if not same_row:
-            continue
-        right = sorted((bx, bid) for bx, bid in same_row if bx >= cx)
-        button = right[0][1] if right else sorted(same_row)[-1][1]
-        return button, count
+        # The button on that row, between the previous cell and the label.
+        floor = max([ox for ox, oy, _t in cells
+                     if abs(oy - cy) <= ROW_TOLERANCE and ox < cx] or [-1])
+        left = sorted((bx, bid) for bx, by, bid in layout_buttons(STASH_GUMP)
+                      if abs(by - cy) <= ROW_TOLERANCE and floor < bx < cx)
+        if not left:
+            return 0, count
+        return left[-1][1], count
     return 0, ""
 
 
@@ -342,11 +351,28 @@ def drawn_buttons(gump_id):
     rather than trusted from config.
 
     Necessary, NOT sufficient. On 2026-09-18 a button in this set was pressed
-    and the client still dropped. Stock ServUO has no rule that disconnects
-    for a drawn button, so whatever did it is either shard-side or the button's
-    own handler. See docs/sandmaker-handoff.md.
+    and the client still dropped - because the reply also carried a text
+    entry and this window draws none. See text_entry_count().
     """
     return set(bid for _x, _y, bid in layout_buttons(gump_id))
+
+
+def text_entry_count(gump_id):
+    """How many text entries the window drew. ServUO's limit on a reply.
+
+    DisplayGumpResponse disconnects a reply carrying more text entries than
+    the gump drew. The Stone Storage draws NONE - its "1" is plain text - so
+    any press that sends one is a drop. withdraw_one() refuses to press if
+    this ever reads non-zero, because then the window is not the one this
+    script was written against.
+    """
+    n = 0
+    for piece in re.findall(r"\{([^{}]*)\}", raw_layout(gump_id)):
+        piece = piece.strip()
+        if piece and piece.split()[0].lower() in ("textentry",
+                                                  "textentrylimited"):
+            n += 1
+    return n
 
 
 def label_after(strings, label):
@@ -550,26 +576,30 @@ def open_storage():
 
 
 def check_amount():
-    """Is the Withdrawal Amount box set to what we are about to send?
+    """Does the Withdrawal Amount read WITHDRAW_AMOUNT? False refuses the run.
 
-    The amount travels WITH the press - SendAdvancedAction carries it - so
-    this is a cross-check rather than the mechanism. It is worth having
-    because the converter takes one stone at a time, and a box left reading 50
-    from a previous session is the kind of thing that empties into the floor.
+    THIS IS THE ONLY GUARD ON THE AMOUNT. The window has NO text entry - the
+    "1" beside "Withdrawal Amount:" is plain text, set server-side (button 21,
+    the arrow beside it, is presumably how it is changed). Nothing can be sent
+    WITH the press: a reply carrying a text entry to a window that drew none
+    is one of ServUO's four disconnects, and it is what dropped the client on
+    2026-09-18. So whatever this reads is what comes out, and 59998 granite
+    in the pack is not a recoverable mistake.
+
+    Unreadable is a refusal too.
     """
     shown = label_after(gump_lines(STASH_GUMP), "Withdrawal Amount")
     if not shown:
-        log("Could not read the Withdrawal Amount - carrying on, the press "
-            "sends %d with it anyway." % WITHDRAW_AMOUNT, HUE_WARN)
-        return True
+        log("Could not read the Withdrawal Amount, and it is the only thing "
+            "deciding how many come out. Not pressing.", HUE_BAD)
+        return False
     if shown == str(WITHDRAW_AMOUNT):
         log("Withdrawal Amount reads %s." % shown, HUE_GOOD)
         return True
-    log("Withdrawal Amount reads %r, not %d. The press sends %d with it, so "
-        "this should still take one - but if more than one comes out, stop "
-        "and set the box by hand."
-        % (shown, WITHDRAW_AMOUNT, WITHDRAW_AMOUNT), HUE_WARN)
-    return True
+    log("Withdrawal Amount reads %r, not %d - that is how many one press would "
+        "take out. Set it to %d by hand (the arrow beside it) and run again."
+        % (shown, WITHDRAW_AMOUNT, WITHDRAW_AMOUNT), HUE_BAD)
+    return False
 
 
 def withdraw_one():
@@ -590,12 +620,26 @@ def withdraw_one():
             % (button, sorted(drawn)[:20]), HUE_BAD)
         return None
 
+    # The window this was written against draws no text entry. If one has
+    # appeared, the amount may now be a box the press would submit EMPTY, or
+    # the layout has changed under us - either way, not this script's window.
+    entries = text_entry_count(STASH_GUMP)
+    if entries:
+        log("The Stone Storage now draws %d text entr(y/ies). It drew none when "
+            "this was written, and the amount was plain text. Not pressing - "
+            "re-run diag_storage_gump.py." % entries, HUE_BAD)
+        return None
+
     before = pack_serials()
     log("withdrawing %d %s (button %d)"
         % (WITHDRAW_AMOUNT, STONE_LABEL, button))
+    # A PLAIN PRESS - no switches, NO TEXT ENTRIES. This window draws no text
+    # entry, and ServUO disconnects any reply that carries more text entries
+    # than the gump drew. SendAdvancedAction(..., [0], ["1"]) is exactly that,
+    # and it dropped the client on 2026-09-18 - with button 1 it would have
+    # dropped just the same. The amount is whatever check_amount() read.
     try:
-        Gumps.SendAdvancedAction(STASH_GUMP, button, [], [0],
-                                 [str(WITHDRAW_AMOUNT)])
+        Gumps.SendAction(STASH_GUMP, button)
     except Exception as err:
         log("the withdraw press failed: %r" % err, HUE_BAD)
         return None

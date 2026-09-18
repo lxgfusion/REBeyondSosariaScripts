@@ -21,9 +21,12 @@ What stock ServUO disconnects for, from Server/Network/PacketHandlers.cs
   * a text entry longer than 239 characters
 
 A reply to a gump the server no longer holds is IGNORED, not a drop - it only
-matches gumps it still has. The button that dropped the client WAS drawn, so
-either this shard's core differs from stock or something other than that
-check did it.
+matches gumps it still has.
+
+What actually dropped Sandmaker, found by THIS report: the Stone Storage draws
+NO text entry - the "1" beside "Withdrawal Amount:" is plain text - and the
+press was sent with one. That is the third rule. Check the TEXT ENTRIES line
+below before sending any press that carries text.
 
 Gump 0x6ABCE12 is the shared "stash" window every storage key on this shard
 opens - resource_order_runner.py calls it BOOK_GUMP, harvest_runner.py calls it
@@ -347,8 +350,9 @@ def main():
             label = nearest_label(cells, x, y)
             log("  entry %-4d at %4d,%-4d  %s" % (eid, x, y, label[:40]))
     else:
-        log("No text entries - nothing on this window takes a typed amount.",
-            HUE_WARN)
+        log("No text entries. A press that SENDS one to this window - any "
+            "SendAdvancedAction with text - DISCONNECTS you. Use SendAction.",
+            HUE_BAD)
 
     amount, how = withdrawal_amount(strings, ents, cells)
     if amount:

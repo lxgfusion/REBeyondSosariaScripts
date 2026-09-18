@@ -9,6 +9,7 @@ Carries the three things that made the RECORDED macro disconnect the client,
 because a rewrite that quietly reintroduces any of them is the failure this
 script exists to avoid:
 
+  * a TEXT ENTRY sent to a window that draws none - the disconnect
   * a second press sent to a gump the first press already closed
   * replayed movement with no delay
   * a button pressed without checking the server drew it
@@ -127,7 +128,9 @@ def test_the_button_must_be_drawn_before_it_is_pressed(m):
     check("the press is guarded by what was drawn", guarded, True)
     check("and the guard comes BEFORE the press",
           guarded and body.index("drawn_buttons(")
-          < body.index("SendAdvancedAction"), True)
+          and "Gumps.SendAction(" in body
+          and body.index("drawn_buttons(")
+          < body.index("Gumps.SendAction("), True)
     check("and the guard actually refuses",
           "button not in drawn" in body, True)
 
@@ -205,38 +208,196 @@ def test_the_button_is_read_off_the_window_not_configured(m):
           "diag_storage_gump.py" in pre, True)
 
 
-def test_the_row_is_found_by_its_label(m):
-    """Ten stones on this window. One row out withdraws the wrong one, in
-    silence."""
-    # The live layout's shape: a label, its count, and a button per row.
-    layout = ("{ croppedtext 45 150 180 20 0 1 }"      # Plain
-              "{ croppedtext 200 150 60 20 0 2 }"      # 59999
-              "{ button 250 150 4005 4007 1 0 1 }"
-              "{ croppedtext 45 180 180 20 0 3 }"      # Dull
-              "{ croppedtext 200 180 60 20 0 4 }"      # 0
-              "{ button 250 180 4005 4007 1 0 2 }")
-    strings = ["Plain", "59999", "Dull", "0"]
+# THE LIVE DUMP of the Stone Storage, diag_storage_gump.py, 2026-09-18 -
+# the controls, text and buttons exactly as the server drew them. Two columns
+# of five rows, every button LEFT of its label, and NO text entry: the "1"
+# beside "Withdrawal Amount:" is a plain `text`.
+LIVE_STONE_LAYOUT = (
+    "{ page 0 }{ resizepic 0 0 9270 510 365 }{ gumppictiled 11 10 487 345 2624 }"
+    "{ checkertrans 11 10 488 345 }{ text 20 25 88 0 }"
+    "{ text 75 50 1158 1 }{ text 215 50 1152 2 }{ button 35 55 1209 1210 1 0 1 }"
+    "{ text 75 90 1158 3 }{ text 215 90 1152 4 }{ button 35 95 1209 1210 1 0 2 }"
+    "{ text 75 130 1158 5 }{ text 215 130 1152 6 }{ button 35 135 1209 1210 1 0 3 }"
+    "{ text 75 170 1158 7 }{ text 215 170 1152 8 }{ button 35 175 1209 1210 1 0 4 }"
+    "{ text 75 210 1158 9 }{ text 215 210 1152 10 }{ button 35 215 1209 1210 1 0 5 }"
+    "{ text 315 50 1158 11 }{ text 455 50 1152 12 }{ button 275 55 1209 1210 1 0 6 }"
+    "{ text 315 90 1158 13 }{ text 455 90 1152 14 }{ button 275 95 1209 1210 1 0 7 }"
+    "{ text 315 130 1158 15 }{ text 455 130 1152 16 }{ button 275 135 1209 1210 1 0 8 }"
+    "{ text 315 170 1158 17 }{ text 455 170 1152 18 }{ button 275 175 1209 1210 1 0 9 }"
+    "{ text 315 210 1158 19 }{ text 455 210 1152 20 }{ button 275 215 1209 1210 1 0 10 }"
+    "{ text 15 305 88 21 }{ text 150 305 1153 22 }"
+    "{ button 225 308 11410 11411 1 0 21 }"
+    "{ text 325 305 1153 23 }{ button 305 310 1209 1210 1 0 22 }"
+    "{ text 15 335 88 24 }{ text 150 335 1152 25 }{ text 325 335 1153 26 }"
+    "{ button 305 340 1209 1210 1 0 23 }")
+LIVE_STONE_STRINGS = ["Stone Storage", "Plain", "59998", "Dull", "0", "Shadow",
+                      "0", "Copper", "0", "Bronze", "0", "Gold", "0", "Agapite",
+                      "0", "Verite", "0", "Valorite", "0", "Mythril", "0",
+                      "Withdrawal Amount: ", "1", "Add", "Maximum Storage: ",
+                      "999999", "Fill from backpack"]
 
+
+def _live_window(m, layout=LIVE_STONE_LAYOUT, strings=LIVE_STONE_STRINGS):
     saved = {k: m[k] for k in ("raw_layout", "gump_lines", "log")}
+    m["log"] = lambda *a, **k: None
+    m["raw_layout"] = lambda gid: layout
+    m["gump_lines"] = lambda gid, *a: list(strings)
+    return lambda: [m.__setitem__(k, v) for k, v in saved.items()]
+
+
+def test_the_row_is_found_by_its_label(m):
+    """THE FIVE-ROW OFFSET. The search preferred a button to the RIGHT of the
+    label; on the live window that walks past Plain's own button (x=35, left)
+    and takes Gold's (x=275, right of Plain's count). That was the 6."""
+    restore = _live_window(m)
     try:
-        m["log"] = lambda *a, **k: None
-        m["raw_layout"] = lambda gid: layout
-        m["gump_lines"] = lambda gid: list(strings)
-
-        check("Plain's row", m["find_stone_row"]("Plain"), (1, "59999"))
-        check("and Dull's, which is a different button",
-              m["find_stone_row"]("Dull"), (2, "0"))
+        want = [("Plain", 1, "59998"), ("Dull", 2, "0"), ("Shadow", 3, "0"),
+                ("Copper", 4, "0"), ("Bronze", 5, "0"), ("Gold", 6, "0"),
+                ("Agapite", 7, "0"), ("Verite", 8, "0"),
+                ("Valorite", 9, "0"), ("Mythril", 10, "0")]
+        for label, button, count in want:
+            check("%s is button %d" % (label, button),
+                  m["find_stone_row"](label), (button, count))
+        check("THE REPORTED FAILURE: Plain is NOT 6",
+              m["find_stone_row"]("Plain")[0] == 6, False)
         check("a stone that is not listed gives nothing",
-              m["find_stone_row"]("Valorite"), (0, ""))
+              m["find_stone_row"]("Iron"), (0, ""))
+    finally:
+        restore()
 
-        # A SHORT STRING TABLE shifts every label onto the wrong row. Refuse.
-        m["gump_lines"] = lambda gid: ["Plain", "59999", "Dull"]
+    # Gold's button missing: the nearest one to its left is PLAIN's, across
+    # the window. Someone else's button is worse than none.
+    no_gold = LIVE_STONE_LAYOUT.replace("{ button 275 55 1209 1210 1 0 6 }", "")
+    restore = _live_window(m, layout=no_gold)
+    try:
+        check("a row with no button of its own gives none",
+              m["find_stone_row"]("Gold")[0], 0)
+        check("and Plain is unaffected", m["find_stone_row"]("Plain")[0], 1)
+    finally:
+        restore()
+
+    # A SHORT STRING TABLE shifts every label onto the wrong row. Refuse.
+    restore = _live_window(m, strings=LIVE_STONE_STRINGS[:-1])
+    try:
         check("a short table is refused rather than misread",
               m["find_stone_row"]("Plain"), (0, ""))
+    finally:
+        restore()
 
-        m["raw_layout"] = lambda gid: ""
+    restore = _live_window(m, layout="")
+    try:
         check("an unreadable layout gives nothing",
               m["find_stone_row"]("Plain"), (0, ""))
+    finally:
+        restore()
+
+
+def test_the_live_window_draws_no_text_entry(m):
+    """ServUO disconnects a reply carrying more text entries than the gump
+    drew. This window draws NONE."""
+    restore = _live_window(m)
+    try:
+        check("no text entry on the Stone Storage",
+              m["text_entry_count"](0x6ABCE12), 0)
+    finally:
+        restore()
+    restore = _live_window(m, layout=LIVE_STONE_LAYOUT
+                           + "{ textentry 150 305 60 20 1153 0 22 }")
+    try:
+        check("but one is counted when it is there",
+              m["text_entry_count"](0x6ABCE12), 1)
+    finally:
+        restore()
+
+
+class _PressRecorder(object):
+    def __init__(self):
+        self.calls = []
+
+    def SendAction(self, gid, button):
+        self.calls.append(("SendAction", gid, button))
+
+    def SendAdvancedAction(self, *args):
+        self.calls.append(("SendAdvancedAction",) + tuple(args))
+
+    def __getattr__(self, name):
+        return lambda *a, **k: None
+
+
+def _run_withdraw(m, layout=LIVE_STONE_LAYOUT):
+    names = ("raw_layout", "gump_lines", "log", "Gumps", "open_storage",
+             "refresh_pack", "pack_serials", "find_stone_row")
+    saved = {k: m[k] for k in names}
+    said, rec = [], _PressRecorder()
+    try:
+        m["log"] = lambda text, hue=None: said.append(text)
+        m["raw_layout"] = lambda gid: layout
+        m["gump_lines"] = lambda gid, *a: list(LIVE_STONE_STRINGS)
+        m["Gumps"] = rec
+        m["open_storage"] = lambda: object()
+        m["refresh_pack"] = lambda: None
+        m["pack_serials"] = lambda: set()
+        m["withdraw_one"]()
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+    return rec.calls, said
+
+
+def test_THE_DISCONNECT_the_press_carries_no_text_entry(m):
+    """2026-09-18: SendAdvancedAction(gump, 6, [], [0], ["1"]) - one text
+    entry, to a window that draws none. That is ServUO's third disconnect
+    rule, and it would have dropped the client with button 1 just the same.
+    The recorded macro's first line made the identical mistake."""
+    calls, said = _run_withdraw(m)
+    check("one press went out", len(calls), 1)
+    check("a PLAIN press - no text entry, no switches",
+          calls[0][0] if calls else None, "SendAction")
+    check("of the Inspector's button, 1",
+          calls[0][2] if calls else None, 1)
+    check("SendAdvancedAction is never used",
+          [c for c in calls if c[0] == "SendAdvancedAction"], [])
+
+    # A window that suddenly draws a text entry is not the one this was
+    # written against. Nothing is pressed.
+    calls, said = _run_withdraw(
+        m, LIVE_STONE_LAYOUT + "{ textentry 150 305 60 20 1153 0 22 }")
+    check("a window with a text entry gets no press at all", calls, [])
+    check("and it says why", any("text entr" in s for s in said), True)
+
+
+def test_the_amount_on_the_window_is_the_only_guard(m):
+    """Nothing is sent WITH the press, so what the window reads is what comes
+    out. 59998 granite in the pack is not a recoverable mistake."""
+    restore = _live_window(m)
+    try:
+        check("1 is accepted", m["check_amount"](), True)
+    finally:
+        restore()
+    fifty = list(LIVE_STONE_STRINGS)
+    fifty[22] = "50"
+    restore = _live_window(m, strings=fifty)
+    try:
+        check("50 is REFUSED", m["check_amount"](), False)
+    finally:
+        restore()
+    restore = _live_window(m, strings=LIVE_STONE_STRINGS[:21])
+    try:
+        check("unreadable is REFUSED", m["check_amount"](), False)
+    finally:
+        restore()
+
+    names = ("raw_layout", "gump_lines", "log", "Gumps", "open_storage")
+    saved = {k: m[k] for k in names}
+    rec = _PressRecorder()
+    try:
+        m["log"] = lambda *a, **k: None
+        m["raw_layout"] = lambda gid: LIVE_STONE_LAYOUT
+        m["gump_lines"] = lambda gid, *a: list(fifty)
+        m["Gumps"] = rec
+        m["open_storage"] = lambda: object()
+        m["withdraw_one"]()
+        check("and a refused amount means no press", rec.calls, [])
     finally:
         for k, v in saved.items():
             m[k] = v

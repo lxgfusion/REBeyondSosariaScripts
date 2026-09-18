@@ -18,8 +18,9 @@ Scripts for the Razor Enhanced assistant for Ultima Online.
 the map: every script's version, what is deployed, what is untested, and the
 three things still outstanding. The per-task handoffs it names carry the detail.
 
-**Known broken right now:** `Sandmaker.py` disconnected the client on
-2026-09-18 and the fix is untested — see
+**Untested fix:** `Sandmaker.py` disconnected the client on 2026-09-18 by
+sending a text entry to a window that draws none. Cause confirmed from a live
+dump; `2026-09-18.3` fixes it but has not run in game — see
 [`docs/sandmaker-handoff.md`](docs/sandmaker-handoff.md).
 
 ## Resource order runner — current state
@@ -222,6 +223,25 @@ of the three, and file size alone will not tell two config blocks apart.
   click-probe opt-in. The right source of truth is Razor's **Enhanced Gump
   Inspector** — its response log shows the exact button id for each click the
   user makes, which beats probing entirely. Ask for that before writing a probe.
+- **What gets a client disconnected over a gump reply** — ServUO
+  `PacketHandlers.DisplayGumpResponse`, the only four: a button id not drawn
+  on that gump instance (0 always passes); more **switches** than it drew;
+  more **text entries** than it drew; text over 239 chars. A reply to a gump
+  the server no longer holds is **ignored**, not a drop.
+  **"The button was drawn" is not enough — count the text entries too.**
+  Sandmaker pressed a drawn button with `SendAdvancedAction(..., [0], ["1"])`
+  on the storage-key window, which draws **no** `textentry` — the "1" beside
+  `Withdrawal Amount:` is plain `text` — and was dropped. A recorded macro did
+  the same. Something that looks like an input box may not be one: check the
+  raw layout for `textentry` before sending text, and use `SendAction` when
+  there is none. `diag_storage_gump.py` reports the count.
+- **Button ids are the 7th number** of both `{ button ... }` and
+  `{ buttontileart ... }` (ServUO `GumpButton.cs` / `GumpImageTileButton.cs`).
+  The last number of a `buttontileart` is its height.
+- **On the storage-key window (`0x06ABCE12`) a button sits LEFT of its
+  label**, and the Stone Storage draws its rows in two columns. A search that
+  looks right of a label takes the next column's button — that is how Plain
+  (1) became Gold (6). Confirmed from a live dump, 2026-09-18.
 - **Gump paging may be server-side.** A gump whose pages arrive as fresh gumps
   (same gump id, new sequence) has to be walked with real clicks; only
   `{ page N }` markers in the raw layout mean the pages are already in hand. Any
