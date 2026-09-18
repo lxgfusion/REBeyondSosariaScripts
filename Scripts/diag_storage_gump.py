@@ -161,6 +161,30 @@ def nearest_label(cells, x, y):
     return sorted(row)[-1][1]
 
 
+def withdrawal_amount(strings, ents, cells):
+    """What the Withdrawal Amount box currently holds, and how it was read.
+
+    Read POSITIONALLY - the string straight after the "Withdrawal Amount:"
+    label - because that is what a live dump of the Stone Storage showed:
+
+        21  Withdrawal Amount:
+        22  1
+
+    The textentry element carries an InitialTextID that should point at the
+    same string, and it is reported too, but it is NOT trusted as an index:
+    Razor drops empty strings out of the table without leaving a gap, so every
+    id past the first blank is off by one. See CLAUDE.md.
+
+    Returns (value, how). value is "" when it could not be read at all.
+    """
+    for i, text in enumerate(strings):
+        if "withdrawal amount" in str(text or "").strip().lower():
+            if i + 1 < len(strings):
+                return str(strings[i + 1]).strip(), "the string after the label"
+            return "", "the label is the last string - nothing after it"
+    return "", "no 'Withdrawal Amount:' label on this window"
+
+
 def pick_storage():
     if STORAGE_SERIAL:
         item = Items.FindBySerial(STORAGE_SERIAL)
@@ -242,11 +266,11 @@ def main():
             % (len(cells), len(strings)), HUE_BAD)
 
     log("", HUE_INFO)
-    log("BUTTONS THE SERVER DREW - pressing any other one disconnects you:",
-        HUE_GOOD)
-    for x, y, bid in sorted(btns, key=lambda b: (b[1], b[0])):
-        label = nearest_label(cells, x, y)
-        log("  button %-6d at %4d,%-4d  %s" % (bid, x, y, label[:40]))
+    log("EVERY STRING, in layout order:", HUE_GOOD)
+    for i, text in enumerate(strings[:60]):
+        text = str(text or "").strip()
+        if text:
+            log("  %2d  %s" % (i, text[:60]))
 
     log("", HUE_INFO)
     if ents:
@@ -254,21 +278,32 @@ def main():
         for x, y, eid in sorted(ents, key=lambda e: (e[1], e[0])):
             label = nearest_label(cells, x, y)
             log("  entry %-4d at %4d,%-4d  %s" % (eid, x, y, label[:40]))
-        log("  On this window entry 0 has always been the WITHDRAWAL AMOUNT. "
-            "A number typed there plus a button pulls that many OUT.", HUE_WARN)
     else:
         log("No text entries - nothing on this window takes a typed amount.",
             HUE_WARN)
 
+    amount, how = withdrawal_amount(strings, ents, cells)
+    if amount:
+        log("WITHDRAWAL AMOUNT reads %r (%s)." % (amount, how),
+            HUE_GOOD if amount == "1" else HUE_WARN)
+        if amount != "1":
+            log("  Not 1. Anything that takes one stone at a time needs this "
+                "set to 1 first.", HUE_WARN)
+    else:
+        log("WITHDRAWAL AMOUNT could not be read: %s" % how, HUE_WARN)
+
+    # LAST, deliberately. The journal scrolls, and the buttons are the part
+    # that matters - printing them first is how they end up off the top of the
+    # screen by the time anyone reads the report.
     log("", HUE_INFO)
-    log("EVERY STRING, in layout order:", HUE_GOOD)
-    for i, text in enumerate(strings[:40]):
-        text = str(text or "").strip()
-        if text:
-            log("  %2d  %s" % (i, text[:60]))
+    log("BUTTONS THE SERVER DREW - pressing any other one disconnects you:",
+        HUE_GOOD)
+    for x, y, bid in sorted(btns, key=lambda b: (b[1], b[0])):
+        label = nearest_label(cells, x, y)
+        log("  button %-6d at %4d,%-4d  %s" % (bid, x, y, label[:40]))
 
     log("", HUE_INFO)
-    log("Leaving the window open and untouched. Close it yourself.", HUE_GOOD)
+    log("Window left open and untouched. Close it yourself.", HUE_GOOD)
 
 
 main()
