@@ -117,20 +117,106 @@ def test_the_button_must_be_drawn_before_it_is_pressed(m):
           guarded and body.index("drawn_buttons(")
           < body.index("SendAdvancedAction"), True)
     check("and the guard actually refuses",
-          "WITHDRAW_BUTTON not in drawn" in body, True)
+          "button not in drawn" in body, True)
 
 
-def test_it_refuses_to_run_without_the_button(m):
-    """Never guess a button id in a consequential gump. The default is 0 and
-    the script stops rather than pressing something."""
-    check("it ships unset", m["WITHDRAW_BUTTON"], 0)
+def test_the_button_is_read_off_the_window_not_configured(m):
+    """Asking a human to paste a button id is a design that did not work -
+    three rounds of it and the script still would not start. The window is
+    open in front of us; the row labelled STONE_LABEL carries the answer.
+
+    A button read off the live layout cannot be stale and cannot be one the
+    server did not draw, because it came FROM what the server drew.
+    """
+    check("nothing is forced by default", m["WITHDRAW_BUTTON"], 0)
+    check("the Gump Inspector's reading is kept",
+          m["WITHDRAW_BUTTON_CONFIRMED"], 1)
+    check("and the row it belongs to is named", m["STONE_LABEL"], "Plain")
+
     with open(SCRIPT, encoding="utf-8") as fh:
         src = fh.read()
     pre = src[src.index("def preflight("):src.index("def main(")]
-    check("preflight checks it", "if not WITHDRAW_BUTTON:" in pre, True)
-    check("and stops", "return False" in pre, True)
-    check("naming the diagnostic that finds it",
+    check("preflight still refuses with no answer at all",
+          "not WITHDRAW_BUTTON and not WITHDRAW_BUTTON_CONFIRMED" in pre, True)
+    check("but it looks first rather than demanding a paste",
+          "find_stone_row(STONE_LABEL)" in pre, True)
+    check("and names the diagnostic only as a last resort",
           "diag_storage_gump.py" in pre, True)
+
+
+def test_the_row_is_found_by_its_label(m):
+    """Ten stones on this window. One row out withdraws the wrong one, in
+    silence."""
+    # The live layout's shape: a label, its count, and a button per row.
+    layout = ("{ croppedtext 45 150 180 20 0 1 }"      # Plain
+              "{ croppedtext 200 150 60 20 0 2 }"      # 59999
+              "{ button 250 150 4005 4007 1 0 1 }"
+              "{ croppedtext 45 180 180 20 0 3 }"      # Dull
+              "{ croppedtext 200 180 60 20 0 4 }"      # 0
+              "{ button 250 180 4005 4007 1 0 2 }")
+    strings = ["Plain", "59999", "Dull", "0"]
+
+    saved = {k: m[k] for k in ("raw_layout", "gump_lines", "log")}
+    try:
+        m["log"] = lambda *a, **k: None
+        m["raw_layout"] = lambda gid: layout
+        m["gump_lines"] = lambda gid: list(strings)
+
+        check("Plain's row", m["find_stone_row"]("Plain"), (1, "59999"))
+        check("and Dull's, which is a different button",
+              m["find_stone_row"]("Dull"), (2, "0"))
+        check("a stone that is not listed gives nothing",
+              m["find_stone_row"]("Valorite"), (0, ""))
+
+        # A SHORT STRING TABLE shifts every label onto the wrong row. Refuse.
+        m["gump_lines"] = lambda gid: ["Plain", "59999", "Dull"]
+        check("a short table is refused rather than misread",
+              m["find_stone_row"]("Plain"), (0, ""))
+
+        m["raw_layout"] = lambda gid: ""
+        check("an unreadable layout gives nothing",
+              m["find_stone_row"]("Plain"), (0, ""))
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_the_window_wins_a_disagreement_and_says_so(m):
+    """The search has a guard the static number does not: it refuses on a
+    short table. A number typed in config goes stale the moment somebody
+    reorders the window, and nothing notices."""
+    said = []
+    saved = {k: m[k] for k in ("find_stone_row", "log")}
+    try:
+        m["log"] = lambda text, hue=None: said.append(text)
+
+        m["find_stone_row"] = lambda label: (1, "59999")
+        check("agreement is quiet", m["choose_button"](), 1)
+        check("and says nothing alarming",
+              [s for s in said if "CHECK THIS" in s], [])
+
+        # The rows moved.
+        del said[:]
+        m["find_stone_row"] = lambda label: (7, "59999")
+        check("the window wins", m["choose_button"](), 7)
+        check("and the disagreement is said out loud",
+              any("CHECK THIS" in s for s in said), True)
+
+        # Nothing readable: fall back to what a human confirmed.
+        del said[:]
+        m["find_stone_row"] = lambda label: (0, "")
+        check("the confirmed button is the fallback", m["choose_button"](),
+              m["WITHDRAW_BUTTON_CONFIRMED"])
+
+        # An empty row is not worth pressing.
+        del said[:]
+        m["find_stone_row"] = lambda label: (1, "0")
+        check("an empty row is refused", m["choose_button"](), 0)
+        check("saying there is none left",
+              any("none left" in s for s in said), True)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
 
 
 def test_only_one_press_goes_to_that_window(m):

@@ -66,15 +66,42 @@ STONE_STORAGE_SERIAL = 0x4017817A
 # HOUSE_DEPOSIT_GUMP.
 STASH_GUMP = 0x06ABCE12
 
-# THE BUTTON THAT WITHDRAWS PLAIN GRANITE. 0 means "not known yet" and the
-# script stops at startup rather than guessing.
+# THE BUTTON THAT WITHDRAWS PLAIN GRANITE.
 #
-# Get it from Scripts/diag_storage_gump.py. Its report ends with every button
-# the server drew and the label on that button's row; you want the one whose
-# row reads "Plain". The recorded macro pressed 21, but that was never
-# confirmed to be Plain's row rather than another stone's - and this window
-# lists ten of them.
+# 0 means FIND IT, which is the default and the better answer. The window is
+# open in front of us; the button on the row labelled STONE_LABEL is read off
+# the live layout every time, so it cannot be stale and it cannot be a button
+# the server did not draw - it came FROM what the server drew.
+#
+# The recorded macro pressed 21, and this window lists ten stones: Plain, Dull,
+# Shadow, Copper, Bronze, Gold, Agapite, Verite, Valorite, Mythril. Nothing
+# ever confirmed 21 was Plain's row rather than one of the other nine, which is
+# why it is not written here as though it had been.
+#
+# Set a number to override the search - useful if the label ever stops
+# matching. It is still checked against the drawn set before it is pressed.
 WITHDRAW_BUTTON = 0
+
+# WHAT THE GUMP INSPECTOR SAID, 2026-09-18: button 1 withdraws the granite.
+#
+# Used two ways, neither of them "instead of looking":
+#   * as the FALLBACK when the row cannot be read off the window
+#   * as a CROSS-CHECK when it can - a disagreement means the rows have moved
+#     and it is said out loud rather than resolved silently
+#
+# The search wins a disagreement, because it has a guard this number does not:
+# it refuses when the string table is short, whereas a number typed here goes
+# stale the moment somebody reorders the window and nothing notices.
+#
+# It also explains the recorded macro. That sent button 21 with the amount and
+# THEN button 1 - so 1 was the withdraw all along, and 21 was whatever commits
+# the amount box. The macro died on the second press only because the first had
+# already closed the window.
+WITHDRAW_BUTTON_CONFIRMED = 1
+
+# How far apart, vertically, a label and its button may sit and still be on the
+# same row.
+ROW_TOLERANCE = 12
 
 # What the withdraw press types into the amount box. The converter takes one
 # stone at a time.
@@ -206,6 +233,84 @@ def has_gump(gump_id):
         return bool(Gumps.HasGump(gump_id))
     except Exception:
         return False
+
+
+def layout_text_cells(gump_id):
+    """(x, y, text) for every text cell, paired BY ORDER.
+
+    NOT by the text id in the layout. Razor drops empty strings out of a gump's
+    string table without leaving a gap, so one blank cell shifts every later id
+    down by one - see CLAUDE.md. Element order is the only safe pairing, and it
+    is only safe while the counts agree, which find_stone_row checks.
+    """
+    lines = gump_lines(gump_id)
+    cells, index = [], 0
+    for piece in re.findall(r"\{([^{}]*)\}", raw_layout(gump_id)):
+        piece = piece.strip()
+        kind = piece.split()[0].lower() if piece else ""
+        if kind not in ("text", "croppedtext"):
+            continue
+        nums = [int(n) for n in re.findall(r"-?\d+", piece)]
+        text = lines[index] if index < len(lines) else ""
+        index += 1
+        if len(nums) >= 2:
+            cells.append((nums[0], nums[1], str(text or "").strip()))
+    return cells
+
+
+def layout_buttons(gump_id):
+    """(x, y, id) for every button the server drew, with its position."""
+    out = []
+    for piece in re.findall(r"\{([^{}]*)\}", raw_layout(gump_id)):
+        piece = piece.strip()
+        if not piece.lower().startswith("button"):
+            continue
+        nums = [int(n) for n in re.findall(r"-?\d+", piece)]
+        if len(nums) >= 3:
+            out.append((nums[0], nums[1], nums[-1]))
+    return out
+
+
+def find_stone_row(label):
+    """(button, count) for the row named `label`. (0, "") if it is not there.
+
+    THE POINT OF THIS FUNCTION. A button id read off the live window cannot be
+    stale and cannot be one the server did not draw, because it came from what
+    the server drew. A number typed into config is neither of those things -
+    and this window lists ten stones, so a number that is one row out
+    withdraws the wrong one in silence.
+
+    Refuses rather than guesses when the string table is short. A shifted table
+    puts the wrong label on every row after the gap, which would point this
+    straight at a neighbour.
+    """
+    cells = layout_text_cells(STASH_GUMP)
+    strings = gump_lines(STASH_GUMP)
+    if not cells:
+        return 0, ""
+    if len(strings) != len(cells):
+        log("%d text cell(s) but %d string(s) on this window - the table is "
+            "short, so the labels may belong to the row above. Not choosing a "
+            "button from it." % (len(cells), len(strings)), HUE_BAD)
+        return 0, ""
+
+    want = str(label or "").strip().lower()
+    for i, (cx, cy, text) in enumerate(cells):
+        if str(text or "").strip().lower() != want:
+            continue
+        # The count is the next cell on the same row - "Plain" then "59999".
+        count = ""
+        if i + 1 < len(cells) and abs(cells[i + 1][1] - cy) <= ROW_TOLERANCE:
+            count = cells[i + 1][2]
+        # The button on that row, preferring one to the right of the label.
+        same_row = [(bx, bid) for bx, by, bid in layout_buttons(STASH_GUMP)
+                    if abs(by - cy) <= ROW_TOLERANCE]
+        if not same_row:
+            continue
+        right = sorted((bx, bid) for bx, bid in same_row if bx >= cx)
+        button = right[0][1] if right else sorted(same_row)[-1][1]
+        return button, count
+    return 0, ""
 
 
 def drawn_buttons(gump_id):
@@ -455,18 +560,22 @@ def withdraw_one():
     if not check_amount():
         return None
 
+    button = choose_button()
+    if not button:
+        return None
+
     drawn = drawn_buttons(STASH_GUMP)
-    if drawn and WITHDRAW_BUTTON not in drawn:
+    if drawn and button not in drawn:
         log("The server did NOT draw button %d on this window, and pressing "
             "one it did not draw disconnects you. Drawn: %s"
-            % (WITHDRAW_BUTTON, sorted(drawn)[:20]), HUE_BAD)
+            % (button, sorted(drawn)[:20]), HUE_BAD)
         return None
 
     before = pack_serials()
     log("withdrawing %d %s (button %d)"
-        % (WITHDRAW_AMOUNT, STONE_LABEL, WITHDRAW_BUTTON))
+        % (WITHDRAW_AMOUNT, STONE_LABEL, button))
     try:
-        Gumps.SendAdvancedAction(STASH_GUMP, WITHDRAW_BUTTON, [], [0],
+        Gumps.SendAdvancedAction(STASH_GUMP, button, [], [0],
                                  [str(WITHDRAW_AMOUNT)])
     except Exception as err:
         log("the withdraw press failed: %r" % err, HUE_BAD)
@@ -518,6 +627,46 @@ def platform_spot():
         except Exception:
             pass
     return PLATFORM_SPOT
+
+
+def choose_button():
+    """Which button to press for STONE_LABEL. 0 when there is no safe answer.
+
+    The row read off the live window wins. It cannot be stale and it cannot be
+    a button the server did not draw, because it came from what the server
+    drew - and it refuses outright when the string table is short rather than
+    pointing at a neighbouring row.
+
+    WITHDRAW_BUTTON overrides everything, for when the label stops matching.
+    WITHDRAW_BUTTON_CONFIRMED is the fallback, and a disagreement between it
+    and the window is said out loud: that means the rows have moved.
+    """
+    if WITHDRAW_BUTTON:
+        return WITHDRAW_BUTTON
+
+    found, count = find_stone_row(STONE_LABEL)
+    if found:
+        if WITHDRAW_BUTTON_CONFIRMED and found != WITHDRAW_BUTTON_CONFIRMED:
+            log("CHECK THIS: the %r row reads button %d, but the Gump "
+                "Inspector said %d. The rows have moved. Going with the "
+                "window, which is the one that cannot be stale - set "
+                "WITHDRAW_BUTTON if that is wrong."
+                % (STONE_LABEL, found, WITHDRAW_BUTTON_CONFIRMED), HUE_BAD)
+        if count and count.strip() in ("0", ""):
+            log("The %r row reads %r - there is none left to withdraw."
+                % (STONE_LABEL, count), HUE_BAD)
+            return 0
+        return found
+
+    if WITHDRAW_BUTTON_CONFIRMED:
+        log("Could not find a %r row on the window - falling back to button "
+            "%d, which the Gump Inspector confirmed."
+            % (STONE_LABEL, WITHDRAW_BUTTON_CONFIRMED), HUE_WARN)
+        return WITHDRAW_BUTTON_CONFIRMED
+
+    log("No %r row on the window and no confirmed button. Nothing pressed."
+        % STONE_LABEL, HUE_BAD)
+    return 0
 
 
 def find_sand(new_serials):
@@ -652,11 +801,9 @@ def preflight():
     """Say what will happen, and refuse rather than guess. False to stop."""
     log("Sandmaker - one stone at a time.", HUE_GOOD)
 
-    if not WITHDRAW_BUTTON:
-        log("WITHDRAW_BUTTON is not set, so nothing will be pressed.", HUE_BAD)
-        log("  The Stone Storage lists TEN granite types. Pressing the wrong "
-            "row withdraws the wrong stone; pressing a row the server did not "
-            "draw disconnects you.", HUE_BAD)
+    if not WITHDRAW_BUTTON and not WITHDRAW_BUTTON_CONFIRMED:
+        log("Neither WITHDRAW_BUTTON nor WITHDRAW_BUTTON_CONFIRMED is set, so "
+            "nothing will be pressed.", HUE_BAD)
         log("  Run Scripts/diag_storage_gump.py, target the Stone Storage, "
             "and read the button on the %r row off the end of its report."
             % STONE_LABEL, HUE_WARN)
@@ -681,8 +828,34 @@ def preflight():
     log("  storage 0x%X, crate 0x%X at %d,%d, platform 0x%X at %d,%d"
         % (STONE_STORAGE_SERIAL, BOX_SERIAL, BOX_SPOT[0], BOX_SPOT[1],
            PLATFORM_SERIAL, PLATFORM_SPOT[0], PLATFORM_SPOT[1]))
-    log("  button %d, %d at a time, %s run(s)"
-        % (WITHDRAW_BUTTON, WITHDRAW_AMOUNT, RUNS or "unlimited"))
+    # Open the window and say what the search finds, BEFORE anything is
+    # pressed. A button chosen silently is a button nobody checked.
+    if open_storage() is not None:
+        found, count = find_stone_row(STONE_LABEL)
+        if found:
+            log("  the %r row is button %d%s"
+                % (STONE_LABEL, found,
+                   ", %s in stock" % count if count else ""),
+                HUE_GOOD)
+            if WITHDRAW_BUTTON_CONFIRMED and found != WITHDRAW_BUTTON_CONFIRMED:
+                log("  CHECK THIS: the Gump Inspector said %d. The rows have "
+                    "moved." % WITHDRAW_BUTTON_CONFIRMED, HUE_BAD)
+        else:
+            log("  could not read a %r row - will fall back to button %d."
+                % (STONE_LABEL, WITHDRAW_BUTTON_CONFIRMED), HUE_WARN)
+            for i, text in enumerate(gump_lines(STASH_GUMP)[:30]):
+                text = str(text or "").strip()
+                if text:
+                    log("    %2d  %s" % (i, text[:50]), HUE_WARN)
+        try:
+            Gumps.CloseGump(STASH_GUMP)
+        except Exception:
+            pass
+        Misc.Pause(SETTLE_MS)
+
+    log("  %d at a time, %s run(s)%s"
+        % (WITHDRAW_AMOUNT, RUNS or "unlimited",
+           ", button %d forced" % WITHDRAW_BUTTON if WITHDRAW_BUTTON else ""))
     if not SAND_ID:
         log("  SAND_ID is unset - the sand is found by diffing the ground, "
             "and the graphic is printed on the first success.", HUE_INFO)
