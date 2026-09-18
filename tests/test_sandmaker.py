@@ -162,6 +162,15 @@ def test_the_stone_moves_once(m):
     check("after walking to it",
           body.index("walk_to_item(sand") < body.index("move_one(sand"), True)
 
+    # And to the PLATFORM before looking for it at all. The sand has to be in
+    # reach to be dragged, not merely in sight - and the crate is two tiles
+    # away, which is close enough to see it and too far to pick it up.
+    walked = "if not walk_to(spot[0], spot[1]):" in body
+    check("it walks to the platform before searching", walked, True)
+    check("and that walk comes before the search",
+          walked and body.index("if not walk_to(spot[0], spot[1]):")
+          < body.index("find_sand(new)"), True)
+
 
 def test_nothing_replays_keystrokes(m):
     """Four Player.Run/Walk calls with no delay is the other way that macro
@@ -204,35 +213,71 @@ def test_no_item_serial_from_the_recording_is_reused(m):
 
 def test_the_sand_is_found_without_knowing_its_graphic(m):
     """SAND_ID is unknown and that costs nothing: the sand is whatever is on
-    the ground after the drop that was not on it before."""
+    the ground after the drop that was not on it before, ON THE PLATFORM.
+
+    Inspected 2026-09-18: the platform is 0x402452B1 at (2073, 2504) and it is
+    NOT a container - Container: No - so the sand is a ground item sitting on
+    it, not something inside it.
+    """
     check("it ships unknown", m["SAND_ID"], 0)
+    check("the platform is where it lands", m["PLATFORM_SPOT"], (2073, 2504))
+    check("and it is two tiles from the crate",
+          max(abs(m["BOX_SPOT"][0] - m["PLATFORM_SPOT"][0]),
+              abs(m["BOX_SPOT"][1] - m["PLATFORM_SPOT"][1])), 2)
+
+    class Pos(object):
+        def __init__(self, x, y):
+            self.X, self.Y = x, y
 
     class Item(object):
-        def __init__(self, serial, name, item_id):
+        def __init__(self, serial, name, item_id, x=2073, y=2504):
             self.Serial = serial
             self.Name = name
             self.ItemID = item_id
+            self.Position = Pos(x, y)
 
     table = {1: Item(1, "sand", 0x11EA),
              2: Item(2, "a pile of rocks", 0x1363),
-             3: Item(3, "", 0x11EA)}
-    saved = m["Items"]
+             3: Item(3, "", 0x11EA),
+             # Something new that appeared across the room in the same second.
+             4: Item(4, "sand", 0x11EA, x=2090, y=2520)}
+    saved = {k: m[k] for k in ("Items", "platform_spot")}
     try:
         m["Items"] = type("I", (), {
             "FindBySerial": staticmethod(lambda s: table.get(s)),
             "WaitForProps": staticmethod(lambda *a: None),
             "GetPropStringList": staticmethod(lambda *a: [])})()
+        m["platform_spot"] = lambda: (2073, 2504)
 
         check("by name, among several", m["find_sand"]([1, 2]).Serial, 1)
         check("name wins over order", m["find_sand"]([2, 1]).Serial, 1)
 
-        # One new thing and nothing else IS the sand, whatever it is called.
+        # One new thing on the platform and nothing else IS the sand.
         check("a single unnamed new item is taken",
               m["find_sand"]([3]).Serial, 3)
-        # Several new things, none named sand: refuse rather than guess.
-        check("several unnamed ones are refused",
-              m["find_sand"]([2, 3]), None)
+        # Several unnamed ones: refuse rather than guess.
+        check("several unnamed ones are refused", m["find_sand"]([2, 3]), None)
         check("and nothing new is nothing", m["find_sand"]([]), None)
+
+        # ANCHORED ON THE PLATFORM. Something new 17 tiles away is not the
+        # sand however new it is and however it is named.
+        check("a distant new item is not the sand", m["find_sand"]([4]), None)
+        check("even beside a real one, only the near one counts",
+              m["find_sand"]([4, 1]).Serial, 1)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_the_platform_spot_falls_back_to_the_inspected_tile(m):
+    """A serial that has not loaded is not the same thing as a platform that
+    moved. It is locked down; it has not moved."""
+    saved = m["Items"]
+    try:
+        m["Items"] = type("I", (), {
+            "FindBySerial": staticmethod(lambda s: None)})()
+        check("out of range still gives the inspected tile",
+              m["platform_spot"](), m["PLATFORM_SPOT"])
     finally:
         m["Items"] = saved
 

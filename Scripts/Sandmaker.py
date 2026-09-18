@@ -80,8 +80,30 @@ WITHDRAW_BUTTON = 0
 # stone at a time.
 WITHDRAW_AMOUNT = 1
 
-# The converter. A granite dropped in here becomes sand immediately.
+# THE CONVERTER. Inspected 2026-09-18:
+#     "Granite Crate", 0x402452BA, ItemID 0x0E3D, hue 0x0000
+#     at (2071, 2506, 2), locked down, Container: YES
+# A granite dropped IN here becomes sand immediately.
 BOX_SERIAL = 0x402452BA
+BOX_ID = 0x0E3D
+BOX_SPOT = (2071, 2506)
+
+# WHERE THE SAND COMES OUT. Inspected the same day:
+#     "platform", 0x402452B1, ItemID 0x07BD, hue 0x0000
+#     at (2073, 2504, 3), locked down, Container: NO
+#
+# NOT a container. The sand lands ON it, which makes it a GROUND item at
+# roughly the platform's tile - so it is found by looking at the ground, not
+# by opening anything. Two tiles from the crate, so one ground snapshot taken
+# beside the crate already covers it.
+PLATFORM_SERIAL = 0x402452B1
+PLATFORM_ID = 0x07BD
+PLATFORM_SPOT = (2073, 2504)
+
+# How close to the platform a new ground item has to be to be the sand.
+# Generous - the exact tile it settles on is the server's business - but not
+# so wide that something dropped elsewhere in the room qualifies.
+SAND_NEAR_PLATFORM = 3
 
 # How many stones to convert. 0 means "keep going until the storage runs out
 # or something goes wrong".
@@ -463,12 +485,45 @@ def withdraw_one():
     return None
 
 
+def tiles_between(item, spot):
+    """Distance from an item to an (x, y). 999 when it cannot be measured."""
+    try:
+        return max(abs(int(item.Position.X) - int(spot[0])),
+                   abs(int(item.Position.Y) - int(spot[1])))
+    except Exception:
+        return 999
+
+
+def platform_spot():
+    """Where the sand comes out - the live platform if it is in range.
+
+    Falls back to the inspected coordinates, because a serial that has not
+    loaded yet is not the same thing as a platform that has moved. It is
+    locked down; it has not moved.
+    """
+    item = Items.FindBySerial(PLATFORM_SERIAL)
+    if item is not None:
+        try:
+            return (int(item.Position.X), int(item.Position.Y))
+        except Exception:
+            pass
+    return PLATFORM_SPOT
+
+
 def find_sand(new_serials):
-    """The sand, out of the serials that appeared after the drop."""
+    """The sand, out of the serials that appeared after the drop.
+
+    Anchored on the PLATFORM rather than on the player. The sand lands on it,
+    and something else appearing across the room in the same second is not the
+    sand however new it is.
+    """
+    spot = platform_spot()
     candidates = []
     for serial in new_serials:
         item = Items.FindBySerial(serial)
         if item is None:
+            continue
+        if tiles_between(item, spot) > SAND_NEAR_PLATFORM:
             continue
         candidates.append(item)
 
@@ -520,6 +575,13 @@ def one_round(index):
         return False
     log("granite is in the box - the conversion is instant.", HUE_GOOD)
 
+    # To the platform. Two tiles from the crate, so this is a short walk - but
+    # the sand still has to be in REACH to be dragged, not merely in sight.
+    spot = platform_spot()
+    if not walk_to(spot[0], spot[1]):
+        log("Could not reach the platform at %d,%d." % spot, HUE_BAD)
+        return False
+
     deadline = time.time() + SAND_WAIT_MS / 1000.0
     sand = None
     while time.time() < deadline:
@@ -531,9 +593,11 @@ def one_round(index):
                 break
 
     if sand is None:
-        log("No new item appeared within %d tiles in %ds. If the sand comes "
-            "out further away than that, raise SAND_RANGE."
-            % (SAND_RANGE, SAND_WAIT_MS / 1000), HUE_BAD)
+        log("Nothing new appeared within %d tiles of the platform at %d,%d in "
+            "%ds. Raise SAND_NEAR_PLATFORM if the sand lands further off than "
+            "that, or SAND_RANGE if it is out of sight altogether."
+            % (SAND_NEAR_PLATFORM, spot[0], spot[1], SAND_WAIT_MS / 1000),
+            HUE_BAD)
         return False
 
     try:
@@ -578,16 +642,23 @@ def preflight():
         log("No backpack.", HUE_BAD)
         return False
 
-    for serial, what in ((STONE_STORAGE_SERIAL, "Stone Storage"),
-                         (BOX_SERIAL, "converter box")):
-        if Items.FindBySerial(serial) is None:
-            log("%s 0x%X is not in range. Stand where you can see both it and "
-                "the box." % (what, serial), HUE_BAD)
-            return False
+    # Named WITH THEIR COORDINATES. "Not found" on a locked-down item means
+    # you are standing somewhere else, and saying where it is turns that from
+    # a puzzle into a walk.
+    for serial, what, spot in ((STONE_STORAGE_SERIAL, "Stone Storage", None),
+                               (BOX_SERIAL, "Granite Crate", BOX_SPOT),
+                               (PLATFORM_SERIAL, "platform", PLATFORM_SPOT)):
+        if Items.FindBySerial(serial) is not None:
+            continue
+        where = " It is at %d,%d." % spot if spot else ""
+        log("%s 0x%X is not in range.%s" % (what, serial, where), HUE_BAD)
+        return False
 
-    log("  storage 0x%X, box 0x%X, button %d, %d at a time, %s run(s)"
-        % (STONE_STORAGE_SERIAL, BOX_SERIAL, WITHDRAW_BUTTON, WITHDRAW_AMOUNT,
-           RUNS or "unlimited"))
+    log("  storage 0x%X, crate 0x%X at %d,%d, platform 0x%X at %d,%d"
+        % (STONE_STORAGE_SERIAL, BOX_SERIAL, BOX_SPOT[0], BOX_SPOT[1],
+           PLATFORM_SERIAL, PLATFORM_SPOT[0], PLATFORM_SPOT[1]))
+    log("  button %d, %d at a time, %s run(s)"
+        % (WITHDRAW_BUTTON, WITHDRAW_AMOUNT, RUNS or "unlimited"))
     if not SAND_ID:
         log("  SAND_ID is unset - the sand is found by diffing the ground, "
             "and the graphic is printed on the first success.", HUE_INFO)
