@@ -17,8 +17,9 @@ walk to the platform and pick up the sand
 |---|---|
 | Repo | `Scripts/Sandmaker.py` |
 | Live | `E:\uoclients\RazorEnhanced\Scripts\sandmaker.py` (lower-case) |
-| Tests | `tests/test_sandmaker.py` — 74 checks |
-| Diagnostic | `Scripts/diag_storage_gump.py` |
+| Version | `2026-09-18.2` |
+| Tests | `tests/test_sandmaker.py` — 86 checks; `tests/test_diag_storage_gump.py` — 20 |
+| Diagnostic | `Scripts/diag_storage_gump.py`, live as `diag_storage_gump.py` since 2026-09-18 |
 
 ## STILL BROKEN — read this first
 
@@ -75,6 +76,67 @@ Inspector *is* the live dump.
 fixing as well — so whatever is wrong here is probably not specific to the
 Stone Storage.
 
+### What the source says (checked 2026-09-18, second session)
+
+**What stock ServUO disconnects for.** `Server/Network/PacketHandlers.cs`,
+`DisplayGumpResponse`, has exactly four drops, all checked against the gump
+instance the reply names (serial *and* type id):
+
+1. a button id not drawn on that gump — `GumpButton` or `GumpImageTileButton`;
+   0 (close) always passes
+2. more switches than the gump has
+3. more text entries than the gump has
+4. a text entry longer than 239 characters
+
+A reply naming a gump the server **no longer holds matches nothing and is
+ignored.** It is not a drop. So the recorded macro's second press was a press
+that did nothing, and the claim here and in the scripts that "answering a
+window that closed disconnects you" was wrong for stock ServUO. Corrected.
+
+**What Razor sent for button 6.** `Gumps.SendAdvancedAction` at `v1.0.0.12`:
+closes the gump client-side (`0xBF/0x04` with button 0), then sends one `0xB1`
+reply with the gump's last-seen serial, button 6, zero switches and one text
+entry (id 0, `"1"`). Against a gump with one text entry and a drawn button 6,
+**none of the four rules fires.**
+
+So one of these is true, and the report below cannot tell them apart:
+
+- the shard's core is **not stock** here
+- button 6's **own handler** did it — an unhandled exception in
+  `gump.OnResponse` is not caught anywhere in `DisplayGumpResponse` or
+  `MessagePump`, and would take the server down, dropping *everyone*
+- the drop came **after** the press and was not caused by it
+
+Two questions for the user settle most of that: did anybody else drop at the
+same moment, and did `Stopping after 0 stone(s)` print before the disconnect?
+
+**A real parser bug, fixed.** Both `drawn_buttons()` and `layout_buttons()`
+took the **last** number of any element starting with `button`. The id is the
+**seventh** (`GumpButton.cs`, `GumpImageTileButton.cs`); for a `buttontileart`
+the last number is its **height**. So a tile-art button's real id was missing
+from the drawn set and its height was in it. Not proven to be *this* failure —
+the window may draw no tile-art buttons at all — but a guard built on it was
+guarding the wrong numbers. The diagnostic skipped `buttontileart` entirely.
+
+**A hypothesis for the five-row offset — NOT acted on.** On the Resource Order
+Book, the only live dump of this gump class in the repo, **every button sits to
+the LEFT of its label** (`docs/resource-order-book-gump.md`: button 1 at x=35,
+label at x=75; the rest at x=250, labels at x=270). `find_stone_row()` prefers
+a button to the **right**. If the Stone Storage is drawn in two columns of
+five, Plain's own button is to its left and the first button to its right is
+the second column's first row — **Gold, row 6.** That fits every number seen.
+It is a prediction the dump will confirm or kill: Plain's button left of the
+`Plain` label, button 6 on the same y, labelled `Gold` on its right. The
+search's preference is deliberately **unchanged** until then.
+
+**Why the dump never arrived.** The live copy was `diag_storage_gump,py.py` —
+the *first* version, which printed the buttons **first**, so they had scrolled
+away by the end. The buttons-last version was only ever in the repo. The new
+one is deployed as `diag_storage_gump.py`, shows the label on **both** sides of
+every button, lists text cells with their x,y, and writes the whole report plus
+the raw layout to `%TEMP%\storage_gump_dump.txt`. The stale comma-named copy
+is still in the live folder.
+
 ## What IS confirmed
 
 All from the Item Inspector / Gump Inspector, 2026-09-18.
@@ -120,7 +182,8 @@ Gumps.SendAction(0x6abce12, 1)           # answering a window that closed
 ```
 
 1. **A gump response closes the gump.** The third line answers a window the
-   client no longer has. The `WaitForGump` does not help — nothing reads its
+   server no longer holds — which stock ServUO **ignores** rather than drops
+   (see above), so this made the press useless, not necessarily fatal. The `WaitForGump` does not help — nothing reads its
    return value.
 2. **Four `Player.Run`/`Walk` with no delay**, against fastwalk protection.
 3. **Three `Items.Move` with no pause**, against a ~900ms drag limit.
@@ -133,11 +196,12 @@ items every run** and must never be config. Only containers are stable.
 
 ## Next steps, in order
 
-1. **Find out why a drawn button dropped the client.** Run
-   `diag_storage_gump.py` and capture the full `BUTTONS THE SERVER DREW`
-   block — every id with its x,y and row label. That is the block that has
-   never arrived, and it is what settles whether the buttons sit on their
-   labels' rows at all.
+1. **Get the dump.** Run `diag_storage_gump.py` (NOT the comma-named copy),
+   target the Stone Storage, and send `%TEMP%\storage_gump_dump.txt` — its
+   path is the last line printed. It settles whether the buttons sit on their
+   labels' rows, which side of the label, and whether any are `buttontileart`.
+   Also ask: did anyone else drop at the same moment, and did
+   `Stopping after 0 stone(s)` print before the disconnect?
 2. **Then fix `find_stone_row()`** — or delete it. It has been wrong once on a
    window where wrong means disconnected, and a cross-check that cannot be
    trusted is worth less than no cross-check.

@@ -16,19 +16,23 @@ Repeated RUNS times.
 WHAT THIS IS NOT
 ----------------
 It is not the recorded macro. That one disconnected the client on its first
-run, and it is worth saying exactly why, because two of the three reasons are
-invisible in a recording:
+run. Three things in it are wrong, and two of them are invisible in a
+recording:
 
     Gumps.SendAdvancedAction(0x6abce12, 21, [], [0], ["1"])
     Gumps.WaitForGump(0x6abce12, 10000)      <- the window is GONE by now
     Gumps.SendAction(0x6abce12, 1)           <- answering a window that closed
 
-  * A gump response CLOSES the gump. By the third line the client no longer
-    has that window, and answering a gump you do not have is a drop. The
-    WaitForGump between them does not help: nothing reads what it returned.
+  * A gump response CLOSES the gump, so the third line answers a window the
+    server no longer holds. Stock ServUO IGNORES that rather than dropping
+    you (DisplayGumpResponse only matches gumps it still has) - so this is a
+    press that does nothing, not proven to be the disconnect. The WaitForGump
+    between them does not help either way: nothing reads what it returned.
   * Four Player.Run/Walk calls back to back with no delay. Servers have
     fastwalk protection and a recorder replays keystrokes instantly.
   * Three Items.Move with no pause, against a ~900ms drag limit.
+
+Which of the three dropped the macro was never established.
 
 And the serials in it cannot be reused. 0x40BB6349 was that one withdrawal's
 granite and 0x40BB64E1 was that one piece of sand; both are new items every
@@ -37,16 +41,11 @@ serial here - the stone is found by graphic and the sand by diffing the ground.
 
 WHAT IS STILL UNKNOWN
 ---------------------
-WITHDRAW_BUTTON. This script REFUSES TO RUN until it is set, and that is
-deliberate: the Stone Storage lists ten granite types and pressing the wrong
-row withdraws the wrong stone, while pressing a row the server did not draw
-disconnects you. Run Scripts/diag_storage_gump.py, read the button on the
-"Plain" row, and put it here. Do not guess it from its neighbours - the
-numbering is per-container.
-
-SAND_ID is unknown too, but that one costs nothing: the sand is found by
-diffing the ground before and after the drop, and the first run PRINTS the
-graphic it learned so it can be filled in later.
+Why pressing a button the server DREW disconnected the client on 2026-09-18.
+See docs/sandmaker-handoff.md. The button pressed now is the one the Gump
+Inspector read off a real click (WITHDRAW_BUTTON_CONFIRMED); with neither
+that nor WITHDRAW_BUTTON set the script REFUSES TO RUN, because the Stone
+Storage lists ten granite types and the wrong row is the wrong stone.
 """
 
 import re
@@ -58,7 +57,7 @@ import time
 # has already lost two debugging rounds to a bug that was fixed on disk and not
 # in the folder Razor reads. If this line does not say what you expect, hit
 # Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-09-18.1"
+SCRIPT_VERSION = "2026-09-18.2"
 
 
 # =============================================================================
@@ -74,37 +73,29 @@ STONE_STORAGE_SERIAL = 0x4017817A
 # HOUSE_DEPOSIT_GUMP.
 STASH_GUMP = 0x06ABCE12
 
-# THE BUTTON THAT WITHDRAWS PLAIN GRANITE.
+# THE BUTTON THAT WITHDRAWS PLAIN GRANITE - an explicit override.
 #
-# 0 means FIND IT, which is the default and the better answer. The window is
-# open in front of us; the button on the row labelled STONE_LABEL is read off
-# the live layout every time, so it cannot be stale and it cannot be a button
-# the server did not draw - it came FROM what the server drew.
+# 0, the default, means "use WITHDRAW_BUTTON_CONFIRMED below". Set a number
+# here only to force a different one; it is still checked against the drawn
+# set before it is pressed.
 #
-# The recorded macro pressed 21, and this window lists ten stones: Plain, Dull,
-# Shadow, Copper, Bronze, Gold, Agapite, Verite, Valorite, Mythril. Nothing
-# ever confirmed 21 was Plain's row rather than one of the other nine, which is
-# why it is not written here as though it had been.
-#
-# Set a number to override the search - useful if the label ever stops
-# matching. It is still checked against the drawn set before it is pressed.
+# It does NOT mean "find it". It used to: the button on the row labelled
+# STONE_LABEL was read off the live layout, and on 2026-09-18 that search
+# returned 6 for Plain's row, 6 was pressed, and the client dropped. The
+# search is a cross-check now and decides nothing - see choose_button().
 WITHDRAW_BUTTON = 0
 
 # WHAT THE GUMP INSPECTOR SAID, 2026-09-18: button 1 withdraws the granite.
 #
-# Used two ways, neither of them "instead of looking":
-#   * as the FALLBACK when the row cannot be read off the window
-#   * as a CROSS-CHECK when it can - a disagreement means the rows have moved
-#     and it is said out loud rather than resolved silently
+# THIS IS WHAT GETS PRESSED. An Inspector reading is the id the server
+# received when a human clicked the thing they meant - a live dump, not an
+# inference - so it wins any disagreement with the row search. The search
+# still runs and a disagreement is said out loud, but it changes nothing.
 #
-# The search wins a disagreement, because it has a guard this number does not:
-# it refuses when the string table is short, whereas a number typed here goes
-# stale the moment somebody reorders the window and nothing notices.
+# 0 here, with WITHDRAW_BUTTON also 0, means nothing is pressed at all.
 #
-# It also explains the recorded macro. That sent button 21 with the amount and
-# THEN button 1 - so 1 was the withdraw all along, and 21 was whatever commits
-# the amount box. The macro died on the second press only because the first had
-# already closed the window.
+# The recorded macro sent button 21 with the amount and THEN button 1, which
+# fits 1 being the withdraw and 21 being whatever sits by the amount box.
 WITHDRAW_BUTTON_CONFIRMED = 1
 
 # How far apart, vertically, a label and its button may sit and still be on the
@@ -266,27 +257,49 @@ def layout_text_cells(gump_id):
     return cells
 
 
+# The two kinds of element a server can answer to, and where each carries its
+# id. From ServUO Server/Gumps/GumpButton.cs and GumpImageTileButton.cs:
+#
+#     { button        x y normal pressed type param ID }
+#     { buttontileart x y normal pressed type param ID itemid hue width height }
+#
+# The id is the SEVENTH number in both. It is not the last: for a
+# buttontileart the last number is its HEIGHT. ServUO's DisplayGumpResponse
+# accepts a press on either kind, so both count as drawn.
+BUTTON_KINDS = ("button", "buttontileart")
+BUTTON_ID_INDEX = 6
+
+
 def layout_buttons(gump_id):
-    """(x, y, id) for every button the server drew, with its position."""
+    """(x, y, id) for every button the server drew, with its position.
+
+    An element too short to carry an id is skipped, not guessed at.
+    """
     out = []
     for piece in re.findall(r"\{([^{}]*)\}", raw_layout(gump_id)):
         piece = piece.strip()
-        if not piece.lower().startswith("button"):
+        kind = piece.split()[0].lower() if piece else ""
+        if kind not in BUTTON_KINDS:
             continue
         nums = [int(n) for n in re.findall(r"-?\d+", piece)]
-        if len(nums) >= 3:
-            out.append((nums[0], nums[1], nums[-1]))
+        if len(nums) > BUTTON_ID_INDEX:
+            out.append((nums[0], nums[1], nums[BUTTON_ID_INDEX]))
     return out
 
 
 def find_stone_row(label):
     """(button, count) for the row named `label`. (0, "") if it is not there.
 
-    THE POINT OF THIS FUNCTION. A button id read off the live window cannot be
-    stale and cannot be one the server did not draw, because it came from what
-    the server drew. A number typed into config is neither of those things -
-    and this window lists ten stones, so a number that is one row out
-    withdraws the wrong one in silence.
+    A CROSS-CHECK ONLY. It decides nothing - choose_button() presses the
+    Gump Inspector's number whatever this says. It returned 6 for "Plain" on
+    2026-09-18 when the answer was 1, and the press dropped the client.
+
+    SUSPECT: it prefers a button to the RIGHT of the label. On the Resource
+    Order Book, the only live dump of this gump class in the repo, every
+    button sits to the LEFT of its label (docs/resource-order-book-gump.md).
+    On a window drawn in two columns that would pick the next column's button.
+    Unconfirmed until the diag_storage_gump dump of the Stone Storage arrives;
+    do not "fix" the preference on that inference alone.
 
     Refuses rather than guesses when the string table is short. A shifted table
     puts the wrong label on every row after the gap, which would point this
@@ -324,18 +337,16 @@ def find_stone_row(label):
 def drawn_buttons(gump_id):
     """Every button id the server actually drew on this window.
 
-    PRESSING ONE IT DID NOT DRAW DISCONNECTS YOU, so this is checked before
-    every press rather than trusted from config.
+    PRESSING ONE IT DID NOT DRAW DISCONNECTS YOU - that is the first check in
+    ServUO's DisplayGumpResponse - so this is checked before every press
+    rather than trusted from config.
+
+    Necessary, NOT sufficient. On 2026-09-18 a button in this set was pressed
+    and the client still dropped. Stock ServUO has no rule that disconnects
+    for a drawn button, so whatever did it is either shard-side or the button's
+    own handler. See docs/sandmaker-handoff.md.
     """
-    out = set()
-    for piece in re.findall(r"\{([^{}]*)\}", raw_layout(gump_id)):
-        piece = piece.strip()
-        if not piece.lower().startswith("button"):
-            continue
-        nums = [int(n) for n in re.findall(r"-?\d+", piece)]
-        if len(nums) >= 3:
-            out.add(nums[-1])
-    return out
+    return set(bid for _x, _y, bid in layout_buttons(gump_id))
 
 
 def label_after(strings, label):
@@ -606,9 +617,11 @@ def withdraw_one():
         except Exception:
             continue
 
+    # The button that was PRESSED, not WITHDRAW_BUTTON - that is 0 unless
+    # forced, and on 2026-09-18 this line said "button 0" about a press of 6.
     log("Nothing that looks like granite (0x%04X) arrived in the pack. Either "
         "button %d is not the %s row, or the storage is empty."
-        % (GRANITE_ID, WITHDRAW_BUTTON, STONE_LABEL), HUE_BAD)
+        % (GRANITE_ID, button, STONE_LABEL), HUE_BAD)
     return None
 
 

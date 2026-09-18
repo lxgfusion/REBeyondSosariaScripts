@@ -13,12 +13,18 @@ detail lives in the handoffs named below; this file is the map and the state.
 | `TameAndFill.py` | `2026-09-04.1` | in step | working; Leatherman merged in |
 | `Leatherman.py` | `2026-09-04.1` | in step | **superseded** — retire once the merge is confirmed |
 | `resource_order_runner.py` | `2026-09-13.5` | in step | partly tested; see below |
-| `Sandmaker.py` | `2026-09-18.1` | in step | **DISCONNECTED THE CLIENT** — see its handoff |
-| `diag_storage_gump.py` | — | n/a | working |
+| `Sandmaker.py` | `2026-09-18.2` | in step | **DISCONNECTED THE CLIENT** — see its handoff |
+| `diag_storage_gump.py` | — | deployed 2026-09-18 | **the live copy was stale** — see below |
 | `diag_taming_levels.py` | — | n/a | never run |
 
-All nine test suites pass. Live and repo are byte-identical everywhere except
+All ten test suites pass. Live and repo are byte-identical everywhere except
 the deliberate serial scrubbing in published copies.
+
+**Correction:** that claim was false for `diag_storage_gump.py`. The live
+folder held only `diag_storage_gump,py.py`, the first version, which printed
+the buttons first so they scrolled away — why the dump never arrived. The
+current one is now live under the right name; the comma-named copy is still
+there and should be deleted.
 
 ## The three things that still need doing
 

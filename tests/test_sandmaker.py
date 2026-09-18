@@ -132,6 +132,55 @@ def test_the_button_must_be_drawn_before_it_is_pressed(m):
           "button not in drawn" in body, True)
 
 
+def test_a_buttontileart_id_is_its_seventh_number_not_its_last(m):
+    """ServUO's two pressable elements, from GumpButton.cs and
+    GumpImageTileButton.cs:
+
+        { button        x y normal pressed type param ID }
+        { buttontileart x y normal pressed type param ID itemid hue width height }
+
+    The old parser took the LAST number, which for a buttontileart is its
+    HEIGHT - so a tile-art button's real id was missing from the drawn set and
+    its height was in it. A press guarded by that set is guarded by nothing.
+    """
+    layout = ("{ button 35 47 4005 4007 1 0 1 }"
+              "{ buttontileart 35 77 4005 4007 1 0 2 6009 0 44 6 }"
+              "{ tooltip 1044095 }"
+              "{ button 10 10 4005 }")          # too short to carry an id
+    saved = m["raw_layout"]
+    try:
+        m["raw_layout"] = lambda gid: layout
+        drawn = m["drawn_buttons"](0x6ABCE12)
+        check("a plain button's id", 1 in drawn, True)
+        check("a buttontileart's id", 2 in drawn, True)
+        check("NOT the buttontileart's height", 6 in drawn, False)
+        check("nor its width", 44 in drawn, False)
+        check("nor the tooltip's cliloc", 1044095 in drawn, False)
+        check("a short element is skipped, not guessed at", 4005 in drawn,
+              False)
+        check("exactly those two", sorted(drawn), [1, 2])
+        check("and the positions come with them",
+              sorted(m["layout_buttons"](0x6ABCE12)),
+              [(35, 47, 1), (35, 77, 2)])
+    finally:
+        m["raw_layout"] = saved
+
+
+def test_the_failure_names_the_button_that_was_pressed(m):
+    """2026-09-18: button 6 was pressed and the failure line said "button 0",
+    because it printed WITHDRAW_BUTTON - the override, which is 0 - instead
+    of the button actually sent."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def withdraw_one("):src.index("def tiles_between(")]
+    tail = body[body.index("Nothing that looks like granite"):] \
+        if "Nothing that looks like granite" in body else ""
+    args = re.search(r"%\s*\(GRANITE_ID,\s*(\w+),", tail)
+    check("the failure line is there", bool(tail), True)
+    check("and it names the pressed button", args and args.group(1),
+          "button")
+
+
 def test_the_button_is_read_off_the_window_not_configured(m):
     """Asking a human to paste a button id is a design that did not work -
     three rounds of it and the script still would not start. The window is
