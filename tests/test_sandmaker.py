@@ -219,7 +219,9 @@ def test_the_sand_is_found_without_knowing_its_graphic(m):
     NOT a container - Container: No - so the sand is a ground item sitting on
     it, not something inside it.
     """
-    check("it ships unknown", m["SAND_ID"], 0)
+    # Inspected 2026-09-18: Name "sand", ItemID 0x423A, hue 0x096D.
+    check("the graphic is known now", m["SAND_ID"], 0x423A)
+    check("and the hue ships unpinned", m["SAND_HUE"], -1)
     check("the platform is where it lands", m["PLATFORM_SPOT"], (2073, 2504))
     check("and it is two tiles from the crate",
           max(abs(m["BOX_SPOT"][0] - m["PLATFORM_SPOT"][0]),
@@ -230,17 +232,26 @@ def test_the_sand_is_found_without_knowing_its_graphic(m):
             self.X, self.Y = x, y
 
     class Item(object):
-        def __init__(self, serial, name, item_id, x=2073, y=2504):
+        def __init__(self, serial, name, item_id, x=2073, y=2504, hue=0x096D):
             self.Serial = serial
             self.Name = name
             self.ItemID = item_id
+            self.Hue = hue
             self.Position = Pos(x, y)
 
-    table = {1: Item(1, "sand", 0x11EA),
+    def serial_of(item):
+        """None rather than an exception, so a change that finds nothing shows
+        up as a failed check instead of a traceback."""
+        return getattr(item, "Serial", None)
+
+    table = {1: Item(1, "sand", 0x423A),
              2: Item(2, "a pile of rocks", 0x1363),
-             3: Item(3, "", 0x11EA),
+             3: Item(3, "", 0x423A),
              # Something new that appeared across the room in the same second.
-             4: Item(4, "sand", 0x11EA, x=2090, y=2520)}
+             4: Item(4, "sand", 0x423A, x=2090, y=2520),
+             # Right place, right time, WRONG item - and unnamed, so only the
+             # graphic tells it apart from the sand.
+             5: Item(5, "", 0x1363)}
     saved = {k: m[k] for k in ("Items", "platform_spot")}
     try:
         m["Items"] = type("I", (), {
@@ -249,21 +260,60 @@ def test_the_sand_is_found_without_knowing_its_graphic(m):
             "GetPropStringList": staticmethod(lambda *a: [])})()
         m["platform_spot"] = lambda: (2073, 2504)
 
-        check("by name, among several", m["find_sand"]([1, 2]).Serial, 1)
-        check("name wins over order", m["find_sand"]([2, 1]).Serial, 1)
+        check("by graphic, among several",
+              serial_of(m["find_sand"]([1, 2])), 1)
+        check("graphic wins over order",
+              serial_of(m["find_sand"]([2, 1])), 1)
+        # The graphic is checked BEFORE the name, because a graphic is a fact
+        # about the item and a name has to be read off a tooltip that may not
+        # have arrived. An unnamed piece of sand is still sand.
+        check("an unnamed one is still found by graphic",
+              serial_of(m["find_sand"]([3])), 3)
+        check("and something else on the platform is not taken",
+              m["find_sand"]([5]), None)
 
-        # One new thing on the platform and nothing else IS the sand.
-        check("a single unnamed new item is taken",
-              m["find_sand"]([3]).Serial, 3)
-        # Several unnamed ones: refuse rather than guess.
-        check("several unnamed ones are refused", m["find_sand"]([2, 3]), None)
-        check("and nothing new is nothing", m["find_sand"]([]), None)
+        check("nothing new is nothing", m["find_sand"]([]), None)
+
+        # With the graphic unknown it falls back to the name, and then to
+        # "one new thing and nothing else" - the path that carried this
+        # before the inspection.
+        saved_id = m["SAND_ID"]
+        try:
+            m["SAND_ID"] = 0
+            check("without a graphic, by name",
+                  serial_of(m["find_sand"]([1, 2])), 1)
+            check("a lone unnamed item is taken",
+                  serial_of(m["find_sand"]([3])), 3)
+            check("several unnamed ones are refused",
+                  m["find_sand"]([2, 3]), None)
+        finally:
+            m["SAND_ID"] = saved_id
 
         # ANCHORED ON THE PLATFORM. Something new 17 tiles away is not the
         # sand however new it is and however it is named.
         check("a distant new item is not the sand", m["find_sand"]([4]), None)
         check("even beside a real one, only the near one counts",
-              m["find_sand"]([4, 1]).Serial, 1)
+              serial_of(m["find_sand"]([4, 1])), 1)
+
+        # WHY THE HUE IS NOT PINNED, as a behaviour rather than an opinion.
+        # 0x096D is the hue one piece was inspected at, and it happens to be
+        # the hue the order book gives Copper Granite - so it may be the sand's
+        # own colour or it may be the stone's. Unpinned, a differently-hued
+        # piece is still found; pinned, it is not. The graphic, the platform
+        # and "new since the drop" are already three filters.
+        odd = Item(6, "sand", 0x423A, hue=0x0000)
+        table[6] = odd
+        check("an unexpected hue is still found while unpinned",
+              serial_of(m["find_sand"]([6])), 6)
+        saved_hue = m["SAND_HUE"]
+        try:
+            m["SAND_HUE"] = 0x096D
+            check("pinning it would reject that piece",
+                  m["find_sand"]([6]), None)
+            check("while the inspected hue still matches",
+                  serial_of(m["find_sand"]([1])), 1)
+        finally:
+            m["SAND_HUE"] = saved_hue
     finally:
         for k, v in saved.items():
             m[k] = v

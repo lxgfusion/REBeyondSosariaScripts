@@ -45,6 +45,8 @@ two must be kept in step.
 | `resource_order_runner.py`, `diag_resource_orders.py` | `E:\uoclients\RazorEnhanced\Scripts\` |
 | `harvest_runner.py` | `E:\uoclients\UOAlive_Package\razor\Scripts\` |
 | `TameAndFill.py` | `E:\uoclients\RazorEnhanced\Scripts\` |
+| `Leatherman.py` | `E:\uoclients\RazorEnhanced\Scripts\` |
+| `sandmaker.py` (lower-case live, `Sandmaker.py` in the repo) | `E:\uoclients\RazorEnhanced\Scripts\` |
 
 So "the live folder" depends on which script is being edited.
 

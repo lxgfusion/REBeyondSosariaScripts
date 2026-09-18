@@ -125,10 +125,20 @@ GRANITE_HUE = 0x0000
 # What the Stone Storage calls it, for reading the row off the window.
 STONE_LABEL = "Plain"
 
-# The sand's graphic, once it is known. 0 means "find it by diffing the
-# ground", which is what the first run does anyway - and it prints what it
-# learned so this can be filled in.
-SAND_ID = 0
+# THE SAND. Inspected 2026-09-18, after a piece had been picked up:
+#     Name "sand", ItemID 0x423A, hue 0x096D, Weight 1 Stone
+#     Container: the backpack, Movable: Yes
+#
+# The graphic is what identifies it. The hue is NOT pinned: 0x096D happens to
+# be the hue the order book gives Copper Granite, which is either a coincidence
+# of palette or a sign that the sand takes its colour from the stone that made
+# it. Only Plain granite is ever converted here so it should not vary - but
+# 0x423A is distinctive on its own, the search is already anchored on the
+# platform, and the item is already known to be NEW. Three filters is enough;
+# a fourth that might be wrong is not worth having.
+#   -1 = any hue.
+SAND_ID = 0x423A
+SAND_HUE = -1
 SAND_NAMES = ["sand"]
 
 # How far to look for the sand after the drop, and how long to give it. The
@@ -527,24 +537,38 @@ def find_sand(new_serials):
             continue
         candidates.append(item)
 
-    # By name first - it is the only thing known about sand for certain.
-    for item in candidates:
-        name = item_name(item).lower()
-        for want in SAND_NAMES:
-            if want.strip().lower() in name:
-                return item
-
-    # By the configured graphic, once there is one.
+    # BY GRAPHIC FIRST, now that it is known. A graphic is a fact about the
+    # item; a name has to be read off a tooltip that may not have arrived yet,
+    # and item_name falls back to WaitForProps for exactly that reason.
     if SAND_ID:
         for item in candidates:
             try:
-                if int(item.ItemID) == SAND_ID:
-                    return item
+                if int(item.ItemID) != SAND_ID:
+                    continue
+                if SAND_HUE >= 0 and int(item.Hue) != SAND_HUE:
+                    continue
+                return item
             except Exception:
                 continue
 
+    # Then by name - but ONLY while the graphic is unknown. Once SAND_ID is
+    # set it is the whole answer: an item that is not that graphic is not the
+    # sand, and letting a name overrule it means a pinned SAND_HUE can be
+    # walked straight past by anything called "sand".
+    if not SAND_ID:
+        for item in candidates:
+            name = item_name(item).lower()
+            for want in SAND_NAMES:
+                if want.strip().lower() in name:
+                    return item
+
     # One new thing and nothing else: that is the sand, whatever it is called.
-    if len(candidates) == 1:
+    #
+    # ONLY WHILE THE GRAPHIC IS UNKNOWN. Once SAND_ID is set, an item that is
+    # not that graphic is not the sand however alone it is - taking it would
+    # drag whatever else happened to appear on the platform into the pack, and
+    # the whole point of learning the graphic was to stop guessing.
+    if not SAND_ID and len(candidates) == 1:
         return candidates[0]
     return None
 
@@ -662,6 +686,10 @@ def preflight():
     if not SAND_ID:
         log("  SAND_ID is unset - the sand is found by diffing the ground, "
             "and the graphic is printed on the first success.", HUE_INFO)
+    else:
+        log("  sand is 0x%04X%s, on the platform, and new since the drop."
+            % (SAND_ID,
+               " hue 0x%04X" % SAND_HUE if SAND_HUE >= 0 else " (any hue)"))
     return True
 
 
