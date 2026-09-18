@@ -12,6 +12,16 @@ Scripts for the Razor Enhanced assistant for Ultima Online.
   scripts are taken from ServUO `Scripts/Skills/*.cs` — see `docs/`.
 - **API reference:** https://razorenhanced.readthedocs.io/api/index.html
 
+## Current state — read this first
+
+[`docs/session-handoff-2026-09-18.md`](docs/session-handoff-2026-09-18.md) is
+the map: every script's version, what is deployed, what is untested, and the
+three things still outstanding. The per-task handoffs it names carry the detail.
+
+**Known broken right now:** `Sandmaker.py` disconnected the client on
+2026-09-18 and the fix is untested — see
+[`docs/sandmaker-handoff.md`](docs/sandmaker-handoff.md).
+
 ## Resource order runner — current state
 
 Read [`docs/resource-order-handoff.md`](docs/resource-order-handoff.md) before

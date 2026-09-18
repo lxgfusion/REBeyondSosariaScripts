@@ -80,6 +80,18 @@ def test_the_withdrawal_amount_is_read_off_the_window(m):
           "7")
 
 
+def test_it_has_a_version_banner(m):
+    """Every script here prints one on its first log line. Razor caches the
+    loaded script even after the file changes, and this repo has lost two
+    debugging rounds to a fix that was on disk but not in the folder Razor
+    reads."""
+    check("there is a version", bool(m["SCRIPT_VERSION"]), True)
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    pre = src[src.index("def preflight("):src.index("def main(")]
+    check("and preflight prints it", "SCRIPT_VERSION" in pre, True)
+
+
 def test_the_converter_takes_one_at_a_time(m):
     check("one stone per press", m["WITHDRAW_AMOUNT"], 1)
 

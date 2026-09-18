@@ -1,11 +1,64 @@
 # Harvest runner & animal tamer — handoff
 
-State as of **2026-08-06**. `CLAUDE.md` carries the project conventions and the
-Razor Enhanced API gotchas and loads automatically — this file is only the state
-of *these two tasks*.
+Current state is **2026-09-18** and lives in
+[`docs/session-handoff-2026-09-18.md`](session-handoff-2026-09-18.md). Read that
+first; this file is the older, deeper background it does not repeat.
 
-Sibling doc: `docs/resource-order-handoff.md` covers the separate
-`resource_order_runner.py` work, which this session did not touch.
+`CLAUDE.md` carries the project conventions and the Razor Enhanced API gotchas
+and loads automatically.
+
+## What changed since this document was written (2026-08-06)
+
+| | Then | Now |
+|---|---|---|
+| `harvest_runner.py` | 2026-08 | **`2026-09-14.1`**, four live copies in step |
+| `TameAndFill.py` | tamer only | **`2026-09-04.1`** — `Leatherman.py` merged in, kills and butchers when there is nothing to tame |
+| `Leatherman.py` | did not exist | **`2026-09-04.1`**, superseded by the merge, kept until it is confirmed |
+
+### The three things to know before touching either script
+
+**1. Runtime state belongs BELOW the `# HELPERS` seam.** The config half is
+carried forward from each live copy and the code half is replaced wholesale, so
+a name the code uses that is declared above the seam **never travels**.
+`_move_pending` was declared above it, and the `move` command therefore raised
+`NameError` in every live copy from the day it shipped while testing perfectly
+in the repo. Fourteen other pieces of state were in the same position. A test
+now asserts no private name sits above the seam; `tools/check_undefined_names.py`
+is the other half of that guard and must be run over **every copy** after a
+splice.
+
+**2. Guards that run between calls cannot catch a stall inside one.** The
+waypoint cap is checked between `task()` calls, the spot cap between swings, the
+idle clock at the top of a sweep — and a character sat on one tile for over an
+hour with all of them armed. The stall watchdog runs from `interruptible_pause`,
+which nearly every wait goes through, and is the only guard that keeps ticking
+while another is stuck. It is **untested**; the phase name it prints when it
+fires is the evidence to catch.
+
+**3. A corpse's serial has nothing to do with the mobile's.** Confirmed from a
+live recording — the cow was `0x004556D6`, its corpse `0x43EC7D6D`. Leatherman
+filed the creature's serial as the corpse to look for and matched none, ever.
+And `noshow=True` on a target cursor hides it from the client, so a cursor the
+server refuses sits there invisibly eating every subsequent click. Both are
+fixed; both are the kind of thing that reads as "the script does nothing".
+
+### Commands the harvest runner now answers
+
+| Word | Effect |
+|---|---|
+| `skip` | abandon this rune, recall onwards |
+| `move` | leave this spot, take the next one in the area |
+| `stuck` | **write this spot off** so the route never returns to it |
+
+All three are matched on the whole spoken line, self-only. `stuck` is honoured
+mid-walk; worst case between saying it and acting is one pathfinding leg,
+because `PathFinding.Go` blocks and no Python runs while it does.
+
+---
+
+Everything below is from **2026-08-06** and has not been revised. The layout
+facts, gump maps and hard-won API notes still hold; the version numbers and
+"what is open" sections do not.
 
 ---
 

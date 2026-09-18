@@ -53,6 +53,14 @@ import re
 import time
 
 
+# Printed as the first line at startup, like every other script here. Razor
+# CACHES the loaded script even after the file on disk changes, and this repo
+# has already lost two debugging rounds to a bug that was fixed on disk and not
+# in the folder Razor reads. If this line does not say what you expect, hit
+# Reload in the Scripting tab.
+SCRIPT_VERSION = "2026-09-18.1"
+
+
 # =============================================================================
 # CONFIG - THE THINGS YOU MUST SET
 # =============================================================================
@@ -810,7 +818,7 @@ def one_round(index):
 
 def preflight():
     """Say what will happen, and refuse rather than guess. False to stop."""
-    log("Sandmaker - one stone at a time.", HUE_GOOD)
+    log("Sandmaker v%s - one stone at a time." % SCRIPT_VERSION, HUE_GOOD)
 
     if not WITHDRAW_BUTTON and not WITHDRAW_BUTTON_CONFIRMED:
         log("Neither WITHDRAW_BUTTON nor WITHDRAW_BUTTON_CONFIRMED is set, so "
