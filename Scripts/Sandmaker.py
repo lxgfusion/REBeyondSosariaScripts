@@ -632,41 +632,52 @@ def platform_spot():
 def choose_button():
     """Which button to press for STONE_LABEL. 0 when there is no safe answer.
 
-    The row read off the live window wins. It cannot be stale and it cannot be
-    a button the server did not draw, because it came from what the server
-    drew - and it refuses outright when the string table is short rather than
-    pointing at a neighbouring row.
+    THE CONFIRMED NUMBER WINS. This used to be the other way round and it was
+    wrong: on 2026-09-18 the row search returned 6 for the "Plain" row, the
+    Gump Inspector had said 1, the search was believed, and pressing 6
+    disconnected the client.
 
-    WITHDRAW_BUTTON overrides everything, for when the label stops matching.
-    WITHDRAW_BUTTON_CONFIRMED is the fallback, and a disagreement between it
-    and the window is said out loud: that means the rows have moved.
+    Why the search loses: it infers a button from GEOMETRY - the label's Y, a
+    tolerance, and a preference for whatever sits to its right. Every one of
+    those is a guess about how the window is drawn. A Gump Inspector reading is
+    not an inference at all; it is the id the server received when a human
+    clicked the thing they meant. This project's rule is that shard data comes
+    from source or a live dump, and a live dump is exactly what the Inspector
+    produces.
+
+    The search is still run, as a CROSS-CHECK. A disagreement means one of the
+    two is stale and it is said loudly - but it no longer decides anything.
+
+    With no confirmed number at all, nothing is pressed. A search that has been
+    wrong once does not get to pick a button on a window where the wrong press
+    disconnects you.
     """
     if WITHDRAW_BUTTON:
         return WITHDRAW_BUTTON
 
     found, count = find_stone_row(STONE_LABEL)
-    if found:
-        if WITHDRAW_BUTTON_CONFIRMED and found != WITHDRAW_BUTTON_CONFIRMED:
-            log("CHECK THIS: the %r row reads button %d, but the Gump "
-                "Inspector said %d. The rows have moved. Going with the "
-                "window, which is the one that cannot be stale - set "
-                "WITHDRAW_BUTTON if that is wrong."
-                % (STONE_LABEL, found, WITHDRAW_BUTTON_CONFIRMED), HUE_BAD)
-        if count and count.strip() in ("0", ""):
-            log("The %r row reads %r - there is none left to withdraw."
-                % (STONE_LABEL, count), HUE_BAD)
-            return 0
-        return found
 
-    if WITHDRAW_BUTTON_CONFIRMED:
-        log("Could not find a %r row on the window - falling back to button "
-            "%d, which the Gump Inspector confirmed."
-            % (STONE_LABEL, WITHDRAW_BUTTON_CONFIRMED), HUE_WARN)
-        return WITHDRAW_BUTTON_CONFIRMED
+    if count and count.strip() in ("0", ""):
+        log("The %r row reads %r - there is none left to withdraw."
+            % (STONE_LABEL, count), HUE_BAD)
+        return 0
 
-    log("No %r row on the window and no confirmed button. Nothing pressed."
-        % STONE_LABEL, HUE_BAD)
-    return 0
+    if not WITHDRAW_BUTTON_CONFIRMED:
+        log("No confirmed button for %r, and the row search is not trusted to "
+            "choose one - it returned 6 for this row once when the answer was "
+            "1, and the wrong press disconnects you. Set "
+            "WITHDRAW_BUTTON_CONFIRMED from the Gump Inspector."
+            % STONE_LABEL, HUE_BAD)
+        return 0
+
+    if found and found != WITHDRAW_BUTTON_CONFIRMED:
+        log("the row search says button %d, the Gump Inspector says %d. Using "
+            "%d - the Inspector read it off a real click, the search only "
+            "infers it from where the label sits."
+            % (found, WITHDRAW_BUTTON_CONFIRMED, WITHDRAW_BUTTON_CONFIRMED),
+            HUE_WARN)
+
+    return WITHDRAW_BUTTON_CONFIRMED
 
 
 def find_sand(new_serials):
@@ -828,25 +839,16 @@ def preflight():
     log("  storage 0x%X, crate 0x%X at %d,%d, platform 0x%X at %d,%d"
         % (STONE_STORAGE_SERIAL, BOX_SERIAL, BOX_SPOT[0], BOX_SPOT[1],
            PLATFORM_SERIAL, PLATFORM_SPOT[0], PLATFORM_SPOT[1]))
-    # Open the window and say what the search finds, BEFORE anything is
-    # pressed. A button chosen silently is a button nobody checked.
+    # Open the window and say what will be pressed, BEFORE anything is. A
+    # button chosen silently is a button nobody checked.
     if open_storage() is not None:
         found, count = find_stone_row(STONE_LABEL)
-        if found:
-            log("  the %r row is button %d%s"
-                % (STONE_LABEL, found,
-                   ", %s in stock" % count if count else ""),
-                HUE_GOOD)
-            if WITHDRAW_BUTTON_CONFIRMED and found != WITHDRAW_BUTTON_CONFIRMED:
-                log("  CHECK THIS: the Gump Inspector said %d. The rows have "
-                    "moved." % WITHDRAW_BUTTON_CONFIRMED, HUE_BAD)
-        else:
-            log("  could not read a %r row - will fall back to button %d."
-                % (STONE_LABEL, WITHDRAW_BUTTON_CONFIRMED), HUE_WARN)
-            for i, text in enumerate(gump_lines(STASH_GUMP)[:30]):
-                text = str(text or "").strip()
-                if text:
-                    log("    %2d  %s" % (i, text[:50]), HUE_WARN)
+        log("  pressing button %d for %r%s"
+            % (WITHDRAW_BUTTON or WITHDRAW_BUTTON_CONFIRMED, STONE_LABEL,
+               ", %s in stock" % count if count else ""), HUE_GOOD)
+        if found and found != (WITHDRAW_BUTTON or WITHDRAW_BUTTON_CONFIRMED):
+            log("  (the row search would have said %d - it is a cross-check "
+                "only, and it has been wrong.)" % found, HUE_WARN)
         try:
             Gumps.CloseGump(STASH_GUMP)
         except Exception:

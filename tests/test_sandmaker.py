@@ -138,8 +138,8 @@ def test_the_button_is_read_off_the_window_not_configured(m):
     pre = src[src.index("def preflight("):src.index("def main(")]
     check("preflight still refuses with no answer at all",
           "not WITHDRAW_BUTTON and not WITHDRAW_BUTTON_CONFIRMED" in pre, True)
-    check("but it looks first rather than demanding a paste",
-          "find_stone_row(STONE_LABEL)" in pre, True)
+    check("and it says what it will press before pressing it",
+          "pressing button %d" in pre, True)
     check("and names the diagnostic only as a last resort",
           "diag_storage_gump.py" in pre, True)
 
@@ -181,39 +181,69 @@ def test_the_row_is_found_by_its_label(m):
             m[k] = v
 
 
-def test_the_window_wins_a_disagreement_and_says_so(m):
-    """The search has a guard the static number does not: it refuses on a
-    short table. A number typed in config goes stale the moment somebody
-    reorders the window, and nothing notices."""
+def test_the_confirmed_number_wins_a_disagreement(m):
+    """THE DISCONNECT, 2026-09-18. The row search returned 6 for the "Plain"
+    row, the Gump Inspector had said 1, the search was believed, and pressing 6
+    dropped the client.
+
+    The search infers a button from GEOMETRY - a label's Y, a tolerance, a
+    preference for whatever sits to its right. Every one of those is a guess
+    about how the window is drawn. A Gump Inspector reading is the id the
+    server received when a human clicked the thing they meant: a live dump,
+    which is what this project's rules say to trust.
+
+    So the search is a cross-check now and decides nothing.
+    """
     said = []
     saved = {k: m[k] for k in ("find_stone_row", "log")}
     try:
         m["log"] = lambda text, hue=None: said.append(text)
 
         m["find_stone_row"] = lambda label: (1, "59999")
-        check("agreement is quiet", m["choose_button"](), 1)
+        check("agreement presses the confirmed one", m["choose_button"](), 1)
         check("and says nothing alarming",
-              [s for s in said if "CHECK THIS" in s], [])
+              [s for s in said if "row search says" in s], [])
 
-        # The rows moved.
+        # THE REPORTED FAILURE, exactly.
         del said[:]
-        m["find_stone_row"] = lambda label: (7, "59999")
-        check("the window wins", m["choose_button"](), 7)
-        check("and the disagreement is said out loud",
-              any("CHECK THIS" in s for s in said), True)
+        m["find_stone_row"] = lambda label: (6, "59998")
+        check("the confirmed one still wins", m["choose_button"](),
+              m["WITHDRAW_BUTTON_CONFIRMED"])
+        check("and it is NOT the searched one", m["choose_button"]() == 6,
+              False)
+        check("the disagreement is said out loud",
+              any("row search says" in s for s in said), True)
 
-        # Nothing readable: fall back to what a human confirmed.
+        # Nothing readable: the confirmed number still carries it.
         del said[:]
         m["find_stone_row"] = lambda label: (0, "")
-        check("the confirmed button is the fallback", m["choose_button"](),
-              m["WITHDRAW_BUTTON_CONFIRMED"])
+        check("an unreadable window still presses the confirmed one",
+              m["choose_button"](), m["WITHDRAW_BUTTON_CONFIRMED"])
 
-        # An empty row is not worth pressing.
+        # An empty row is not worth pressing, whatever the button is.
         del said[:]
         m["find_stone_row"] = lambda label: (1, "0")
         check("an empty row is refused", m["choose_button"](), 0)
         check("saying there is none left",
               any("none left" in s for s in said), True)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_nothing_is_pressed_without_a_confirmed_number(m):
+    """A search that has been wrong once does not get to pick a button on a
+    window where the wrong press disconnects you."""
+    said = []
+    saved = {k: m[k] for k in ("find_stone_row", "log",
+                               "WITHDRAW_BUTTON_CONFIRMED")}
+    try:
+        m["log"] = lambda text, hue=None: said.append(text)
+        m["WITHDRAW_BUTTON_CONFIRMED"] = 0
+        m["find_stone_row"] = lambda label: (6, "59998")
+        check("a found row is not enough on its own", m["choose_button"](), 0)
+        check("and it says why",
+              any("not trusted to choose" in s for s in said), True)
     finally:
         for k, v in saved.items():
             m[k] = v
