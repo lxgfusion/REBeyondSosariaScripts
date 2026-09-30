@@ -242,6 +242,20 @@ of the three, and file size alone will not tell two config blocks apart.
   label**, and the Stone Storage draws its rows in two columns. A search that
   looks right of a label takes the next column's button — that is how Plain
   (1) became Gold (6). Confirmed from a live dump, 2026-09-18.
+- **`Gumps.HasGump` / `AllGumpIDs` mean "Razor has SEEN this id", not "the
+  window is on screen."** Both just test a key in `m_incomingData`
+  (`Razor/RazorEnhanced/Gumps.cs`). A key is removed when a script presses
+  that gump and when the client sends a response (a right-click close) — but
+  **not** when the SERVER closes or replaces one: `ExtendedPacket` in
+  `Razor/Network/Handlers.cs` reads the close packet's dialog id with
+  `ReadUInt16()` where the packet carries two 32-bit fields, so it deletes a
+  garbage key and the real entry survives the session. Verified at `v1.0.0.12`.
+  Consequences: a cache guarded by `has_gump(cached)` can never expire, a
+  `WaitForGump` on a ghost returns True at once, and `GetLineList` happily
+  returns the ghost's stored text. Re-find a window by its CONTENT rather than
+  trusting the id, and when several candidates carry the same signature, say so
+  rather than picking one. Under investigation for the order runner's stacked
+  windows — `Scripts/diag_gump_watch.py` records what appears and never goes.
 - **Gump paging may be server-side.** A gump whose pages arrive as fresh gumps
   (same gump id, new sequence) has to be walked with real clicks; only
   `{ page N }` markers in the raw layout mean the pages are already in hand. Any
