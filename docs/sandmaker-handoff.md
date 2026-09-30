@@ -5,20 +5,60 @@ gotchas and loads automatically; this file is only the state of *this* task.
 
 ## The job
 
-Convert Plain granite to sand, one stone at a time:
+Convert Plain granite to sand in batches of 50, from one spot:
 
 ```
-withdraw ONE Plain granite from the Stone Storage
-walk to the Granite Crate and drop it in      (conversion is instant)
-walk to the platform and pick up the sand
+50 times:  withdraw ONE Plain granite from the Stone Storage
+           drop it in the converter            (conversion is instant)
+say "[grab"                                    (the shard collects the sand)
+deposit the sand in the Reagent Keys           (its context menu, not a drag)
+repeat until stopped, or the Plain granite runs out
 ```
+
+**The character stands still.** The user found one spot that can both reach
+the converter and collect with `[grab`; `STAND_STILL = True` makes anything
+out of reach a refusal with the distance in it, rather than a walk that leaves
+that spot. `STAND_STILL = False` restores the old walking behaviour.
+
+**The stones go in one at a time** — the converter does not take a stack.
+
+### The Reagent Keys — `Container: No`
+
+```
+Name "Reagent Keys", 0x404D69CE, ItemID 0x18DE, hue 0x0021, Blessed, 1 stone
+Container: NO      Movable: Yes      in the backpack
+```
+
+That one line decided the design: **nothing can be dragged into it.** The sand
+goes in through the key's **context menu** — `Refill from stock`, the same
+entry `harvest_runner.py` has emptied packs into for months. Exact label match
+first and always honoured, guarded substring after, `CONTEXT_NEVER` refusing
+anything that spends gold, and the real label sent back to `ContextReply`.
+
+**That entry deposits every reagent in the pack, not only the sand.** Said in
+the config, because it is the one surprise in the flow.
+
+### What it is verified by
+
+| Step | Proof it worked |
+|---|---|
+| withdraw | granite arrives in the pack (re-opened, not a stale snapshot) |
+| drop | the stone left the pack, or was consumed on arrival |
+| `[grab` | the sand count in the pack **stops rising** — not "reaches 50", which would burn the whole timeout on every batch |
+| deposit | the pack is counted again; nothing moved means **stop**, rather than piling another 50 on top |
+
+If `[grab` picks up nothing, sand still on the ground within reach is dragged
+in as a fallback, and being out of reach is reported rather than walked to.
+
+Timing: a withdraw re-opens the storage window every time, so a stone costs
+roughly four seconds and a batch of 50 about three and a half minutes.
 
 | | |
 |---|---|
 | Repo | `Scripts/Sandmaker.py` |
 | Live | `E:\uoclients\RazorEnhanced\Scripts\sandmaker.py` (lower-case) |
-| Version | `2026-09-18.2` |
-| Tests | `tests/test_sandmaker.py` — 86 checks; `tests/test_diag_storage_gump.py` — 20 |
+| Version | `2026-09-30.1` |
+| Tests | `tests/test_sandmaker.py` — 146 checks; `tests/test_diag_storage_gump.py` — 20 |
 | Diagnostic | `Scripts/diag_storage_gump.py`, live as `diag_storage_gump.py` since 2026-09-18 |
 
 ## The disconnect — CAUSE FOUND, fix untested in game
@@ -202,11 +242,17 @@ items every run** and must never be config. Only containers are stable.
 
 ## Next steps, in order
 
-1. **Test one round** with `RUNS = 1`. Check the journal says
-   `Sandmaker v2026-09-18.3` first — Razor caches scripts; Reload if not.
-   Expect `Withdrawal Amount reads 1.` and `withdrawing 1 Plain (button 1)`.
-2. Only then raise `RUNS`.
+1. **Test one small batch first.** Set `BATCH_SIZE = 3` and `BATCHES = 1`,
+   stand on the spot, and run it. The journal should say
+   `Sandmaker v2026-09-30.1` first — Razor caches scripts, so Reload in the
+   Scripting tab if it does not — then `Withdrawal Amount reads 1.`,
+   `withdrawing 1 Plain (button 1)` three times, the grab, and
+   `stored 3 sand.`
+2. Then set `BATCH_SIZE = 50`, `BATCHES = 0` and leave it running.
 3. Delete the stale `diag_storage_gump,py.py` from the live folder.
+
+**Still untested in game:** everything from `2026-09-18.3` onwards — the
+no-text-entry press has never actually run, and the batch flow is new.
 
 ## The rest of the script
 

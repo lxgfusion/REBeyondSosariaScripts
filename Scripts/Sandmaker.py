@@ -7,11 +7,20 @@ freeshard.
 
 THE ROUND
 ---------
-    withdraw ONE Plain granite from the Stone Storage
-    walk to the converter box and drop it in      (the conversion is instant)
-    walk to wherever the sand came out and pick it up
+    BATCH_SIZE times:
+        withdraw ONE Plain granite from the Stone Storage
+        drop it in the converter            (the conversion is instant)
+    say "[grab"                             (the shard picks the sand up)
+    put the sand in the Reagent Keys        (its context menu, not a drag)
 
-Repeated RUNS times.
+Repeated until you stop it, or the Plain granite runs out.
+
+YOU STAND STILL. The spot that can reach the converter and still collect with
+"[grab" was found by hand, and the script does not wander off it: STAND_STILL
+refuses rather than walks when something is out of reach. Set it False to get
+the old walking behaviour back.
+
+The stones go in ONE AT A TIME - the converter does not take a stack.
 
 WHAT THIS IS NOT
 ----------------
@@ -58,7 +67,7 @@ import time
 # has already lost two debugging rounds to a bug that was fixed on disk and not
 # in the folder Razor reads. If this line does not say what you expect, hit
 # Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-09-18.3"
+SCRIPT_VERSION = "2026-09-30.1"
 
 
 # =============================================================================
@@ -134,9 +143,63 @@ PLATFORM_SPOT = (2073, 2504)
 # so wide that something dropped elsewhere in the room qualifies.
 SAND_NEAR_PLATFORM = 3
 
-# How many stones to convert. 0 means "keep going until the storage runs out
-# or something goes wrong".
-RUNS = 1
+# HOW MANY STONES PER BATCH, and how many batches.
+#
+# A batch is: convert BATCH_SIZE stones one at a time, then one "[grab", then
+# one deposit into the Reagent Keys. BATCHES = 0 keeps going until you stop
+# the script or the Plain granite runs out.
+BATCH_SIZE = 50
+BATCHES = 0
+
+# A progress line every N stones, so a batch of 50 is not silent for minutes.
+# 0 turns it off.
+PROGRESS_EVERY = 10
+
+# WHAT PICKS THE SAND UP. The shard command, said in chat. The sand lands on
+# the platform out of drag reach from the spot that can feed the converter,
+# which is why this exists rather than a walk.
+GRAB_PHRASE = "[grab"
+SAY_HUE = 90                # only used by the (colour, msg) form of ChatSay
+
+# How long to wait for the pile to arrive, and how it is judged finished: the
+# count in the pack has to STOP RISING, not reach any particular number.
+GRAB_WAIT_MS = 15000
+GRAB_POLL_MS = 400
+GRAB_STEADY_POLLS = 3
+
+# THE REAGENT KEYS - where the sand is stored. From the Item Inspector,
+# 2026-09-30:
+#     Name "Reagent Keys", 0x404D69CE, ItemID 0x18DE, hue 0x0021
+#     Blessed, Weight 1 Stone, in the backpack
+#     Container: NO
+#
+# CONTAINER: NO IS THE IMPORTANT LINE. Nothing can be dragged into it, so the
+# sand goes in through its CONTEXT MENU - the same "Refill from stock" entry
+# every storage key on this shard uses, and the one harvest_runner.py has been
+# emptying packs with for months.
+#
+# THAT ENTRY DEPOSITS EVERY REAGENT IN THE PACK, not only the sand. If you are
+# carrying reagents you want to keep, take them out first.
+REAGENT_KEY_SERIAL = 0x404D69CE
+REAGENT_KEY_ID = 0x18DE
+REAGENT_KEY_HUE = 0x0021
+REAGENT_KEY_NAMES = ["reagent keys", "reagent key"]
+REAGENT_KEY_CONTEXT = ["Refill from stock"]
+
+# Menu entries that are never worth clicking by accident. An EXACT match on
+# REAGENT_KEY_CONTEXT is always honoured; only a substring match is checked
+# against this. See CLAUDE.md - a context menu carries Buy, Sell and Bribe
+# right next to the entry you want.
+CONTEXT_NEVER = ["buy", "sell", "bribe", "open bankbox", "train "]
+CONTEXT_TIMEOUT_MS = 10000
+
+# How long to let a deposit settle before counting what is left.
+STORE_SETTLE_MS = 1200
+
+# STAND STILL. True means the script never walks: anything out of reach is
+# reported and the run stops, rather than the character wandering off the one
+# spot that works. False restores the old walk-to-everything behaviour.
+STAND_STILL = True
 
 
 # =============================================================================
@@ -798,84 +861,309 @@ def find_sand(new_serials):
     return None
 
 
-def one_round(index):
-    """Withdraw, convert, collect. True if a piece of sand came back."""
-    log("--- stone %d ---" % index, HUE_GOOD)
+def in_reach(item, what, limit=REACH_DISTANCE):
+    """Is `item` close enough to drag to? Says how far when it is not.
 
-    granite = withdraw_one()
-    if granite is None:
+    With STAND_STILL the answer is never "walk to it": the spot was chosen by
+    hand because it can feed the converter AND collect with "[grab", and a
+    script that wanders off it silently stops being able to do either.
+    """
+    if item is None:
+        log("%s is not in range at all." % what, HUE_BAD)
         return False
+    gap = distance_to(item)
+    if gap <= limit:
+        return True
+    if not STAND_STILL:
+        return walk_to_item(item, what)
+    log("%s is %d tiles away and STAND_STILL is on, so nothing will walk to "
+        "it. Stand where you can reach it." % (what, gap), HUE_BAD)
+    return False
 
-    box = Items.FindBySerial(BOX_SERIAL)
-    if box is None:
-        log("Converter box 0x%X not found." % BOX_SERIAL, HUE_BAD)
-        return False
-    if not walk_to_item(box, "the converter box"):
-        return False
 
-    # Snapshot the ground BEFORE the drop. The sand is whatever is on it
-    # afterwards that was not on it before - which needs no graphic, and is
-    # why SAND_ID being unknown costs nothing.
-    ground_before = ground_serials(SAND_RANGE)
+def say(phrase):
+    """Say something in game. False if it could not be said at all.
 
-    # ONE move. The recording had two because the first was out of range; the
-    # walk above is the fix for that, not a second drag.
-    if not move_one(granite, BOX_SERIAL, "the granite"):
-        return False
-    log("granite is in the box - the conversion is instant.", HUE_GOOD)
-
-    # To the platform. Two tiles from the crate, so this is a short walk - but
-    # the sand still has to be in REACH to be dragged, not merely in sight.
-    spot = platform_spot()
-    if not walk_to(spot[0], spot[1]):
-        log("Could not reach the platform at %d,%d." % spot, HUE_BAD)
-        return False
-
-    deadline = time.time() + SAND_WAIT_MS / 1000.0
-    sand = None
-    while time.time() < deadline:
-        Misc.Pause(WALK_POLL_MS)
-        new = [s for s in ground_serials(SAND_RANGE) if s not in ground_before]
-        if new:
-            sand = find_sand(new)
-            if sand is not None:
-                break
-
-    if sand is None:
-        log("Nothing new appeared within %d tiles of the platform at %d,%d in "
-            "%ds. Raise SAND_NEAR_PLATFORM if the sand lands further off than "
-            "that, or SAND_RANGE if it is out of sight altogether."
-            % (SAND_NEAR_PLATFORM, spot[0], spot[1], SAND_WAIT_MS / 1000),
-            HUE_BAD)
-        return False
-
+    ChatSay takes (msg) on every build from 0.8.2.245 to 1.0.0.14 and also
+    accepts (colour, msg); both are tried rather than one being picked. See
+    CLAUDE.md - a signature that moves is how a working script just stops.
+    """
     try:
-        log("sand is %s, graphic 0x%04X, hue 0x%04X at %d,%d"
-            % (item_name(sand) or "unnamed", int(sand.ItemID), int(sand.Hue),
-               sand.Position.X, sand.Position.Y), HUE_GOOD)
-        if not SAND_ID:
-            log("  set SAND_ID = 0x%04X to find it by graphic next time."
-                % int(sand.ItemID), HUE_INFO)
+        Player.ChatSay(phrase)
+        return True
+    except TypeError:
+        pass
+    except Exception as err:
+        log("could not say %r: %r" % (phrase, err), HUE_BAD)
+        return False
+    try:
+        Player.ChatSay(SAY_HUE, phrase)
+        return True
+    except Exception as err:
+        log("could not say %r: %r" % (phrase, err), HUE_BAD)
+        return False
+
+
+def sand_in_pack():
+    """(total amount, [stacks]) of sand at the top level of the pack.
+
+    RE-OPENS THE PACK FIRST. Contains is a snapshot taken when the container
+    was opened, so a stale one reads as "the grab picked nothing up" - which
+    is exactly the false negative that aborted the order runner after one
+    order, every time. See CLAUDE.md.
+    """
+    refresh_pack()
+    pack = Player.Backpack
+    if pack is None:
+        return 0, []
+    total, stacks = 0, []
+    try:
+        for item in list(getattr(pack, "Contains", None) or []):
+            try:
+                if int(item.ItemID) != SAND_ID:
+                    continue
+                if SAND_HUE >= 0 and int(item.Hue) != SAND_HUE:
+                    continue
+            except Exception:
+                continue
+            stacks.append(item)
+            try:
+                total += int(item.Amount or 1)
+            except Exception:
+                total += 1
     except Exception:
         pass
+    return total, stacks
 
-    if not walk_to_item(sand, "the sand"):
-        return False
+
+def grab_sand(expected):
+    """Say the grab phrase and wait for the sand to reach the pack.
+
+    Returns how many arrived. The wait ends when the count STOPS RISING, not
+    when it reaches `expected`: the shard collects the pile in its own time,
+    and waiting for a number that never comes would burn the whole timeout on
+    every batch.
+    """
+    before, _ = sand_in_pack()
+    log("saying %r for the sand (%d already in the pack)"
+        % (GRAB_PHRASE, before))
+    if not say(GRAB_PHRASE):
+        return 0
+
+    deadline = time.time() + GRAB_WAIT_MS / 1000.0
+    best, steady = before, 0
+    while time.time() < deadline:
+        Misc.Pause(GRAB_POLL_MS)
+        now, _ = sand_in_pack()
+        if now > best:
+            best, steady = now, 0
+            continue
+        if now >= best and best > before:
+            steady += 1
+            if steady >= GRAB_STEADY_POLLS:
+                break
+
+    got = best - before
+    if got <= 0:
+        log("Nothing was picked up by %r. Is this the spot where it works?"
+            % GRAB_PHRASE, HUE_BAD)
+        return 0
+    log("picked up %d sand%s." % (got, "" if got >= expected
+                                  else " - %d were converted" % expected),
+        HUE_GOOD if got >= expected else HUE_WARN)
+    return got
+
+
+def collect_sand_nearby(limit):
+    """Fallback: drag sand off the ground into the pack. Returns how many.
+
+    Only used when the grab picked NOTHING up, and only for sand that is
+    actually in reach - from the feeding spot the platform usually is not, and
+    saying so is more use than walking off it.
+    """
+    picked = 0
+    pack = Player.Backpack
+    if pack is None:
+        return 0
+    for _ in range(max(0, int(limit))):
+        sand = find_sand(ground_serials(SAND_RANGE))
+        if sand is None:
+            break
+        if distance_to(sand) > REACH_DISTANCE:
+            log("  sand is on the ground %d tiles away - out of drag reach "
+                "from here." % distance_to(sand), HUE_WARN)
+            break
+        if not move_one(sand, int(pack.Serial), "the sand"):
+            break
+        picked += 1
+    if picked:
+        log("  dragged %d sand off the ground." % picked, HUE_GOOD)
+    return picked
+
+
+def find_reagent_key():
+    """The Reagent Keys. By serial first, then by graphic in the pack.
+
+    The serial is exact and the key does not move; the graphic is the fallback
+    for the day it is replaced. It is NOT a container - Container: No in the
+    Item Inspector - so it is only ever looked up to be right-clicked.
+    """
+    item = Items.FindBySerial(REAGENT_KEY_SERIAL)
+    if item is not None:
+        return item
 
     pack = Player.Backpack
     if pack is None:
-        log("No backpack to put the sand in.", HUE_BAD)
+        return None
+    wanted = [n.strip().lower() for n in REAGENT_KEY_NAMES if n.strip()]
+    for candidate in list(getattr(pack, "Contains", None) or []):
+        try:
+            if int(candidate.ItemID) != REAGENT_KEY_ID:
+                continue
+            if REAGENT_KEY_HUE >= 0 and int(candidate.Hue) != REAGENT_KEY_HUE:
+                continue
+        except Exception:
+            continue
+        name = item_name(candidate).lower()
+        if not wanted or any(w in name for w in wanted):
+            log("found the Reagent Keys by graphic, not by serial - 0x%X has "
+                "been replaced." % REAGENT_KEY_SERIAL, HUE_WARN)
+            return candidate
+    return None
+
+
+def context_is_blocked(label):
+    low = (label or "").lower()
+    for banned in CONTEXT_NEVER:
+        if banned.strip().lower() in low:
+            return True
+    return False
+
+
+def wait_context(entity):
+    try:
+        return Misc.WaitForContext(entity, CONTEXT_TIMEOUT_MS, False)
+    except TypeError:
+        return Misc.WaitForContext(entity, CONTEXT_TIMEOUT_MS)
+
+
+def context_select(entity, wanted, what):
+    """Open a context menu and pick the first configured entry. True if sent.
+
+    An EXACT label match is taken first and always honoured - it was
+    configured verbatim, so it was meant. Only then is a substring tried, and
+    that one refuses anything on CONTEXT_NEVER. The REAL label goes back to
+    ContextReply, never the search string. See CLAUDE.md.
+    """
+    try:
+        entries = wait_context(entity) or []
+    except Exception as err:
+        log("%s gave no context menu: %r" % (what, err), HUE_BAD)
         return False
-    if not move_one(sand, int(pack.Serial), "the sand"):
+    labels = []
+    for entry in entries:
+        text = getattr(entry, "Entry", None)
+        labels.append(text if text is not None else str(entry))
+    if not labels:
+        log("%s has no context menu." % what, HUE_BAD)
         return False
 
-    log("sand collected.", HUE_GOOD)
-    return True
+    def reply(label):
+        Misc.Pause(100)
+        Misc.ContextReply(entity, label)
+        Misc.Pause(600)
+        return True
+
+    for want in wanted:
+        target = str(want or "").strip().lower()
+        for label in labels:
+            if (label or "").strip().lower() == target:
+                return reply(label)
+    for want in wanted:
+        target = str(want or "").strip().lower()
+        for label in labels:
+            if target and target in (label or "").lower():
+                if context_is_blocked(label):
+                    log("  refusing %r - it matches CONTEXT_NEVER." % label,
+                        HUE_WARN)
+                    continue
+                return reply(label)
+
+    log("%s offers no entry matching %s - it has: %s"
+        % (what, wanted, " | ".join(labels)), HUE_BAD)
+    return False
+
+
+def store_sand():
+    """Put the pack's sand in the Reagent Keys. (stored, keep_going).
+
+    Verified by counting the pack afterwards. A deposit that quietly does
+    nothing would otherwise leave the sand there and the next batch would pile
+    another 50 on top of it.
+    """
+    total, _ = sand_in_pack()
+    if not total:
+        log("no sand in the pack to store.", HUE_WARN)
+        return 0, True
+
+    key = find_reagent_key()
+    if key is None:
+        log("Reagent Keys 0x%X (graphic 0x%04X) are not in the pack - nowhere "
+            "to put %d sand." % (REAGENT_KEY_SERIAL, REAGENT_KEY_ID, total),
+            HUE_BAD)
+        return 0, False
+
+    log("storing %d sand in the Reagent Keys." % total)
+    if not context_select(key, REAGENT_KEY_CONTEXT, "the Reagent Keys"):
+        return 0, False
+    Misc.Pause(STORE_SETTLE_MS)
+
+    left, _ = sand_in_pack()
+    stored = total - left
+    if left == 0:
+        log("stored %d sand." % stored, HUE_GOOD)
+        return stored, True
+    if stored > 0:
+        log("stored %d, but %d sand is still in the pack. Carrying on."
+            % (stored, left), HUE_WARN)
+        return stored, True
+    log("The Reagent Keys took NOTHING - %d sand is still in the pack. Stopping "
+        "rather than converting another batch on top of it." % left, HUE_BAD)
+    return 0, False
+
+
+def run_batch(index):
+    """Convert up to BATCH_SIZE stones, one at a time. (converted, keep_going).
+
+    keep_going is False when the withdraw failed - out of Plain granite, or
+    something that needs a human. The sand already made is still collected and
+    stored before the script stops.
+    """
+    log("--- batch %d: up to %d stone(s) ---" % (index, BATCH_SIZE), HUE_GOOD)
+    converted = 0
+    for _ in range(max(1, int(BATCH_SIZE))):
+        granite = withdraw_one()
+        if granite is None:
+            log("stopped %d of %d into the batch - the line above says why."
+                % (converted, BATCH_SIZE), HUE_WARN)
+            return converted, False
+
+        box = Items.FindBySerial(BOX_SERIAL)
+        if not in_reach(box, "the converter 0x%X" % BOX_SERIAL):
+            return converted, False
+        if not move_one(granite, BOX_SERIAL, "the granite"):
+            return converted, False
+
+        converted += 1
+        if PROGRESS_EVERY and converted % PROGRESS_EVERY == 0:
+            log("  %d of %d converted" % (converted, BATCH_SIZE))
+    return converted, True
 
 
 def preflight():
     """Say what will happen, and refuse rather than guess. False to stop."""
-    log("Sandmaker v%s - one stone at a time." % SCRIPT_VERSION, HUE_GOOD)
+    log("Sandmaker v%s - %d at a time, then %r, then the Reagent Keys."
+        % (SCRIPT_VERSION, BATCH_SIZE, GRAB_PHRASE), HUE_GOOD)
 
     if not WITHDRAW_BUTTON and not WITHDRAW_BUTTON_CONFIRMED:
         log("Neither WITHDRAW_BUTTON nor WITHDRAW_BUTTON_CONFIRMED is set, so "
@@ -893,17 +1181,29 @@ def preflight():
     # you are standing somewhere else, and saying where it is turns that from
     # a puzzle into a walk.
     for serial, what, spot in ((STONE_STORAGE_SERIAL, "Stone Storage", None),
-                               (BOX_SERIAL, "Granite Crate", BOX_SPOT),
-                               (PLATFORM_SERIAL, "platform", PLATFORM_SPOT)):
+                               (BOX_SERIAL, "Granite Crate", BOX_SPOT)):
         if Items.FindBySerial(serial) is not None:
             continue
         where = " It is at %d,%d." % spot if spot else ""
         log("%s 0x%X is not in range.%s" % (what, serial, where), HUE_BAD)
         return False
 
-    log("  storage 0x%X, crate 0x%X at %d,%d, platform 0x%X at %d,%d"
+    # The converter has to be in DRAG reach, not merely in sight, and with
+    # STAND_STILL nothing is going to close the gap later.
+    if not in_reach(Items.FindBySerial(BOX_SERIAL),
+                    "the converter 0x%X" % BOX_SERIAL):
+        return False
+
+    key = find_reagent_key()
+    if key is None:
+        log("The Reagent Keys 0x%X are not in the pack, so there is nowhere to "
+            "put the sand." % REAGENT_KEY_SERIAL, HUE_BAD)
+        return False
+
+    log("  storage 0x%X, converter 0x%X at %d,%d, keys 0x%X"
         % (STONE_STORAGE_SERIAL, BOX_SERIAL, BOX_SPOT[0], BOX_SPOT[1],
-           PLATFORM_SERIAL, PLATFORM_SPOT[0], PLATFORM_SPOT[1]))
+           int(key.Serial)))
+
     # Open the window and say what will be pressed, BEFORE anything is. A
     # button chosen silently is a button nobody checked.
     if open_storage() is not None:
@@ -920,16 +1220,12 @@ def preflight():
             pass
         Misc.Pause(SETTLE_MS)
 
-    log("  %d at a time, %s run(s)%s"
-        % (WITHDRAW_AMOUNT, RUNS or "unlimited",
-           ", button %d forced" % WITHDRAW_BUTTON if WITHDRAW_BUTTON else ""))
-    if not SAND_ID:
-        log("  SAND_ID is unset - the sand is found by diffing the ground, "
-            "and the graphic is printed on the first success.", HUE_INFO)
-    else:
-        log("  sand is 0x%04X%s, on the platform, and new since the drop."
-            % (SAND_ID,
-               " hue 0x%04X" % SAND_HUE if SAND_HUE >= 0 else " (any hue)"))
+    log("  %s batch(es) of %d, %d stone per withdraw, %s"
+        % (BATCHES or "unlimited", BATCH_SIZE, WITHDRAW_AMOUNT,
+           "standing still" if STAND_STILL else "walking to what it needs"))
+    log("  sand is 0x%04X%s; %r collects it and the Reagent Keys store it."
+        % (SAND_ID, " hue 0x%04X" % SAND_HUE if SAND_HUE >= 0 else " (any hue)",
+           GRAB_PHRASE))
     return True
 
 
@@ -937,19 +1233,34 @@ def main():
     if not preflight():
         return
 
-    made = 0
-    index = 0
+    batch = made = stored = 0
     while True:
-        index += 1
-        if RUNS and index > RUNS:
+        batch += 1
+        if BATCHES and batch > BATCHES:
+            log("%d batch(es) done, which is BATCHES." % (batch - 1), HUE_GOOD)
             break
-        if not one_round(index):
-            log("Stopping after %d stone(s) - the message above says why."
-                % made, HUE_WARN)
-            break
-        made += 1
 
-    log("%d stone(s) converted." % made,
+        converted, keep_going = run_batch(batch)
+        made += converted
+
+        # Collect and store WHATEVER was made, even when the batch stopped
+        # early - the sand is on the floor either way, and leaving it there is
+        # how a run ends with 40 stones' worth of sand nobody picked up.
+        if converted:
+            got = grab_sand(converted)
+            if not got:
+                got = collect_sand_nearby(converted)
+            if got or sand_in_pack()[0]:
+                put, ok = store_sand()
+                stored += put
+                if not ok:
+                    break
+
+        if not keep_going:
+            break
+
+    log("%d stone(s) converted, %d sand stored, in %d batch(es)."
+        % (made, stored, batch if made else 0),
         HUE_GOOD if made else HUE_WARN)
     # Nothing is left open. A stray stash window is one more thing for the
     # next WaitForGump to answer by mistake.

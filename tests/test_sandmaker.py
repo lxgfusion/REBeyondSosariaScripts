@@ -28,6 +28,19 @@ def check(label, got, want):
     _checks.append((label, got, want, got == want))
 
 
+def call(label, fn, want, *args):
+    """check() for a real call: an exception is a failure, not a traceback.
+
+    A mutation that breaks the function under test would otherwise take the
+    whole suite down with it and hide every check after this one.
+    """
+    try:
+        got = fn(*args)
+    except Exception as err:
+        got = "raised %s: %s" % (type(err).__name__, err)
+    check(label, got, want)
+
+
 class _Stub(object):
     def __getattr__(self, name):
         return lambda *a, **k: None
@@ -486,28 +499,58 @@ def test_only_one_press_goes_to_that_window(m):
 
 
 def test_the_stone_moves_once(m):
-    """The recording dragged twice because the first was out of range. The fix
-    is the walk, not a second drag."""
+    """The recording dragged twice because the first was out of range. One
+    drag, and the reach is CHECKED rather than closed by walking - the spot
+    that feeds the converter and still collects with "[grab" was found by
+    hand, and wandering off it breaks both halves."""
     with open(SCRIPT, encoding="utf-8") as fh:
         src = fh.read()
-    body = src[src.index("def one_round("):src.index("def preflight(")]
-    check("one drag for the granite",
-          body.count('move_one(granite'), 1)
-    check("after walking to the box",
-          body.index("walk_to_item(box") < body.index("move_one(granite"),
-          True)
-    check("and one for the sand", body.count("move_one(sand"), 1)
-    check("after walking to it",
-          body.index("walk_to_item(sand") < body.index("move_one(sand"), True)
+    body = src[src.index("def run_batch("):src.index("def preflight(")]
+    check("one drag for the granite", body.count("move_one(granite"), 1)
+    reached = "in_reach(box" in body
+    check("reach is checked first", reached, True)
+    check("and that check comes before the drag",
+          reached and body.index("in_reach(box")
+          < body.index("move_one(granite"), True)
+    check("the batch does not walk anywhere",
+          "walk_to" in body, False)
 
-    # And to the PLATFORM before looking for it at all. The sand has to be in
-    # reach to be dragged, not merely in sight - and the crate is two tiles
-    # away, which is close enough to see it and too far to pick it up.
-    walked = "if not walk_to(spot[0], spot[1]):" in body
-    check("it walks to the platform before searching", walked, True)
-    check("and that walk comes before the search",
-          walked and body.index("if not walk_to(spot[0], spot[1]):")
-          < body.index("find_sand(new)"), True)
+
+def test_standing_still_refuses_rather_than_walks(m):
+    """STAND_STILL is the whole point of the new flow. Out of reach must be a
+    refusal with the distance in it, not a walk."""
+    said = []
+    saved = {k: m[k] for k in ("log", "distance_to", "walk_to_item",
+                               "STAND_STILL")}
+    walked = []
+    try:
+        m["log"] = lambda text, hue=None: said.append(text)
+        m["walk_to_item"] = lambda item, what: walked.append(what) or True
+
+        m["distance_to"] = lambda item: 1
+        check("in reach is in reach", m["in_reach"](object(), "the crate"),
+              True)
+        check("and nothing walked", walked, [])
+
+        m["distance_to"] = lambda item: 9
+        check("out of reach is refused", m["in_reach"](object(), "the crate"),
+              False)
+        check("still nothing walked", walked, [])
+        check("and the distance is in the message",
+              any("9 tiles away" in t for t in said), True)
+
+        check("a missing item is refused too",
+              m["in_reach"](None, "the crate"), False)
+
+        # The old behaviour is still there for whoever wants it back.
+        m["STAND_STILL"] = False
+        m["distance_to"] = lambda item: 9
+        check("STAND_STILL off walks again",
+              m["in_reach"](object(), "the crate"), True)
+        check("and it did walk", walked, ["the crate"])
+    finally:
+        for k, v in saved.items():
+            m[k] = v
 
 
 def test_nothing_replays_keystrokes(m):
@@ -670,14 +713,233 @@ def test_the_platform_spot_falls_back_to_the_inspected_tile(m):
         m["Items"] = saved
 
 
-def test_the_learned_graphic_is_reported(m):
-    """So SAND_ID can be filled in, the same way every other unknown in this
-    repo has been."""
+def test_the_sand_is_never_dragged_into_the_reagent_keys(m):
+    """THE ITEM INSPECTOR SAYS Container: No. Nothing can be dragged into the
+    Reagent Keys, so the deposit goes through the context menu every storage
+    key on this shard uses. A drag would look like it worked and quietly do
+    nothing."""
     with open(SCRIPT, encoding="utf-8") as fh:
         src = fh.read()
-    body = src[src.index("def one_round("):src.index("def preflight(")]
-    check("the graphic is printed", "sand.ItemID" in body, True)
-    check("with the line to paste", "set SAND_ID" in body, True)
+    code = src[src.index("# HELPERS"):]
+    check("nothing is moved into the key by serial",
+          "move_one(sand, REAGENT_KEY_SERIAL" in code
+          or "Items.Move(sand, REAGENT_KEY_SERIAL" in code, False)
+    check("nor into the key item",
+          "move_one(stack, key" in code or "Items.Move(stack, key" in code,
+          False)
+    body = code[code.index("def store_sand("):code.index("def run_batch(")]
+    check("the deposit is a context reply",
+          "context_select(key, REAGENT_KEY_CONTEXT" in body, True)
+    check("and the sand still only ever moves INTO the pack",
+          "move_one(sand, int(pack.Serial)" in code, True)
+
+
+def test_counting_the_sand_reopens_the_pack_first(m):
+    """Contains is a SNAPSHOT taken when the container was opened. A stale one
+    reads as "the grab picked nothing up", which is the same false negative
+    that aborted the order runner after one order, every time."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def sand_in_pack("):src.index("def grab_sand(")]
+    # The CODE, not the docstring - which mentions Contains while explaining
+    # why the re-open is there, and would satisfy a naive ordering check.
+    code = re.sub(r'"""[\s\S]*?"""', "", body)
+    refreshed = "refresh_pack()" in code
+    check("the pack is re-opened", refreshed, True)
+    check("before anything is counted",
+          refreshed and "Contains" in code
+          and code.index("refresh_pack()") < code.index("Contains"), True)
+
+
+def test_the_context_entry_is_matched_exactly_first(m):
+    """A key's menu sits next to Buy, Sell and Bribe. Exact first, always
+    honoured; substring only after, and never onto CONTEXT_NEVER."""
+    sent = []
+
+    class Entry(object):
+        def __init__(self, text):
+            self.Entry = text
+
+    def run(menu, wanted):
+        del sent[:]
+        saved = {k: m[k] for k in ("wait_context", "Misc", "log")}
+        try:
+            m["log"] = lambda *a, **k: None
+            m["wait_context"] = lambda entity: [Entry(t) for t in menu]
+            m["Misc"] = type("M", (), {
+                "Pause": staticmethod(lambda ms: None),
+                "ContextReply": staticmethod(
+                    lambda entity, label: sent.append(label))})()
+            return m["context_select"](object(), wanted, "the keys")
+        finally:
+            for k, v in saved.items():
+                m[k] = v
+
+    ok = run(["Buy", "Sell", "Refill from stock", "Rename"],
+             ["Refill from stock"])
+    check("the exact entry is taken", (ok, sent), (True, ["Refill from stock"]))
+
+    # The REAL label goes back, not the search string - they differ in case
+    # and spacing more often than not.
+    ok = run(["Buy", "  refill from Stock  "], ["Refill from stock"])
+    check("and the real label is what is sent",
+          (ok, sent), (True, ["  refill from Stock  "]))
+
+    # THE ORDER MATTERS. Substring-first would take "Refill from stockpile"
+    # here, because it comes first in the menu and contains the search string.
+    ok = run(["Refill from stockpile", "Refill from stock"],
+             ["Refill from stock"])
+    check("exact wins over an earlier substring match",
+          (ok, sent), (True, ["Refill from stock"]))
+
+    ok = run(["Buy", "Sell", "Bribe"], ["Refill"])
+    check("a menu without it is refused", ok, False)
+    check("and nothing was clicked", sent, [])
+
+    # Substring matching must not wander onto something that costs gold.
+    ok = run(["Buy something"], ["buy"])
+    check("CONTEXT_NEVER blocks a substring match", ok, False)
+    check("nothing clicked there either", sent, [])
+
+    ok = run([], ["Refill from stock"])
+    check("no menu at all is refused", ok, False)
+
+
+def test_the_grab_waits_for_the_pile_to_stop_growing(m):
+    """The shard collects in its own time. Waiting for an exact number would
+    burn the whole timeout every batch; waiting for the count to stop rising
+    finishes as soon as it has."""
+    counts = [0, 0, 12, 33, 50, 50, 50, 50, 50, 50]
+    said, spoke = [], []
+    saved = {k: m[k] for k in ("sand_in_pack", "say", "log", "Misc")}
+    try:
+        m["log"] = lambda text, hue=None: said.append(text)
+        m["Misc"] = type("M", (), {"Pause": staticmethod(lambda ms: None)})()
+        m["say"] = lambda phrase: spoke.append(phrase) or True
+        m["sand_in_pack"] = lambda: (counts.pop(0) if counts else 50, [])
+        call("it returns what arrived", m["grab_sand"], 50, 50)
+        check("and it said the phrase", spoke, [m["GRAB_PHRASE"]])
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+    # Nothing picked up is reported, not treated as success.
+    said, spoke = [], []
+    saved = {k: m[k] for k in ("sand_in_pack", "say", "log", "Misc",
+                               "GRAB_WAIT_MS")}
+    try:
+        m["log"] = lambda text, hue=None: said.append(text)
+        m["Misc"] = type("M", (), {"Pause": staticmethod(lambda ms: None)})()
+        m["say"] = lambda phrase: spoke.append(phrase) or True
+        # Misc.Pause is a no-op here, so a full GRAB_WAIT_MS would be spent
+        # spinning on the real clock. The behaviour under test is what it
+        # returns when nothing arrives, not how long it is prepared to wait.
+        m["GRAB_WAIT_MS"] = 50
+        m["sand_in_pack"] = lambda: (0, [])
+        call("an empty grab returns nothing", m["grab_sand"], 0, 50)
+        check("and says so", any("Nothing was picked up" in t for t in said),
+              True)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+    # A grab that cannot even be said is not a grab.
+    saved = {k: m[k] for k in ("sand_in_pack", "say", "log")}
+    try:
+        m["log"] = lambda *a, **k: None
+        m["say"] = lambda phrase: False
+        m["sand_in_pack"] = lambda: (0, [])
+        call("an unsayable phrase gives up", m["grab_sand"], 0, 50)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_the_deposit_is_verified_by_counting_the_pack(m):
+    """A deposit that quietly does nothing would leave the sand there and the
+    next batch would pile another 50 on top of it."""
+    saved = {k: m[k] for k in ("sand_in_pack", "find_reagent_key",
+                               "context_select", "log", "Misc")}
+    try:
+        m["log"] = lambda *a, **k: None
+        m["Misc"] = type("M", (), {"Pause": staticmethod(lambda ms: None)})()
+        m["find_reagent_key"] = lambda: object()
+        m["context_select"] = lambda *a, **k: True
+
+        counts = [(50, []), (0, [])]
+        m["sand_in_pack"] = lambda: counts.pop(0)
+        call("a clean deposit stores all of it", m["store_sand"], (50, True))
+
+        counts = [(50, []), (50, [])]
+        m["sand_in_pack"] = lambda: counts.pop(0)
+        call("a deposit that took NOTHING stops the run",
+             m["store_sand"], (0, False))
+
+        counts = [(50, []), (8, [])]
+        m["sand_in_pack"] = lambda: counts.pop(0)
+        call("a partial deposit carries on", m["store_sand"], (42, True))
+
+        m["sand_in_pack"] = lambda: (0, [])
+        call("no sand is not a failure", m["store_sand"], (0, True))
+
+        counts = [(50, []), (50, [])]
+        m["sand_in_pack"] = lambda: counts.pop(0)
+        m["find_reagent_key"] = lambda: None
+        call("no keys means stop, not another batch",
+             m["store_sand"], (0, False))
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_a_batch_is_fifty_stones_one_at_a_time(m):
+    """The converter does not take a stack, so it is one withdraw and one drag
+    per stone - BATCH_SIZE times - before anything is collected."""
+    check("fifty to a batch", m["BATCH_SIZE"], 50)
+    check("and it runs until stopped", m["BATCHES"], 0)
+    check("one stone per withdraw", m["WITHDRAW_AMOUNT"], 1)
+
+    drags = []
+    saved = {k: m[k] for k in ("withdraw_one", "in_reach", "move_one", "log",
+                               "Items")}
+    try:
+        m["log"] = lambda *a, **k: None
+        m["withdraw_one"] = lambda: object()
+        m["in_reach"] = lambda item, what: True
+        m["move_one"] = lambda item, target, what: drags.append(target) or True
+        m["Items"] = type("I", (), {
+            "FindBySerial": staticmethod(lambda s: object())})()
+        call("a full batch converts BATCH_SIZE", m["run_batch"],
+             (m["BATCH_SIZE"], True), 1)
+        check("one drag each, all into the converter",
+              (len(drags), set(drags)), (m["BATCH_SIZE"], {m["BOX_SERIAL"]}))
+
+        # Out of granite mid-batch: what was made still counts, and the caller
+        # is told to stop.
+        del drags[:]
+        left = [object(), object(), None]
+        m["withdraw_one"] = lambda: left.pop(0)
+        call("a batch that runs dry reports what it made",
+             m["run_batch"], (2, False), 2)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_whatever_was_made_is_collected_even_when_the_batch_stops_early(m):
+    """The sand is on the floor either way. A run that ends with 40 stones'
+    worth nobody picked up is the failure this guards."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def main("):]
+    grabs = "if converted:" in body and "grab_sand(converted)" in body
+    check("the collect is gated on what was converted", grabs, True)
+    check("and it happens BEFORE the stop is honoured",
+          grabs and body.index("grab_sand(converted)")
+          < body.index("if not keep_going:"), True)
+    check("the ground fallback only runs when the grab got nothing",
+          "if not got:" in body and body.index("if not got:")
+          < body.index("collect_sand_nearby("), True)
 
 
 def main():

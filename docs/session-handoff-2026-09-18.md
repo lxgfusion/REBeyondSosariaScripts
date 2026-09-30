@@ -13,7 +13,7 @@ detail lives in the handoffs named below; this file is the map and the state.
 | `TameAndFill.py` | `2026-09-04.1` | in step | working; Leatherman merged in |
 | `Leatherman.py` | `2026-09-04.1` | in step | **superseded** — retire once the merge is confirmed |
 | `resource_order_runner.py` | `2026-09-13.5` | in step | partly tested; see below |
-| `Sandmaker.py` | `2026-09-18.3` | in step | disconnect **cause found** (text entry on a window with none); fix untested |
+| `Sandmaker.py` | `2026-09-30.1` | in step | batches of 50 + `[grab` + Reagent Keys. **Untested in game**, as is the disconnect fix under it |
 | `diag_storage_gump.py` | — | deployed 2026-09-18 | **the live copy was stale** — see below |
 | `diag_taming_levels.py` | — | n/a | never run |
 
