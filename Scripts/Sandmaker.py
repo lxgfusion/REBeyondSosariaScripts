@@ -69,7 +69,7 @@ import time
 # has already lost two debugging rounds to a bug that was fixed on disk and not
 # in the folder Razor reads. If this line does not say what you expect, hit
 # Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-09-30.3"
+SCRIPT_VERSION = "2026-09-30.4"
 
 
 # =============================================================================
@@ -296,6 +296,19 @@ SAND_WAIT_MS = 3000
 
 # The drag rate limit on this shard. Every Items.Move waits this long after.
 MOVE_PAUSE_MS = 900
+
+# A REFUSED DRAG IS NOT THE END OF THE RUN.
+#
+# 2026-09-30, after 186 stones: one drag was refused and the whole run
+# stopped. Nothing was wrong with the setup - the next stone would have gone
+# in - so a drag is retried before it counts as a failure, and a batch
+# survives failures that are not consecutive.
+#
+# The cap still matters: if the crate is full, or you have been pushed out of
+# range, every drag will fail and the run should say so rather than grind.
+MOVE_RETRIES = 3                # attempts per drag, including the first
+MOVE_RETRY_PAUSE_MS = 1200      # on top of MOVE_PAUSE_MS, before trying again
+BATCH_FAILURE_LIMIT = 3         # stones failing IN A ROW before stopping
 
 GUMP_TIMEOUT_MS = 10000
 SETTLE_MS = 700
@@ -675,37 +688,84 @@ def walk_to_item(item, what):
     return True
 
 
-def move_one(item, target_serial, what, amount=1):
-    """Drag `amount` of `item` into `target_serial`. True only if it moved.
+def where_is(item):
+    """A description of where an item is. NEVER a tile count for something in
+    a container.
 
-    Verified by result. A refused drag is silent - the packet goes out,
-    nothing happens, and the next step runs as though it had worked.
-
-    The default is ONE, which is what the converter takes; the sand is moved a
-    whole stack at a time.
+    The failure line used to say "it is 2394 tiles away and still in your
+    pack", which is the player's map coordinate measured against an item that
+    has no position of its own because it is inside a bag. Nonsense in a
+    message nobody can act on.
     """
-    serial = int(item.Serial)
+    if item is None:
+        return "gone"
     try:
-        Items.Move(item, int(target_serial), int(amount))
-    except Exception as err:
-        log("could not drag %s: %r" % (what, err), HUE_BAD)
-        return False
-    Misc.Pause(MOVE_PAUSE_MS)
+        container = int(getattr(item, "Container", 0) or 0)
+    except Exception:
+        container = 0
+    if container:
+        return "still in a container"
+    return "on the ground %d tile(s) away" % distance_to(item)
 
+
+def has_moved(serial, target_serial):
+    """Did the item really leave? Asked the expensive way before giving up.
+
+    Three ways it counts as moved:
+      * the client no longer has it - which is what the converter does to a
+        granite the moment it lands
+      * it now reports the target as its container
+      * it is no longer in the backpack, asked after RE-OPENING the pack
+
+    That last one matters: Contains is a snapshot, and an item object fetched
+    by serial can still be carrying the container it had when the snapshot was
+    taken. See CLAUDE.md.
+    """
     moved = Items.FindBySerial(serial)
     if moved is None:
-        return True             # consumed on arrival, which the box does
+        return True
     try:
         if int(getattr(moved, "Container", 0) or 0) == int(target_serial):
             return True
     except Exception:
         pass
-    # Still where it was. Say the distance, because out of range is the usual
-    # reason and it is the one the walk was supposed to have fixed.
-    log("%s did not move - it is %d tiles away and still in %s."
-        % (what, distance_to(moved),
-           "your pack" if int(getattr(moved, "Container", 0) or 0)
-           else "the world"), HUE_BAD)
+    refresh_pack()
+    if serial not in pack_serials():
+        return True
+    return False
+
+
+def move_one(item, target_serial, what, amount=1, retries=None):
+    """Drag `amount` of `item` into `target_serial`. True only if it moved.
+
+    Verified by result and RETRIED. A refused drag is silent - the packet goes
+    out, nothing happens, and the next step runs as though it had worked - and
+    on this shard a single refusal is usually just the drag limit or a hiccup,
+    not a reason to end a run that has already done 186 of these.
+    """
+    serial = int(item.Serial)
+    attempts = max(1, int(MOVE_RETRIES if retries is None else retries))
+    for attempt in range(1, attempts + 1):
+        try:
+            Items.Move(item, int(target_serial), int(amount))
+        except Exception as err:
+            log("could not drag %s: %r" % (what, err), HUE_BAD)
+            return False
+        Misc.Pause(MOVE_PAUSE_MS)
+
+        if has_moved(serial, target_serial):
+            if attempt > 1:
+                log("  %s moved on attempt %d." % (what, attempt), HUE_GOOD)
+            return True
+
+        if attempt < attempts:
+            log("  %s did not move (attempt %d of %d) - %s. Trying again."
+                % (what, attempt, attempts,
+                   where_is(Items.FindBySerial(serial))), HUE_WARN)
+            Misc.Pause(MOVE_RETRY_PAUSE_MS)
+
+    log("%s did not move after %d attempt(s) - it is %s."
+        % (what, attempts, where_is(Items.FindBySerial(serial))), HUE_BAD)
     return False
 
 
@@ -1298,6 +1358,27 @@ def store_sand():
     return 0, False
 
 
+def granite_on_hand():
+    """A Plain granite already loose in the pack, or None.
+
+    A drag that was refused leaves the stone where it was, so the next attempt
+    uses THAT one rather than withdrawing another on top of it.
+    """
+    pack = Player.Backpack
+    if pack is None:
+        return None
+    for item in contents_of(pack):
+        try:
+            if int(item.ItemID) != GRANITE_ID:
+                continue
+            if GRANITE_HUE >= 0 and int(item.Hue) != GRANITE_HUE:
+                continue
+        except Exception:
+            continue
+        return item
+    return None
+
+
 def run_batch(index):
     """Convert up to BATCH_SIZE stones, one at a time. (converted, keep_going).
 
@@ -1307,8 +1388,26 @@ def run_batch(index):
     """
     log("--- batch %d: up to %d stone(s) ---" % (index, BATCH_SIZE), HUE_GOOD)
     converted = 0
-    for _ in range(max(1, int(BATCH_SIZE))):
-        granite = withdraw_one()
+    in_a_row = 0
+
+    # Bounded: every pass either converts a stone or counts a failure, and
+    # BATCH_FAILURE_LIMIT ends it. The cap on passes is the backstop for a
+    # case nobody thought of - no loop here runs without one.
+    for _ in range(max(1, int(BATCH_SIZE)) * max(1, int(MOVE_RETRIES)) + 10):
+        if converted >= max(1, int(BATCH_SIZE)):
+            break
+
+        # A stone left over from a refused drag is used before another is
+        # withdrawn - otherwise a failure quietly piles granite in the pack.
+        #
+        # ONLY AFTER A FAILURE. Looking every pass would feed the converter
+        # any Plain granite you happen to be carrying for something else, and
+        # nothing here asked to spend that.
+        granite = granite_on_hand() if in_a_row else None
+        if granite is not None:
+            log("  using the granite already in the pack.")
+        else:
+            granite = withdraw_one()
         if granite is None:
             log("stopped %d of %d into the batch - the line above says why."
                 % (converted, BATCH_SIZE), HUE_WARN)
@@ -1317,12 +1416,23 @@ def run_batch(index):
         box = Items.FindBySerial(BOX_SERIAL)
         if not in_reach(box, "the converter 0x%X" % BOX_SERIAL):
             return converted, False
-        if not move_one(granite, BOX_SERIAL, "the granite"):
-            return converted, False
 
-        converted += 1
-        if PROGRESS_EVERY and converted % PROGRESS_EVERY == 0:
-            log("  %d of %d converted" % (converted, BATCH_SIZE))
+        if move_one(granite, BOX_SERIAL, "the granite"):
+            converted += 1
+            in_a_row = 0
+            if PROGRESS_EVERY and converted % PROGRESS_EVERY == 0:
+                log("  %d of %d converted" % (converted, BATCH_SIZE))
+            continue
+
+        in_a_row += 1
+        if in_a_row >= max(1, int(BATCH_FAILURE_LIMIT)):
+            log("%d stone(s) in a row would not go in. Something is wrong - a "
+                "full crate, or you have been moved. Stopping with %d "
+                "converted." % (in_a_row, converted), HUE_BAD)
+            return converted, False
+        log("  that stone would not go in (%d in a row). Carrying on."
+            % in_a_row, HUE_WARN)
+
     return converted, True
 
 

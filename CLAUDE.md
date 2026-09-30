@@ -256,6 +256,11 @@ of the three, and file size alone will not tell two config blocks apart.
   trusting the id, and when several candidates carry the same signature, say so
   rather than picking one. Under investigation for the order runner's stacked
   windows — `Scripts/diag_gump_watch.py` records what appears and never goes.
+- **An item in a container has no position of its own.** `item.Position` on
+  something in a bag reads as the player's own map coordinate, so a distance
+  computed from it is meaningless — Sandmaker told the user a stone in his
+  pack was "2394 tiles away". Check `Container` first and only measure tiles
+  for something on the ground.
 - **Gump paging may be server-side.** A gump whose pages arrive as fresh gumps
   (same gump id, new sequence) has to be walked with real clicks; only
   `{ page N }` markers in the raw layout mean the pages are already in hand. Any

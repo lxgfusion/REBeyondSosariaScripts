@@ -1113,6 +1113,203 @@ def test_the_deposit_is_verified_by_counting_the_pack(m):
             m[k] = v
 
 
+class _Dragging(object):
+    """A pack and a crate, with a drag that succeeds on the Nth attempt."""
+
+    def __init__(self, m, succeed_on=1):
+        self.m, self.succeed_on = m, succeed_on
+        self.moves = []
+        self.stone = type("S", (), {"Serial": 0x40BB6349, "ItemID": 0x1779,
+                                    "Hue": 0, "Amount": 1, "Container": 0x41D40F58})()
+        self.saved = {k: m[k] for k in ("Items", "Misc", "log", "refresh_pack",
+                                        "pack_serials")}
+        self.said = []
+        m["log"] = lambda text, hue=None: self.said.append(text)
+        m["Misc"] = type("M", (), {"Pause": staticmethod(lambda ms: None)})()
+        m["refresh_pack"] = lambda: None
+        m["pack_serials"] = lambda: (
+            set() if self.landed() else {0x40BB6349})
+        m["Items"] = type("I", (), {
+            "Move": staticmethod(self.move),
+            "FindBySerial": staticmethod(
+                lambda ser: None if self.landed() else self.stone)})()
+
+    def landed(self):
+        return len(self.moves) >= self.succeed_on
+
+    def move(self, item, target, amount):
+        self.moves.append((int(target), int(amount)))
+
+    def restore(self):
+        for k, v in self.saved.items():
+            self.m[k] = v
+
+
+def test_a_refused_drag_is_retried_before_it_counts(m):
+    """2026-09-30: 186 stones went in, then ONE drag was refused and the whole
+    run stopped. Nothing was wrong - the next stone would have gone in."""
+    check("more than one attempt", m["MOVE_RETRIES"] >= 2, True)
+
+    d = _Dragging(m, succeed_on=3)
+    try:
+        call("it keeps trying and succeeds", m["move_one"], True,
+             d.stone, m["BOX_SERIAL"], "the granite")
+        check("three attempts, all into the converter",
+              (len(d.moves), set(t for t, _a in d.moves)),
+              (3, {m["BOX_SERIAL"]}))
+        check("and it says which attempt worked",
+              any("moved on attempt 3" in t for t in d.said), True)
+    finally:
+        d.restore()
+
+    # Never: it gives up after MOVE_RETRIES rather than dragging forever.
+    d = _Dragging(m, succeed_on=99)
+    try:
+        call("a drag that never lands gives up", m["move_one"], False,
+             d.stone, m["BOX_SERIAL"], "the granite")
+        check("exactly MOVE_RETRIES attempts", len(d.moves), m["MOVE_RETRIES"])
+
+        # AND THE MESSAGE IT GIVES UP WITH. "2394 tiles away and still in your
+        # pack" was the player's map coordinate measured against an item in a
+        # bag - the line the user was left with, and unactionable.
+        last = d.said[-1] if d.said else ""
+        check("it says where the stone actually is",
+              "still in a container" in last, True)
+        check("and never in tiles", "tiles away" in last, False)
+    finally:
+        d.restore()
+
+
+def test_the_failure_does_not_claim_tiles_for_something_in_a_bag(m):
+    """"it is 2394 tiles away and still in your pack" - that was the player's
+    map coordinate measured against an item with no position of its own."""
+    in_bag = type("S", (), {"Serial": 1, "Container": 0x41D40F58})()
+    on_ground = type("S", (), {"Serial": 2, "Container": 0})()
+    saved = m["distance_to"]
+    try:
+        m["distance_to"] = lambda item: 3
+        check("a bagged item is not measured in tiles",
+              m["where_is"](in_bag), "still in a container")
+        check("one on the ground is", m["where_is"](on_ground),
+              "on the ground 3 tile(s) away")
+        check("and a vanished one says so", m["where_is"](None), "gone")
+    finally:
+        m["distance_to"] = saved
+
+
+def test_a_stale_item_is_not_mistaken_for_a_failed_drag(m):
+    """FindBySerial can hand back an item still carrying the container it had
+    when the pack snapshot was taken. Ask the pack again before failing."""
+    stale = type("S", (), {"Serial": 7, "Container": 0x41D40F58})()
+    reopened = []
+    saved = {k: m[k] for k in ("Items", "refresh_pack", "pack_serials")}
+    try:
+        m["Items"] = type("I", (), {
+            "FindBySerial": staticmethod(lambda ser: stale)})()
+        m["refresh_pack"] = lambda: reopened.append(True)
+        m["pack_serials"] = lambda: set()          # it really did leave
+        check("gone from the re-read pack counts as moved",
+              m["has_moved"](7, m["BOX_SERIAL"]), True)
+        check("and the pack WAS re-opened to find out", bool(reopened), True)
+
+        m["pack_serials"] = lambda: {7}            # genuinely still there
+        check("still in the pack is still a failure",
+              m["has_moved"](7, m["BOX_SERIAL"]), False)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_one_bad_stone_does_not_end_the_batch(m):
+    """The reported failure. A refused drag retries the SAME stone - which is
+    still in the pack - rather than withdrawing another on top of it."""
+    withdrawn, drags = [], []
+    stone = type("S", (), {"Serial": 1, "ItemID": m["GRANITE_ID"], "Hue": 0})()
+    saved = {k: m[k] for k in ("withdraw_one", "granite_on_hand", "in_reach",
+                               "move_one", "log", "Items")}
+    try:
+        m["log"] = lambda *a, **k: None
+        m["in_reach"] = lambda item, what: True
+        m["Items"] = type("I", (), {
+            "FindBySerial": staticmethod(lambda ser: object())})()
+        m["withdraw_one"] = lambda: withdrawn.append(1) or stone
+
+        # Fails once, then every later stone goes in.
+        outcomes = [False] + [True] * 100
+        m["granite_on_hand"] = lambda: stone if drags and not drags[-1] else None
+        m["move_one"] = lambda item, target, what: (
+            drags.append(outcomes.pop(0)) or drags[-1])
+
+        call("the batch still finishes", m["run_batch"],
+             (m["BATCH_SIZE"], True), 1)
+        check("the failed stone was retried, not re-withdrawn",
+              len(withdrawn), m["BATCH_SIZE"])
+        check("which is one more drag than stones converted",
+              len(drags), m["BATCH_SIZE"] + 1)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_carried_granite_is_left_alone_until_something_fails(m):
+    """Reusing a leftover is for a stone a refused drag left behind. Looking
+    every pass would feed the converter any Plain granite you happen to be
+    carrying for something else, which nothing here asked to spend."""
+    looked = []
+    saved = {k: m[k] for k in ("withdraw_one", "granite_on_hand", "in_reach",
+                               "move_one", "log", "Items")}
+    try:
+        m["log"] = lambda *a, **k: None
+        m["in_reach"] = lambda item, what: True
+        m["Items"] = type("I", (), {
+            "FindBySerial": staticmethod(lambda ser: object())})()
+        m["withdraw_one"] = lambda: object()
+        m["granite_on_hand"] = lambda: looked.append(1) or None
+        m["move_one"] = lambda item, target, what: True
+        call("a clean batch converts BATCH_SIZE", m["run_batch"],
+             (m["BATCH_SIZE"], True), 1)
+        check("and never went looking in the pack", looked, [])
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_a_batch_that_fails_over_and_over_stops(m):
+    """A full crate, or being pushed out of range, fails every drag. That must
+    end the run rather than grind - and it must END, not loop."""
+    check("the limit is small", 1 <= m["BATCH_FAILURE_LIMIT"] <= 5, True)
+
+    drags = []
+    saved = {k: m[k] for k in ("withdraw_one", "granite_on_hand", "in_reach",
+                               "move_one", "log", "Items")}
+    try:
+        m["log"] = lambda *a, **k: None
+        m["in_reach"] = lambda item, what: True
+        m["Items"] = type("I", (), {
+            "FindBySerial": staticmethod(lambda ser: object())})()
+        stone = type("S", (), {"Serial": 1})()
+        m["withdraw_one"] = lambda: stone
+        m["granite_on_hand"] = lambda: None
+        m["move_one"] = lambda item, target, what: drags.append(1) and False
+
+        call("it stops, having converted nothing", m["run_batch"], (0, False), 1)
+        check("after BATCH_FAILURE_LIMIT tries, not BATCH_SIZE of them",
+              len(drags), m["BATCH_FAILURE_LIMIT"])
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_the_batch_loop_is_bounded(m):
+    """Every loop in this repo gets a bound. A pass that neither converts nor
+    counts a failure must still not run forever."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    body = between(src, "def run_batch(", "def preflight(")
+    check("the batch walks a bounded range", "for _ in range(" in body, True)
+    check("and it is not a while True", "while True" in body, False)
+
+
 def test_a_batch_is_fifty_stones_one_at_a_time(m):
     """The converter does not take a stack, so it is one withdraw and one drag
     per stone - BATCH_SIZE times - before anything is collected."""

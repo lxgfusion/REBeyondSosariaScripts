@@ -13,7 +13,7 @@ detail lives in the handoffs named below; this file is the map and the state.
 | `TameAndFill.py` | `2026-09-04.1` | in step | working; Leatherman merged in |
 | `Leatherman.py` | `2026-09-04.1` | in step | **superseded** — retire once the merge is confirmed |
 | `resource_order_runner.py` | `2026-09-13.5` | in step | partly tested; see below |
-| `Sandmaker.py` | `2026-09-30.3` | in step | batches of 50 + `[grab` + Reagent Keys, via the loot bag and pouch (both optional). **Untested in game**, as is the disconnect fix under it |
+| `Sandmaker.py` | `2026-09-30.4` | in step | **working** — 186 stones converted and stored 2026-09-30. Drag retries added after one refusal ended that run; those are untested |
 | `diag_storage_gump.py` | — | deployed 2026-09-18 | **the live copy was stale** — see below |
 | `diag_taming_levels.py` | — | n/a | never run |
 

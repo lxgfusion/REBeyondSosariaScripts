@@ -67,6 +67,35 @@ anything that spends gold, and the real label sent back to `ContextReply`.
 **That entry deposits every reagent in the pack, not only the sand.** Said in
 the config, because it is the one surprise in the flow.
 
+### A refused drag is not the end of the run
+
+**2026-09-30, first real run: 186 stones converted and stored across 4
+batches, then it stopped** on
+
+```
+[Sand] the granite did not move - it is 2394 tiles away and still in your pack.
+```
+
+Two faults in one line. The **2394** was the player's map coordinate measured
+against an item inside a bag, which has no position of its own — a number
+nobody can act on. And a *single* refused drag ended a run that had just done
+186 of them; nothing was wrong with the setup.
+
+| | |
+|---|---|
+| `MOVE_RETRIES = 3` | a drag is retried before it counts as failed, with `MOVE_RETRY_PAUSE_MS` between |
+| `has_moved()` | re-opens the pack before declaring failure — `FindBySerial` can hand back an item still carrying the container it had when the snapshot was taken |
+| `BATCH_FAILURE_LIMIT = 3` | only stones failing **in a row** stop the batch, so an isolated refusal costs one stone |
+| leftover stone | reused instead of withdrawing another on top of it — but **only after a failure**, so Plain granite you are carrying for something else is left alone |
+| `where_is()` | says "still in a container" or "on the ground N tiles away", never tiles for something in a bag |
+
+The batch loop walks a bounded `range`, not a `while True`: every pass either
+converts a stone or counts a failure, and both are capped.
+
+What actually refused that drag is still unknown — the crate was in reach and
+the next stone would have gone in. If it turns out to be systematic (a full
+crate, a rate limit), the "3 in a row" message will name it.
+
 ### What it is verified by
 
 | Step | Proof it worked |
@@ -86,8 +115,8 @@ roughly four seconds and a batch of 50 about three and a half minutes.
 |---|---|
 | Repo | `Scripts/Sandmaker.py` |
 | Live | `E:\uoclients\RazorEnhanced\Scripts\sandmaker.py` (lower-case) |
-| Version | `2026-09-30.3` |
-| Tests | `tests/test_sandmaker.py` — 176 checks; `tests/test_diag_storage_gump.py` — 20 |
+| Version | `2026-09-30.4` |
+| Tests | `tests/test_sandmaker.py` — 200 checks; `tests/test_diag_storage_gump.py` — 20 |
 | Diagnostic | `Scripts/diag_storage_gump.py`, live as `diag_storage_gump.py` since 2026-09-18 |
 
 ## The disconnect — CAUSE FOUND, fix untested in game
@@ -273,15 +302,17 @@ items every run** and must never be config. Only containers are stable.
 
 1. **Test one small batch first.** Set `BATCH_SIZE = 3` and `BATCHES = 1`,
    stand on the spot, and run it. The journal should say
-   `Sandmaker v2026-09-30.3` first — Razor caches scripts, so Reload in the
+   `Sandmaker v2026-09-30.4` first — Razor caches scripts, so Reload in the
    Scripting tab if it does not — then `Withdrawal Amount reads 1.`,
    `withdrawing 1 Plain (button 1)` three times, the grab, and
    `stored 3 sand.`
 2. Then set `BATCH_SIZE = 50`, `BATCHES = 0` and leave it running.
 3. Delete the stale `diag_storage_gump,py.py` from the live folder.
 
-**Still untested in game:** everything from `2026-09-18.3` onwards — the
-no-text-entry press has never actually run, and the batch flow is new.
+**Proven in game 2026-09-30:** the no-text-entry press, the batch flow, the
+grab, the loot bag and the deposit into the Reagent Keys — 186 stones, 186
+sand, 4 batches, no disconnect. **Untested:** the retry and failure-limit
+handling added after that run.
 
 ## The rest of the script
 
