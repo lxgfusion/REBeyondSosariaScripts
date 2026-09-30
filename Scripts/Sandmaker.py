@@ -10,8 +10,10 @@ THE ROUND
     BATCH_SIZE times:
         withdraw ONE Plain granite from the Stone Storage
         drop it in the converter            (the conversion is instant)
-    say "[grab"                             (the shard picks the sand up)
-    put the sand in the Reagent Keys        (its context menu, not a drag)
+    say "[grab"                             (the sand lands in the LOOT BAG)
+    move the sand into the backpack
+    put the sand in the Reagent Keys        (in the POUCH; context menu, not
+                                             a drag - they are not a container)
 
 Repeated until you stop it, or the Plain granite runs out.
 
@@ -67,7 +69,7 @@ import time
 # has already lost two debugging rounds to a bug that was fixed on disk and not
 # in the folder Razor reads. If this line does not say what you expect, hit
 # Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-09-30.1"
+SCRIPT_VERSION = "2026-09-30.3"
 
 
 # =============================================================================
@@ -153,7 +155,7 @@ BATCHES = 0
 
 # A progress line every N stones, so a batch of 50 is not silent for minutes.
 # 0 turns it off.
-PROGRESS_EVERY = 10
+PROGRESS_EVERY = 5
 
 # WHAT PICKS THE SAND UP. The shard command, said in chat. The sand lands on
 # the platform out of drag reach from the spot that can feed the converter,
@@ -180,6 +182,49 @@ GRAB_STEADY_POLLS = 3
 #
 # THAT ENTRY DEPOSITS EVERY REAGENT IN THE PACK, not only the sand. If you are
 # carrying reagents you want to keep, take them out first.
+# WHERE THE SAND LANDS. From the Item Inspector, 2026-09-30:
+#     "a loot bag", 0x407D25FC, ItemID 0x0E76, hue 0x04F2
+#     Container: YES, inside the backpack (0x41D40F58)
+#
+# "[grab" does NOT put the sand in the backpack itself - it goes in this bag,
+# which is why the first version counted the pack and saw nothing. Everything
+# that counts sand opens this bag and reads it, and the pack's top level is
+# checked as well so a stack dragged out by hand is still found.
+#
+# SET SAND_IN_SEPARATE_BAG = False if "[grab" drops the sand straight into
+# your backpack. Then SAND_BAG_SERIAL is ignored, the pack is what gets
+# counted, and nothing is dragged before the deposit.
+SAND_IN_SEPARATE_BAG = True
+SAND_BAG_SERIAL = 0x407D25FC
+SAND_BAG_ID = 0x0E76
+SAND_BAG_HUE = 0x04F2
+
+# WHERE THE REAGENT KEYS LIVE. Inspected the same day:
+#     "pouch", 0x4133A297, ItemID 0x0E79, hue 0x0000
+#     Container: YES, inside the backpack (0x41D40F58)
+#
+# The keys are NOT carried loose in the pack here, so a top-level search
+# misses them. The pouch is opened before the keys are looked for - a
+# container's contents only exist once it has been opened.
+#
+# SET KEY_IN_SEPARATE_BAG = False if you keep your keys loose in the backpack.
+# Then KEY_BAG_SERIAL is ignored and nothing opens a pouch. The serial search
+# runs either way, so a key that Razor can already see is found regardless.
+KEY_IN_SEPARATE_BAG = True
+KEY_BAG_SERIAL = 0x4133A297
+KEY_BAG_ID = 0x0E79
+KEY_BAG_HUE = 0x0000
+
+# Move the sand out of the loot bag and into the backpack before depositing.
+#
+# ON by default because nothing has established that "Refill from stock"
+# reaches INTO a sub-container, and the failure if it does not is silent: the
+# sand stays in the bag, the deposit looks like it did nothing, and the run
+# stops. One drag per stack is cheap certainty. Set False if the keys turn out
+# to take it straight from the bag. Ignored when SAND_IN_SEPARATE_BAG is off,
+# because then it is already in the pack.
+SAND_TO_PACK_BEFORE_STORE = True
+
 REAGENT_KEY_SERIAL = 0x404D69CE
 REAGENT_KEY_ID = 0x18DE
 REAGENT_KEY_HUE = 0x0021
@@ -195,6 +240,12 @@ CONTEXT_TIMEOUT_MS = 10000
 
 # How long to let a deposit settle before counting what is left.
 STORE_SETTLE_MS = 1200
+
+# Re-opening a container to read it. The short settle is for the polling done
+# while waiting for the grab, where the full SETTLE_MS on every look would
+# add seconds to every batch.
+CONTENTS_WAIT_MS = 4000
+CONTENTS_SETTLE_MS = 400
 
 # STAND STILL. True means the script never walks: anything out of reach is
 # reported and the run stops, rather than the character wandering off the one
@@ -487,6 +538,51 @@ def refresh_pack():
     Misc.Pause(SETTLE_MS)
 
 
+def open_container(serial, what, settle=None):
+    """Re-open a container so its Contains list is current. The item, or None.
+
+    Contains is a SNAPSHOT taken when the container was opened, and asking a
+    different way does not help: Items.FindAllByID with a container serial
+    walks that same list. Re-opening is the only real refresh - and a bag that
+    has never been opened has no contents at all. See CLAUDE.md.
+    """
+    item = Items.FindBySerial(int(serial))
+    if item is None:
+        return None
+    try:
+        Items.UseItem(item)
+        Items.WaitForContents(item, CONTENTS_WAIT_MS)
+    except Exception:
+        pass
+    Misc.Pause(CONTENTS_SETTLE_MS if settle is None else settle)
+    return item
+
+
+def contents_of(container):
+    try:
+        return list(getattr(container, "Contains", None) or [])
+    except Exception:
+        return []
+
+
+def is_sand(item):
+    try:
+        if int(item.ItemID) != SAND_ID:
+            return False
+        if SAND_HUE >= 0 and int(item.Hue) != SAND_HUE:
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def amount_of(item):
+    try:
+        return int(item.Amount or 1)
+    except Exception:
+        return 1
+
+
 def ground_serials(rng):
     """Serials of everything on the ground within `rng` tiles."""
     out = set()
@@ -579,15 +675,18 @@ def walk_to_item(item, what):
     return True
 
 
-def move_one(item, target_serial, what):
-    """Drag ONE of `item` into `target_serial`. True only if it really moved.
+def move_one(item, target_serial, what, amount=1):
+    """Drag `amount` of `item` into `target_serial`. True only if it moved.
 
-    Verified by result. A refused drag is silent - the packet goes out, nothing
-    happens, and the next step runs as though it had worked.
+    Verified by result. A refused drag is silent - the packet goes out,
+    nothing happens, and the next step runs as though it had worked.
+
+    The default is ONE, which is what the converter takes; the sand is moved a
+    whole stack at a time.
     """
     serial = int(item.Serial)
     try:
-        Items.Move(item, int(target_serial), 1)
+        Items.Move(item, int(target_serial), int(amount))
     except Exception as err:
         log("could not drag %s: %r" % (what, err), HUE_BAD)
         return False
@@ -904,36 +1003,62 @@ def say(phrase):
         return False
 
 
-def sand_in_pack():
-    """(total amount, [stacks]) of sand at the top level of the pack.
+def uses_sand_bag():
+    return bool(SAND_IN_SEPARATE_BAG and SAND_BAG_SERIAL)
 
-    RE-OPENS THE PACK FIRST. Contains is a snapshot taken when the container
-    was opened, so a stale one reads as "the grab picked nothing up" - which
-    is exactly the false negative that aborted the order runner after one
-    order, every time. See CLAUDE.md.
+
+def uses_key_bag():
+    return bool(KEY_IN_SEPARATE_BAG and KEY_BAG_SERIAL)
+
+
+def sand_in_bag():
+    """(total, [stacks]) of sand wherever "[grab" drops it.
+
+    The loot bag, or the BACKPACK when SAND_IN_SEPARATE_BAG is off - not
+    everyone keeps one, and the grab drops it straight in the pack for them.
+
+    Whichever it is, it is RE-OPENED first. Contents are a snapshot, and a
+    stale one reads as "the grab picked nothing up" - the same false negative
+    that aborted the order runner after one order, every time.
     """
-    refresh_pack()
+    if not uses_sand_bag():
+        return sand_in_pack()
+    bag = open_container(SAND_BAG_SERIAL, "the loot bag")
+    if bag is None:
+        return 0, []
+    stacks = [i for i in contents_of(bag) if is_sand(i)]
+    return sum(amount_of(i) for i in stacks), stacks
+
+
+def sand_in_pack():
+    """(total, [stacks]) of sand loose at the top level of the backpack.
+
+    Not where the grab puts it - that is the loot bag - but where it has to
+    end up before the keys will take it, and where a stack dragged out by hand
+    would be.
+    """
     pack = Player.Backpack
     if pack is None:
         return 0, []
-    total, stacks = 0, []
-    try:
-        for item in list(getattr(pack, "Contains", None) or []):
-            try:
-                if int(item.ItemID) != SAND_ID:
-                    continue
-                if SAND_HUE >= 0 and int(item.Hue) != SAND_HUE:
-                    continue
-            except Exception:
-                continue
-            stacks.append(item)
-            try:
-                total += int(item.Amount or 1)
-            except Exception:
-                total += 1
-    except Exception:
-        pass
-    return total, stacks
+    open_container(int(pack.Serial), "the backpack")
+    pack = Player.Backpack
+    stacks = [i for i in contents_of(pack) if is_sand(i)]
+    return sum(amount_of(i) for i in stacks), stacks
+
+
+def sand_on_hand():
+    """(total, [stacks]) of sand anywhere it is expected to be: the loot bag
+    the grab fills, and the pack's top level.
+
+    With no separate bag the two are the same place, so the pack is counted
+    ONCE - adding them would report double and a deposit would look like it
+    left half behind.
+    """
+    if not uses_sand_bag():
+        return sand_in_pack()
+    in_bag, bag_stacks = sand_in_bag()
+    in_pack, pack_stacks = sand_in_pack()
+    return in_bag + in_pack, bag_stacks + pack_stacks
 
 
 def grab_sand(expected):
@@ -944,8 +1069,8 @@ def grab_sand(expected):
     and waiting for a number that never comes would burn the whole timeout on
     every batch.
     """
-    before, _ = sand_in_pack()
-    log("saying %r for the sand (%d already in the pack)"
+    before, _ = sand_in_bag()
+    log("saying %r for the sand (%d already in the loot bag)"
         % (GRAB_PHRASE, before))
     if not say(GRAB_PHRASE):
         return 0
@@ -954,7 +1079,7 @@ def grab_sand(expected):
     best, steady = before, 0
     while time.time() < deadline:
         Misc.Pause(GRAB_POLL_MS)
-        now, _ = sand_in_pack()
+        now, _ = sand_in_bag()
         if now > best:
             best, steady = now, 0
             continue
@@ -965,8 +1090,9 @@ def grab_sand(expected):
 
     got = best - before
     if got <= 0:
-        log("Nothing was picked up by %r. Is this the spot where it works?"
-            % GRAB_PHRASE, HUE_BAD)
+        log("Nothing arrived in the loot bag 0x%X from %r. Is this the spot "
+            "where it works, and is that still the bag it fills?"
+            % (SAND_BAG_SERIAL, GRAB_PHRASE), HUE_BAD)
         return 0
     log("picked up %d sand%s." % (got, "" if got >= expected
                                   else " - %d were converted" % expected),
@@ -1001,22 +1127,53 @@ def collect_sand_nearby(limit):
     return picked
 
 
-def find_reagent_key():
-    """The Reagent Keys. By serial first, then by graphic in the pack.
+def sand_bag_to_pack():
+    """Drag the loot bag's sand into the pack's top level. How many moved.
 
-    The serial is exact and the key does not move; the graphic is the fallback
-    for the day it is replaced. It is NOT a container - Container: No in the
-    Item Inspector - so it is only ever looked up to be right-clicked.
+    One drag per stack, each verified and each waiting out the drag limit.
+    Sand stacks, so this is normally a single drag however big the batch was.
     """
+    if not uses_sand_bag():
+        return 0                      # already where it needs to be
+    pack = Player.Backpack
+    if pack is None:
+        return 0
+    moved = 0
+    _total, stacks = sand_in_bag()
+    for stack in stacks:
+        amount = amount_of(stack)
+        if move_one(stack, int(pack.Serial), "the sand", amount):
+            moved += amount
+    return moved
+
+
+def find_reagent_key():
+    """The Reagent Keys. By serial first, then by graphic where they live.
+
+    THEY ARE IN THE POUCH here, not loose in the pack, so the pouch is opened
+    first: a container that has never been opened has no contents to search,
+    and FindBySerial on something inside it can come back empty for the same
+    reason. With KEY_IN_SEPARATE_BAG off, nothing is opened and the pack is
+    searched instead.
+
+    The serial is exact and the keys do not move; the graphic is the fallback
+    for the day they are replaced. They are NOT a container - Container: No in
+    the Item Inspector - so they are only ever looked up to be right-clicked.
+    """
+    pouch = open_container(KEY_BAG_SERIAL, "the pouch") \
+        if uses_key_bag() else None
     item = Items.FindBySerial(REAGENT_KEY_SERIAL)
     if item is not None:
         return item
 
+    where = contents_of(pouch)
     pack = Player.Backpack
-    if pack is None:
+    if pack is not None:
+        where = where + contents_of(pack)
+    if not where:
         return None
     wanted = [n.strip().lower() for n in REAGENT_KEY_NAMES if n.strip()]
-    for candidate in list(getattr(pack, "Contains", None) or []):
+    for candidate in where:
         try:
             if int(candidate.ItemID) != REAGENT_KEY_ID:
                 continue
@@ -1101,10 +1258,18 @@ def store_sand():
     nothing would otherwise leave the sand there and the next batch would pile
     another 50 on top of it.
     """
-    total, _ = sand_in_pack()
+    total, _ = sand_on_hand()
     if not total:
-        log("no sand in the pack to store.", HUE_WARN)
+        log("no sand to store.", HUE_WARN)
         return 0, True
+
+    # INTO THE PACK FIRST. The grab fills the loot bag, and nothing has
+    # established that the keys reach into a sub-container - see
+    # SAND_TO_PACK_BEFORE_STORE.
+    if SAND_TO_PACK_BEFORE_STORE:
+        moved = sand_bag_to_pack()
+        if moved:
+            log("  moved %d sand out of the loot bag." % moved)
 
     key = find_reagent_key()
     if key is None:
@@ -1113,12 +1278,13 @@ def store_sand():
             HUE_BAD)
         return 0, False
 
-    log("storing %d sand in the Reagent Keys." % total)
+    log("storing %d sand in the Reagent Keys 0x%X."
+        % (total, int(getattr(key, "Serial", REAGENT_KEY_SERIAL))))
     if not context_select(key, REAGENT_KEY_CONTEXT, "the Reagent Keys"):
         return 0, False
     Misc.Pause(STORE_SETTLE_MS)
 
-    left, _ = sand_in_pack()
+    left, _ = sand_on_hand()
     stored = total - left
     if left == 0:
         log("stored %d sand." % stored, HUE_GOOD)
@@ -1127,7 +1293,7 @@ def store_sand():
         log("stored %d, but %d sand is still in the pack. Carrying on."
             % (stored, left), HUE_WARN)
         return stored, True
-    log("The Reagent Keys took NOTHING - %d sand is still in the pack. Stopping "
+    log("The Reagent Keys took NOTHING - %d sand is still on you. Stopping "
         "rather than converting another batch on top of it." % left, HUE_BAD)
     return 0, False
 
@@ -1194,15 +1360,39 @@ def preflight():
                     "the converter 0x%X" % BOX_SERIAL):
         return False
 
-    key = find_reagent_key()
-    if key is None:
-        log("The Reagent Keys 0x%X are not in the pack, so there is nowhere to "
-            "put the sand." % REAGENT_KEY_SERIAL, HUE_BAD)
+    # The two bags, by name, because "not found" on either has a different
+    # fix and the script cannot tell them apart later.
+    if uses_sand_bag() and Items.FindBySerial(SAND_BAG_SERIAL) is None:
+        log("The loot bag 0x%X is not on you - that is where %r puts the sand, "
+            "and without it nothing can be counted. Set SAND_IN_SEPARATE_BAG "
+            "= False if the grab fills your backpack instead."
+            % (SAND_BAG_SERIAL, GRAB_PHRASE), HUE_BAD)
+        return False
+    if uses_key_bag() and Items.FindBySerial(KEY_BAG_SERIAL) is None:
+        log("The pouch 0x%X is not on you - that is where the Reagent Keys "
+            "live. Set KEY_IN_SEPARATE_BAG = False if you carry them loose "
+            "in your pack." % KEY_BAG_SERIAL, HUE_BAD)
         return False
 
-    log("  storage 0x%X, converter 0x%X at %d,%d, keys 0x%X"
-        % (STONE_STORAGE_SERIAL, BOX_SERIAL, BOX_SPOT[0], BOX_SPOT[1],
-           int(key.Serial)))
+    key = find_reagent_key()
+    if key is None:
+        log("The Reagent Keys 0x%X are not %s, so there is nowhere to put the "
+            "sand." % (REAGENT_KEY_SERIAL,
+                       "in the pouch 0x%X or the pack" % KEY_BAG_SERIAL
+                       if uses_key_bag() else "in the pack"), HUE_BAD)
+        return False
+
+    log("  storage 0x%X, converter 0x%X at %d,%d"
+        % (STONE_STORAGE_SERIAL, BOX_SERIAL, BOX_SPOT[0], BOX_SPOT[1]))
+    log("  sand lands in %s; keys 0x%X %s"
+        % ("the loot bag 0x%X" % SAND_BAG_SERIAL if uses_sand_bag()
+           else "the backpack", int(key.Serial),
+           "in the pouch 0x%X" % KEY_BAG_SERIAL if uses_key_bag()
+           else "in the pack"))
+    on_hand, _ = sand_on_hand()
+    if on_hand:
+        log("  %d sand already on you - it will be stored with the first "
+            "batch." % on_hand, HUE_WARN)
 
     # Open the window and say what will be pressed, BEFORE anything is. A
     # button chosen silently is a button nobody checked.
@@ -1223,9 +1413,11 @@ def preflight():
     log("  %s batch(es) of %d, %d stone per withdraw, %s"
         % (BATCHES or "unlimited", BATCH_SIZE, WITHDRAW_AMOUNT,
            "standing still" if STAND_STILL else "walking to what it needs"))
-    log("  sand is 0x%04X%s; %r collects it and the Reagent Keys store it."
+    log("  sand is 0x%04X%s; %r collects it%s."
         % (SAND_ID, " hue 0x%04X" % SAND_HUE if SAND_HUE >= 0 else " (any hue)",
-           GRAB_PHRASE))
+           GRAB_PHRASE,
+           ", and it is moved to the pack before storing"
+           if SAND_TO_PACK_BEFORE_STORE and uses_sand_bag() else ""))
     return True
 
 
@@ -1250,7 +1442,7 @@ def main():
             got = grab_sand(converted)
             if not got:
                 got = collect_sand_nearby(converted)
-            if got or sand_in_pack()[0]:
+            if got or sand_on_hand()[0]:
                 put, ok = store_sand()
                 stored += put
                 if not ok:

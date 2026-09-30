@@ -22,6 +22,35 @@ that spot. `STAND_STILL = False` restores the old walking behaviour.
 
 **The stones go in one at a time** — the converter does not take a stack.
 
+### Where things actually live — both optional
+
+| | |
+|---|---|
+| `[grab` fills | **a loot bag** `0x407D25FC`, ItemID `0x0E76`, hue `0x04F2`, inside the pack |
+| the keys live in | **a pouch** `0x4133A297`, ItemID `0x0E79`, inside the pack |
+
+**The grab does not fill the backpack.** The first version counted the pack's
+top level and saw nothing, every time. Counting now re-opens the loot bag and
+reads that, plus the pack's top level so a stack dragged out by hand is still
+found — and with no separate bag the pack is counted **once**, not twice.
+
+**The keys are not loose in the pack either**, so the pouch is opened before
+they are looked for: a container that has never been opened has no contents to
+search, and `FindBySerial` on something inside one can come back empty for the
+same reason.
+
+Neither layout is compulsory. `SAND_IN_SEPARATE_BAG` and `KEY_IN_SEPARATE_BAG`
+default to **True** for this character; set either False and that bag is
+ignored entirely — nothing is opened, nothing is demanded at startup, and the
+pack is searched instead.
+
+**The sand is dragged into the pack before the deposit**
+(`SAND_TO_PACK_BEFORE_STORE`, on by default, ignored when there is no separate
+bag). Nothing has established that `Refill from stock` reaches into a
+sub-container, and if it does not the failure is silent: the sand stays in the
+bag, the deposit looks like it did nothing, and the run stops. One drag per
+stack — and sand stacks, so it is normally one drag however big the batch.
+
 ### The Reagent Keys — `Container: No`
 
 ```
@@ -44,7 +73,7 @@ the config, because it is the one surprise in the flow.
 |---|---|
 | withdraw | granite arrives in the pack (re-opened, not a stale snapshot) |
 | drop | the stone left the pack, or was consumed on arrival |
-| `[grab` | the sand count in the pack **stops rising** — not "reaches 50", which would burn the whole timeout on every batch |
+| `[grab` | the sand count **in the loot bag** stops rising — not "reaches 50", which would burn the whole timeout on every batch |
 | deposit | the pack is counted again; nothing moved means **stop**, rather than piling another 50 on top |
 
 If `[grab` picks up nothing, sand still on the ground within reach is dragged
@@ -57,8 +86,8 @@ roughly four seconds and a batch of 50 about three and a half minutes.
 |---|---|
 | Repo | `Scripts/Sandmaker.py` |
 | Live | `E:\uoclients\RazorEnhanced\Scripts\sandmaker.py` (lower-case) |
-| Version | `2026-09-30.1` |
-| Tests | `tests/test_sandmaker.py` — 146 checks; `tests/test_diag_storage_gump.py` — 20 |
+| Version | `2026-09-30.3` |
+| Tests | `tests/test_sandmaker.py` — 176 checks; `tests/test_diag_storage_gump.py` — 20 |
 | Diagnostic | `Scripts/diag_storage_gump.py`, live as `diag_storage_gump.py` since 2026-09-18 |
 
 ## The disconnect — CAUSE FOUND, fix untested in game
@@ -244,7 +273,7 @@ items every run** and must never be config. Only containers are stable.
 
 1. **Test one small batch first.** Set `BATCH_SIZE = 3` and `BATCHES = 1`,
    stand on the spot, and run it. The journal should say
-   `Sandmaker v2026-09-30.1` first — Razor caches scripts, so Reload in the
+   `Sandmaker v2026-09-30.3` first — Razor caches scripts, so Reload in the
    Scripting tab if it does not — then `Withdrawal Amount reads 1.`,
    `withdrawing 1 Plain (button 1)` three times, the grab, and
    `stored 3 sand.`

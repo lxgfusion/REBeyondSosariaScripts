@@ -28,6 +28,18 @@ def check(label, got, want):
     _checks.append((label, got, want, got == want))
 
 
+def between(text, start, end):
+    """The slice between two markers, or "" if either is missing.
+
+    A slice that RAISES when a function was renamed or removed takes the whole
+    suite down and hides every check after it - the failure mode CLAUDE.md
+    names, and one this file has now hit twice.
+    """
+    if start not in text or end not in text:
+        return ""
+    return text[text.index(start):text.index(end)]
+
+
 def call(label, fn, want, *args):
     """check() for a real call: an exception is a failure, not a traceback.
 
@@ -510,7 +522,8 @@ def test_the_stone_moves_once(m):
     reached = "in_reach(box" in body
     check("reach is checked first", reached, True)
     check("and that check comes before the drag",
-          reached and body.index("in_reach(box")
+          reached and "move_one(granite" in body
+          and body.index("in_reach(box")
           < body.index("move_one(granite"), True)
     check("the batch does not walk anywhere",
           "walk_to" in body, False)
@@ -727,28 +740,233 @@ def test_the_sand_is_never_dragged_into_the_reagent_keys(m):
     check("nor into the key item",
           "move_one(stack, key" in code or "Items.Move(stack, key" in code,
           False)
-    body = code[code.index("def store_sand("):code.index("def run_batch(")]
+    body = between(code, "def store_sand(", "def run_batch(")
     check("the deposit is a context reply",
           "context_select(key, REAGENT_KEY_CONTEXT" in body, True)
     check("and the sand still only ever moves INTO the pack",
           "move_one(sand, int(pack.Serial)" in code, True)
 
 
-def test_counting_the_sand_reopens_the_pack_first(m):
-    """Contains is a SNAPSHOT taken when the container was opened. A stale one
-    reads as "the grab picked nothing up", which is the same false negative
-    that aborted the order runner after one order, every time."""
+def test_the_sand_is_counted_where_grab_actually_puts_it(m):
+    """"[grab" fills a LOOT BAG inside the pack, not the pack itself - the
+    first version counted the pack and saw nothing. Both are counted now,
+    because a stack dragged out by hand would be loose in the pack.
+    """
+    check("the loot bag is the one the inspector showed",
+          m["SAND_BAG_SERIAL"], 0x407D25FC)
+    check("and the pouch holds the keys", m["KEY_BAG_SERIAL"], 0x4133A297)
+
+    opened = []
+
+    class Item(object):
+        def __init__(self, serial, item_id, hue=0, amount=1, contains=()):
+            self.Serial, self.ItemID, self.Hue = serial, item_id, hue
+            self.Amount, self.Contains = amount, list(contains)
+
+    sand_a = Item(1, m["SAND_ID"], 0x096D, 30)
+    sand_b = Item(2, m["SAND_ID"], 0x096D, 20)
+    loose = Item(3, m["SAND_ID"], 0x096D, 5)
+    other = Item(4, 0x1779, 0, 1)
+    bag = Item(m["SAND_BAG_SERIAL"], m["SAND_BAG_ID"], m["SAND_BAG_HUE"],
+               1, [sand_a, sand_b, other])
+    pack = Item(0x41D40F58, 0x0E75, 0, 1, [loose, other, bag])
+
+    saved = {k: m[k] for k in ("Items", "Player", "Misc", "log")}
+    try:
+        m["log"] = lambda *a, **k: None
+        m["Misc"] = type("M", (), {"Pause": staticmethod(lambda ms: None)})()
+        m["Player"] = type("P", (), {"Backpack": pack})()
+        m["Items"] = type("I", (), {
+            "FindBySerial": staticmethod(
+                lambda ser: {m["SAND_BAG_SERIAL"]: bag,
+                             0x41D40F58: pack}.get(int(ser))),
+            "UseItem": staticmethod(lambda it: opened.append(int(it.Serial))),
+            "WaitForContents": staticmethod(lambda it, ms: True)})()
+
+        check("the bag's sand is counted", m["sand_in_bag"]()[0], 50)
+        check("and the bag was RE-OPENED to read it",
+              m["SAND_BAG_SERIAL"] in opened, True)
+        check("the granite in there is not sand", m["sand_in_bag"]()[1],
+              [sand_a, sand_b])
+
+        del opened[:]
+        check("loose sand in the pack is counted too",
+              m["sand_in_pack"]()[0], 5)
+        check("and the pack was re-opened for it", 0x41D40F58 in opened, True)
+
+        check("on hand is both", m["sand_on_hand"]()[0], 55)
+
+        # A bag that is not there is 0, not a crash and not the pack's count.
+        m["Items"] = type("I", (), {
+            "FindBySerial": staticmethod(lambda ser: None),
+            "UseItem": staticmethod(lambda it: None),
+            "WaitForContents": staticmethod(lambda it, ms: True)})()
+        check("no bag is no sand", m["sand_in_bag"](), (0, []))
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+
+def test_neither_bag_is_compulsory(m):
+    """Not everyone keeps a loot bag or a pouch. With the flags off nothing
+    extra is opened, and the pack must be counted ONCE - adding it to itself
+    would report double and make a clean deposit look like it left half
+    behind."""
+    opened = []
+
+    class Item(object):
+        def __init__(self, serial, item_id, hue=0, amount=1, contains=()):
+            self.Serial, self.ItemID, self.Hue = serial, item_id, hue
+            self.Amount, self.Contains = amount, list(contains)
+
+    loose = Item(3, m["SAND_ID"], 0x096D, 40)
+    keys = Item(9, m["REAGENT_KEY_ID"], m["REAGENT_KEY_HUE"])
+    # The pouch and the loot bag EXIST - they are just not in use. If they
+    # could not be found at all, "nothing opened them" would pass for the
+    # wrong reason.
+    pouch = Item(m["KEY_BAG_SERIAL"], m["KEY_BAG_ID"], m["KEY_BAG_HUE"])
+    lootbag = Item(m["SAND_BAG_SERIAL"], m["SAND_BAG_ID"], m["SAND_BAG_HUE"])
+    pack = Item(0x41D40F58, 0x0E75, 0, 1, [loose, keys, pouch, lootbag])
+
+    saved = {k: m[k] for k in ("Items", "Player", "Misc", "log",
+                               "SAND_IN_SEPARATE_BAG", "KEY_IN_SEPARATE_BAG",
+                               "item_name")}
+    try:
+        m["log"] = lambda *a, **k: None
+        m["item_name"] = lambda item: "reagent keys"
+        m["Misc"] = type("M", (), {"Pause": staticmethod(lambda ms: None)})()
+        m["Player"] = type("P", (), {"Backpack": pack})()
+        dragged = []
+        m["Items"] = type("I", (), {
+            "FindBySerial": staticmethod(
+                lambda ser: {0x41D40F58: pack,
+                             m["KEY_BAG_SERIAL"]: pouch,
+                             m["SAND_BAG_SERIAL"]: lootbag}.get(int(ser))),
+            "UseItem": staticmethod(lambda it: opened.append(int(it.Serial))),
+            "WaitForContents": staticmethod(lambda it, ms: True),
+            # RECORDED, not just counted: move_one swallows a failed drag and
+            # returns False, so "it moved nothing" and "it never tried" look
+            # identical from the return value alone.
+            "Move": staticmethod(
+                lambda item, target, amount: dragged.append(int(target)))})()
+        m["SAND_IN_SEPARATE_BAG"] = False
+        m["KEY_IN_SEPARATE_BAG"] = False
+
+        check("the grab's sand is read from the pack", m["sand_in_bag"]()[0], 40)
+        check("counted ONCE, not doubled", m["sand_on_hand"]()[0], 40)
+        check("nothing opened the loot bag",
+              m["SAND_BAG_SERIAL"] in opened, False)
+
+        call("and nothing is dragged before storing", m["sand_bag_to_pack"], 0)
+        check("no drag was even attempted", dragged, [])
+
+        del opened[:]
+        check("the keys are found loose in the pack",
+              m["find_reagent_key"](), keys)
+        check("and no pouch was opened", m["KEY_BAG_SERIAL"] in opened, False)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+    # The flags default to this user's layout, which is what ships.
+    check("the loot bag is on by default", m["SAND_IN_SEPARATE_BAG"], True)
+    check("and so is the pouch", m["KEY_IN_SEPARATE_BAG"], True)
+
+    # Preflight must not DEMAND a bag that is switched off - that would refuse
+    # to start for everyone who does not carry one.
+    with open(SCRIPT, encoding="utf-8") as fh:
+        pre = fh.read()
+    pre = pre[pre.index("def preflight("):pre.index("def main(")]
+    check("preflight only wants the pouch when it is in use",
+          "if uses_key_bag() and Items.FindBySerial(KEY_BAG_SERIAL) is None:"
+          in pre, True)
+    check("and the loot bag likewise",
+          "if uses_sand_bag() and Items.FindBySerial(SAND_BAG_SERIAL) is None:"
+          in pre, True)
+
+
+def test_the_keys_are_looked_for_in_the_pouch(m):
+    """They are not carried loose in the pack. A container that has never been
+    opened has no contents to search."""
     with open(SCRIPT, encoding="utf-8") as fh:
         src = fh.read()
-    body = src[src.index("def sand_in_pack("):src.index("def grab_sand(")]
-    # The CODE, not the docstring - which mentions Contains while explaining
-    # why the re-open is there, and would satisfy a naive ordering check.
+    body = src[src.index("def find_reagent_key("):src.index("def context_is_blocked(")]
     code = re.sub(r'"""[\s\S]*?"""', "", body)
-    refreshed = "refresh_pack()" in code
-    check("the pack is re-opened", refreshed, True)
-    check("before anything is counted",
-          refreshed and "Contains" in code
-          and code.index("refresh_pack()") < code.index("Contains"), True)
+    opened = "open_container(KEY_BAG_SERIAL" in code
+    check("the pouch is opened", opened, True)
+    check("before the keys are looked up",
+          opened and "FindBySerial(REAGENT_KEY_SERIAL" in code
+          and code.index("open_container(KEY_BAG_SERIAL")
+          < code.index("FindBySerial(REAGENT_KEY_SERIAL"), True)
+    check("and the pouch's contents are searched",
+          "contents_of(pouch)" in code, True)
+
+
+def test_the_sand_leaves_the_bag_before_the_keys_are_asked(m):
+    """Nothing has established that "Refill from stock" reaches into a
+    sub-container, and the failure if it does not is silent: the sand stays
+    in the bag and the deposit looks like it did nothing."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    body = src[src.index("def store_sand("):src.index("def run_batch(")]
+    moved = "sand_bag_to_pack()" in body
+    check("the sand is moved to the pack", moved, True)
+    check("before the context reply",
+          moved and "context_select(" in body
+          and body.index("sand_bag_to_pack()")
+          < body.index("context_select("), True)
+    check("and it is behind a flag that says why",
+          "SAND_TO_PACK_BEFORE_STORE" in body, True)
+
+    # WHOLE STACKS. One drag per stack, not one grain at a time.
+    mover = between(src, "def sand_bag_to_pack(", "def find_reagent_key(")
+    check("the whole stack moves at once",
+          "move_one(stack, int(pack.Serial), \"the sand\", amount)" in mover,
+          True)
+
+    moved_now = []
+    saved = {k: m[k] for k in ("sand_in_bag", "move_one", "Player", "log")}
+    try:
+        m["log"] = lambda *a, **k: None
+        pack = type("P", (), {"Serial": 0x41D40F58})()
+        m["Player"] = type("P", (), {"Backpack": pack})()
+        stack = type("S", (), {"Serial": 1, "Amount": 50, "ItemID": m["SAND_ID"],
+                               "Hue": 0x096D})()
+        m["sand_in_bag"] = lambda: (50, [stack])
+        m["move_one"] = lambda item, target, what, amount=1: (
+            moved_now.append((int(target), amount)) or True)
+        call("it reports how many it moved", m["sand_bag_to_pack"], 50)
+        check("as one drag of the whole stack", moved_now,
+              [(0x41D40F58, 50)])
+
+        del moved_now[:]
+        m["move_one"] = lambda item, target, what, amount=1: False
+        call("a refused drag moves nothing", m["sand_bag_to_pack"], 0)
+    finally:
+        for k, v in saved.items():
+            m[k] = v
+
+    # AND IT ACTUALLY RUNS. Checking that the call is in the source only
+    # proves the text is there - "if False:" in front of it would pass.
+    order = []
+    saved = {k: m[k] for k in ("sand_on_hand", "sand_bag_to_pack",
+                               "find_reagent_key", "context_select", "log",
+                               "Misc")}
+    try:
+        m["log"] = lambda *a, **k: None
+        m["Misc"] = type("M", (), {"Pause": staticmethod(lambda ms: None)})()
+        counts = [(50, []), (0, [])]
+        m["sand_on_hand"] = lambda: counts.pop(0) if counts else (0, [])
+        m["sand_bag_to_pack"] = lambda: order.append("moved") or 50
+        m["find_reagent_key"] = lambda: object()
+        m["context_select"] = lambda *a, **k: order.append("asked") or True
+        call("the deposit still reports what it stored",
+             m["store_sand"], (50, True))
+        check("and the sand left the bag BEFORE the keys were asked",
+              order, ["moved", "asked"])
+    finally:
+        for k, v in saved.items():
+            m[k] = v
 
 
 def test_the_context_entry_is_matched_exactly_first(m):
@@ -811,12 +1029,12 @@ def test_the_grab_waits_for_the_pile_to_stop_growing(m):
     finishes as soon as it has."""
     counts = [0, 0, 12, 33, 50, 50, 50, 50, 50, 50]
     said, spoke = [], []
-    saved = {k: m[k] for k in ("sand_in_pack", "say", "log", "Misc")}
+    saved = {k: m[k] for k in ("sand_in_bag", "say", "log", "Misc")}
     try:
         m["log"] = lambda text, hue=None: said.append(text)
         m["Misc"] = type("M", (), {"Pause": staticmethod(lambda ms: None)})()
         m["say"] = lambda phrase: spoke.append(phrase) or True
-        m["sand_in_pack"] = lambda: (counts.pop(0) if counts else 50, [])
+        m["sand_in_bag"] = lambda: (counts.pop(0) if counts else 50, [])
         call("it returns what arrived", m["grab_sand"], 50, 50)
         check("and it said the phrase", spoke, [m["GRAB_PHRASE"]])
     finally:
@@ -825,7 +1043,7 @@ def test_the_grab_waits_for_the_pile_to_stop_growing(m):
 
     # Nothing picked up is reported, not treated as success.
     said, spoke = [], []
-    saved = {k: m[k] for k in ("sand_in_pack", "say", "log", "Misc",
+    saved = {k: m[k] for k in ("sand_in_bag", "say", "log", "Misc",
                                "GRAB_WAIT_MS")}
     try:
         m["log"] = lambda text, hue=None: said.append(text)
@@ -835,20 +1053,21 @@ def test_the_grab_waits_for_the_pile_to_stop_growing(m):
         # spinning on the real clock. The behaviour under test is what it
         # returns when nothing arrives, not how long it is prepared to wait.
         m["GRAB_WAIT_MS"] = 50
-        m["sand_in_pack"] = lambda: (0, [])
+        m["sand_in_bag"] = lambda: (0, [])
         call("an empty grab returns nothing", m["grab_sand"], 0, 50)
-        check("and says so", any("Nothing was picked up" in t for t in said),
+        check("and says so",
+              any("Nothing arrived in the loot bag" in t for t in said),
               True)
     finally:
         for k, v in saved.items():
             m[k] = v
 
     # A grab that cannot even be said is not a grab.
-    saved = {k: m[k] for k in ("sand_in_pack", "say", "log")}
+    saved = {k: m[k] for k in ("sand_in_bag", "say", "log")}
     try:
         m["log"] = lambda *a, **k: None
         m["say"] = lambda phrase: False
-        m["sand_in_pack"] = lambda: (0, [])
+        m["sand_in_bag"] = lambda: (0, [])
         call("an unsayable phrase gives up", m["grab_sand"], 0, 50)
     finally:
         for k, v in saved.items():
@@ -858,32 +1077,34 @@ def test_the_grab_waits_for_the_pile_to_stop_growing(m):
 def test_the_deposit_is_verified_by_counting_the_pack(m):
     """A deposit that quietly does nothing would leave the sand there and the
     next batch would pile another 50 on top of it."""
-    saved = {k: m[k] for k in ("sand_in_pack", "find_reagent_key",
-                               "context_select", "log", "Misc")}
+    saved = {k: m[k] for k in ("sand_on_hand", "sand_bag_to_pack",
+                               "find_reagent_key", "context_select",
+                               "log", "Misc")}
     try:
         m["log"] = lambda *a, **k: None
         m["Misc"] = type("M", (), {"Pause": staticmethod(lambda ms: None)})()
         m["find_reagent_key"] = lambda: object()
+        m["sand_bag_to_pack"] = lambda: 0
         m["context_select"] = lambda *a, **k: True
 
         counts = [(50, []), (0, [])]
-        m["sand_in_pack"] = lambda: counts.pop(0)
+        m["sand_on_hand"] = lambda: counts.pop(0)
         call("a clean deposit stores all of it", m["store_sand"], (50, True))
 
         counts = [(50, []), (50, [])]
-        m["sand_in_pack"] = lambda: counts.pop(0)
+        m["sand_on_hand"] = lambda: counts.pop(0)
         call("a deposit that took NOTHING stops the run",
              m["store_sand"], (0, False))
 
         counts = [(50, []), (8, [])]
-        m["sand_in_pack"] = lambda: counts.pop(0)
+        m["sand_on_hand"] = lambda: counts.pop(0)
         call("a partial deposit carries on", m["store_sand"], (42, True))
 
-        m["sand_in_pack"] = lambda: (0, [])
+        m["sand_on_hand"] = lambda: (0, [])
         call("no sand is not a failure", m["store_sand"], (0, True))
 
         counts = [(50, []), (50, [])]
-        m["sand_in_pack"] = lambda: counts.pop(0)
+        m["sand_on_hand"] = lambda: counts.pop(0)
         m["find_reagent_key"] = lambda: None
         call("no keys means stop, not another batch",
              m["store_sand"], (0, False))
@@ -935,10 +1156,12 @@ def test_whatever_was_made_is_collected_even_when_the_batch_stops_early(m):
     grabs = "if converted:" in body and "grab_sand(converted)" in body
     check("the collect is gated on what was converted", grabs, True)
     check("and it happens BEFORE the stop is honoured",
-          grabs and body.index("grab_sand(converted)")
+          grabs and "if not keep_going:" in body
+          and body.index("grab_sand(converted)")
           < body.index("if not keep_going:"), True)
     check("the ground fallback only runs when the grab got nothing",
-          "if not got:" in body and body.index("if not got:")
+          "if not got:" in body and "collect_sand_nearby(" in body
+          and body.index("if not got:")
           < body.index("collect_sand_nearby("), True)
 
 
