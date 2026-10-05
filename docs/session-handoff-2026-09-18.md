@@ -15,7 +15,7 @@ detail lives in the handoffs named below; this file is the map and the state.
 | `resource_order_runner.py` | `2026-09-13.5` | in step | partly tested; see below |
 | `Sandmaker.py` | `2026-09-30.4` | in step | **working** — 186 stones converted and stored 2026-09-30. Drag retries added after one refusal ended that run; those are untested |
 | `diag_storage_gump.py` | — | deployed 2026-09-18 | **the live copy was stale** — see below |
-| `COVFarm.py` | `1.7.0` | in step | Level 4/5 chests get the master key before the bag. **Confirmed in game 2026-10-05** on a Level 5 — keyed, then binned |
+| `COVFarm.py` | `1.7.0` | code in step, **two tuned values differ** | Level 4/5 chests get the master key before the bag. **Confirmed in game 2026-10-05**: keyed, then binned |
 | `diag_gump_watch.py` | — | deployed 2026-09-30 | waiting on a run; see the order-runner note |
 | `diag_taming_levels.py` | — | n/a | never run |
 
@@ -27,6 +27,21 @@ folder held only `diag_storage_gump,py.py`, the first version, which printed
 the buttons first so they scrolled away — why the dump never arrived. The
 current one is now live under the right name; the comma-named copy is still
 there and should be deleted.
+
+## COVFarm — the live copy carries two tuned values
+
+`Scripts/COVFarm.py` and the live copy differ in **config only**, and both
+live values are the user's. **Never blind-copy repo → live here.**
+
+| | repo | live |
+|---|---|---|
+| `CAMP_POINT` | `(752, 475)` | `(752, 475)` — mirrored into the repo 2026-10-05 |
+| `MASTER_KEY_SERIAL` | `0` | `0x4335A205` |
+
+The `0` in the repo is deliberate: with no serial the key is found by graphic
+and hue, so the script works for whoever is carrying one. The live copy names
+the user's Master Keys outright. To ship a code change, write the repo file to
+live with that one line carried over — the way `2026-10-05` did it.
 
 ## The three things that still need doing
 
