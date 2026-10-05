@@ -35,11 +35,23 @@ What it does
    to your master key, which destroys nothing; "keep" leaves them alone. The
    choice is printed at startup so it is never a surprise.
 
-   It goes by NAME, whatever the level: anything called "a glimmering chest of
-   belongings" in the backpack is binned. Neither graphic nor hue is pinned,
-   because they vary per drop - Level 1 alone appeared as three graphics in
-   three hues, and Level 5 in a fourth - so anything narrower than the name has
-   already been wrong once and left chests sitting in the pack.
+   It goes by NAME, whatever the graphic: anything called "a glimmering chest
+   of belongings" in the backpack is dealt with. Neither graphic nor hue is
+   pinned, because they vary per drop - Level 1 alone appeared as three
+   graphics in three hues, and Level 5 in a fourth - so anything narrower than
+   the name has already been wrong once and left chests sitting in the pack.
+
+   THE LEVEL DECIDES WHETHER THE MASTER KEY GETS FIRST REFUSAL.
+   KEY_CHEST_LEVELS is [4, 5]: a chest of one of those has the key pressed on
+   it - storing what the key takes - and then goes in the bag like any other.
+   Levels 1-3 go straight in. The key does not empty a level 4/5 chest
+   completely; the handful of things it does not store are destroyed with it,
+   which is expected.
+
+   A chest whose "Level N" line will not load is LEFT IN THE PACK and tried
+   again on the next sweep. It is never binned on a guess - that is how a
+   level 5 chest would be destroyed with its contents because a tooltip was
+   slow.
 
    The sweep runs after every kill AND on a timer while waiting for the next
    spawn, so a chest goes as soon as it turns up. The pack is RE-OPENED before
@@ -97,7 +109,7 @@ import re
 import time
 
 
-SCRIPT_VERSION = "1.6.0"
+SCRIPT_VERSION = "1.7.0"
 
 
 # #############################################################################
@@ -311,7 +323,7 @@ RETURN_TO_CAMP = True
 #
 # The Z of that spot is -17; only X and Y are used, because the walk is 2D and
 # the server settles the height.
-CAMP_POINT = (750, 475)
+CAMP_POINT = (752, 475)
 CAMP_TOLERANCE = 2              # close enough to the start, do not fuss
 CAMP_RETURN_TIMEOUT = 20000
 
@@ -344,6 +356,28 @@ CHEST_ACTION = "trash"
 # Derived. Kept as its own name because a lot of code below asks the simple
 # question "is the script handling chests at all?".
 TRASH_ENABLED = CHEST_ACTION in ("trash", "key")
+
+# ---------------------------------------------------------------------------
+# WHICH LEVELS GET THE MASTER KEY BEFORE THE BAG  -  CHEST_ACTION "trash" only
+#
+# A chest of one of these levels has the master key pressed on it first, so
+# whatever the key stores is kept, and THEN it goes in the trash bag like any
+# other. Levels not listed here go straight in, as they always did.
+#
+# The key does NOT empty a level 4/5 chest completely - two or three items it
+# does not store stay inside and are destroyed with the chest. That is known
+# and accepted (2026-10-05).
+#
+# [] restores the old behaviour: everything straight to the bag.
+KEY_CHEST_LEVELS = [4, 5]
+
+# What to do when the key CANNOT be pressed - no key in the pack, no context
+# menu, or none of MASTER_KEY_CONTEXT on it.
+#
+# True leaves the chest in the pack and tries again next sweep. Binning it
+# would destroy the contents the key was supposed to store first, which is the
+# whole point of the step. False bins it anyway.
+KEY_REQUIRED_BEFORE_TRASH = True
 
 # ---------------------------------------------------------------------------
 # THE MASTER KEY  -  only used when CHEST_ACTION is "key"
@@ -435,16 +469,20 @@ TRASH_ITEMS = [
         "ids": [],
         "hue": -1,
 
-        # The NAME alone decides, as asked on 2026-08-11: anything called
-        # "a glimmering chest of belongings" goes, whatever its level.
+        # THE LEVEL IS NOW REQUIRED, because it decides what happens to the
+        # chest: KEY_CHEST_LEVELS gets the master key first, everything else
+        # goes straight in the bag. A chest whose level cannot be read is left
+        # in the pack and tried again on the next sweep, as asked on
+        # 2026-10-05 - binning it on a guess is how a level 5 chest gets
+        # destroyed with its contents because a tooltip was slow.
         #
-        # Set this True to also require a "Level N" line in the tooltip. It is
-        # off because the levels keep bringing new graphics and hues with them
-        # - Level 1 alone appeared as 0x09AB/0x047E, 0x0E7C/0x089F and
-        # 0x0E40/0x0979, and Level 5 as 0x0E40/0x04F2 - so any check narrower
-        # than the name has already been wrong once and left chests in the
-        # pack. The level is still READ, for the log line, just not required.
-        "require_level": False,
+        # It is still the NAME that identifies a chest; the graphic and hue
+        # stay unpinned, because Level 1 alone appeared as 0x09AB/0x047E,
+        # 0x0E7C/0x089F and 0x0E40/0x0979, and Level 5 as 0x0E40/0x04F2.
+        #
+        # Set False with KEY_CHEST_LEVELS = [] to go back to binning anything
+        # wearing the name, level or no level.
+        "require_level": True,
     },
 ]
 
@@ -1054,6 +1092,11 @@ def item_level(item, tries=3):
                             (Items.GetPropStringList(item) or []))
         except Exception:
             blob = ""
+        # TOOLTIP PROPERTIES ARRIVE CONCATENATED - "...7 StonesLevel 1" -
+        # and \b finds no boundary between "s" and "L", so the level was
+        # invisible on exactly the lines that carry it. A space at each
+        # lower/digit -> upper seam first. See CLAUDE.md.
+        blob = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", blob)
         match = re.search(r"\blevel\s*:?\s*(\d+)", blob, re.I)
         if match:
             return int(match.group(1))
@@ -1192,6 +1235,42 @@ def find_master_key():
             continue
         return item
     return None
+
+
+def master_key_take(what):
+    """Press the master key's "take what is in my pack" entry once.
+
+    True only if a reply was actually SENT. No key, no menu, or none of
+    MASTER_KEY_CONTEXT on it are all False - and nothing is pressed on a
+    guess, because a key's menu carries entries that empty or destroy its
+    contents right beside the one wanted.
+
+    Whether anything moved is not checked here: the caller is about to bin the
+    chest either way, and the key is known not to empty one completely.
+    """
+    key = find_master_key()
+    if key is None:
+        log("Master key not found (id 0x%04X, hue 0x%04X) - nothing stored "
+            "from %s." % (MASTER_KEY_ID, MASTER_KEY_HUE, what), HUE_WARN)
+        return False
+
+    labels = context_labels(key)
+    if not labels:
+        log("The master key showed no context menu - nothing stored from %s."
+            % what, HUE_WARN)
+        return False
+
+    choice = pick_context(labels, MASTER_KEY_CONTEXT)
+    if choice is None:
+        log("None of %s is on the master key's menu, so NOTHING was pressed. "
+            "Add the right wording to MASTER_KEY_CONTEXT - the menu offers: %s"
+            % (MASTER_KEY_CONTEXT, " | ".join(labels)), HUE_BAD)
+        return False
+
+    log("  master key: %r, for %s" % (choice, what))
+    Misc.ContextReply(key, choice)      # the real label, not the search string
+    Misc.Pause(TRASH_MOVE_PAUSE_MS)
+    return True
 
 
 def give_to_master_key(announce=True):
@@ -1345,6 +1424,41 @@ def trash_junk(announce=True):
         label = entry.get("label", "item")
         if level is not None:
             label = "%s (Level %d)" % (label, level)
+
+        # THE MASTER KEY GETS FIRST REFUSAL on the levels that are worth
+        # keeping. It stores what it stores; the chest is binned afterwards
+        # either way, with whatever the key left inside it.
+        if level is not None and level in KEY_CHEST_LEVELS:
+            if not master_key_take(label):
+                if KEY_REQUIRED_BEFORE_TRASH:
+                    log("  %s LEFT IN THE PACK - the key could not be "
+                        "pressed, and binning it now would destroy what the "
+                        "key was meant to store. Trying again next sweep."
+                        % label, HUE_BAD)
+                    skipped.add(serial)
+                    continue
+                log("  the key could not be pressed for %s - binning it "
+                    "anyway, because KEY_REQUIRED_BEFORE_TRASH is False."
+                    % label, HUE_WARN)
+            else:
+                # The pack changed under us, and some keys swallow the chest
+                # itself rather than its contents - in which case there is
+                # nothing left to bin.
+                refresh_backpack()
+                still_here = None
+                for item in pack_items():
+                    try:
+                        if int(item.Serial) == serial:
+                            still_here = item
+                            break
+                    except Exception:
+                        continue
+                if still_here is None:
+                    log("  the master key took %s outright - nothing left for "
+                        "the bag." % label, HUE_GOOD)
+                    binned += 1
+                    continue
+                junk = still_here
 
         Items.Move(junk, bag, -1)
         Misc.Pause(TRASH_MOVE_PAUSE_MS)
@@ -1814,6 +1928,16 @@ def preflight():
             "after 30 seconds.%s"
             % ("" if bag is not None else "  WARNING: the bag was not found."),
             HUE_WARN if bag is None else HUE_INFO)
+        if KEY_CHEST_LEVELS:
+            key = find_master_key()
+            log("  Level %s first go to the MASTER KEY, then in the bag.%s"
+                % ("/".join(str(l) for l in sorted(KEY_CHEST_LEVELS)),
+                   "" if key is not None
+                   else "  WARNING: no master key in your pack, so those "
+                        "chests will be LEFT ALONE."),
+                HUE_WARN if key is None else HUE_INFO)
+        log("  A chest whose 'Level N' will not load is left in the pack and "
+            "tried again, never binned on a guess.", HUE_INFO)
     elif CHEST_ACTION == "key":
         key = find_master_key()
         log("Chests: handed to the MASTER KEY - nothing is destroyed.%s"

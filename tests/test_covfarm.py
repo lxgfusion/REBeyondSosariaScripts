@@ -42,6 +42,20 @@ def check(label, got, want):
           % ("ok" if ok else "FAIL", label, got, want))
 
 
+def attempt(label, fn, want, *args):
+    """check() for a real call: an exception is a FAILURE, not a traceback.
+
+    This file is a flat script, so one raise takes down every check after it -
+    the failure mode CLAUDE.md names. A change that breaks the function under
+    test has to show up as a failed check instead.
+    """
+    try:
+        got = fn(*args)
+    except Exception as err:
+        got = "raised %s: %s" % (type(err).__name__, err)
+    check(label, got, want)
+
+
 class Point(object):
     def __init__(self, x, y, z=0):
         self.X = x
@@ -851,6 +865,24 @@ CHEST_VARIANTS = [
 ]
 
 
+class Ctx(object):
+    """A context menu entry, as Misc.WaitForContext returns them."""
+
+    def __init__(self, entry):
+        self.Entry = entry
+
+
+def give_master_key(module, menu=("Open", "Add", "Refill from stock")):
+    """Put a master key in the pack and stub its menu. Returns what was
+    pressed, as a list that fills in as the sweep runs."""
+    PACK.append(PackItem(0x4F0F0001, module["MASTER_KEY_ID"],
+                         module["MASTER_KEY_HUE"], "a master key"))
+    pressed = []
+    module["Misc"].WaitForContext = lambda i, d, sc=None: [Ctx(e) for e in menu]
+    module["Misc"].ContextReply = lambda i, label: pressed.append(label)
+    return pressed
+
+
 def chest(serial, hue=0x047E, level=1, item_id=0x09AB, with_level=True):
     """A lootable reward chest, as the Item Inspector showed it."""
     props = ["A Glimmering Chest Of Belongings", "Weight: 18 Stones",
@@ -872,18 +904,23 @@ check("and it is in the bag now", [i.Serial for i in bag.Contains],
       [0x40988235])
 
 print()
-print("   -- levels 1 to 5 all go, whatever hue they carry --")
+print("   -- levels 1 to 5 all END UP BINNED, whatever hue they carry --")
+print("      but 4 and 5 go through the master key on the way, 2026-10-05")
 m9 = load()
 bag = fresh_pack(m9)
+pressed9 = give_master_key(m9)
 for i, lvl in enumerate([1, 2, 3, 4, 5]):
     # Deliberately different hues AND graphics: only Level 1 was ever
     # inspected, so keying on either would silently skip the rest.
     PACK.append(chest(0x40990000 + i, hue=0x047E + i * 0x10, level=lvl,
                       item_id=0x0E70 + i))
-check("all five binned", m9["trash_junk"](), 5)
+attempt("all five binned", m9["trash_junk"], 5)
 check("five moves", len(MOVES), 5)
-check("pack has only the bag left", [i.Serial for i in PACK],
-      [m9["TRASH_BAG_SERIAL"]])
+check("pack has only the bag and the key left",
+      sorted(i.Serial for i in PACK),
+      sorted([m9["TRASH_BAG_SERIAL"], 0x4F0F0001]))
+check("the key was pressed for the two worth keeping, and only those",
+      pressed9, ["Refill from stock"] * 2)
 
 print()
 print("   -- THE DANGEROUS ONE: the order runner's storage chests --")
@@ -938,21 +975,122 @@ check("both still in the pack",
       sorted(m19b["TRASH_NEVER_SERIALS"]))
 
 print()
-print("   -- THE NAME ALONE DECIDES: no 'Level N' needed --")
+print("   -- NO 'Level N' -> LEFT IN THE PACK and tried again, 2026-10-05 --")
+print("      binning it on a guess is how a Level 5 chest is destroyed with")
+print("      its contents because a tooltip was slow.")
 m20 = load()
 bag = fresh_pack(m20)
+del MSGS[:]
+give_master_key(m20)
 PACK.append(chest(0x47770001, with_level=False))
-check("binned on the name alone", m20["trash_junk"](), 1)
-check("it went to the bag", MOVES, [(0x47770001, m20["TRASH_BAG_SERIAL"])])
+attempt("nothing binned", m20["trash_junk"], 0)
+check("nothing moved", MOVES, [])
+check("the chest is still in the pack",
+      0x47770001 in [i.Serial for i in PACK], True)
+check("and it said why", any("no 'Level N'" in x for x in MSGS), True)
 
 print()
-print("   -- Level 5, a fourth hue, still just goes --")
+print("   -- Level 5: the key first, THEN the bag --")
 m21 = load()
 bag = fresh_pack(m21)
+pressed21 = give_master_key(m21)
 # Inspected 2026-08-11: 0x0E40 hue 0x04F2, Level 5, Contents 16/125.
 PACK.append(chest(0x4030A3C2, hue=0x04F2, level=5, item_id=0x0E40))
-check("binned", m21["trash_junk"](), 1)
-check("it went to the bag", MOVES, [(0x4030A3C2, m21["TRASH_BAG_SERIAL"])])
+attempt("binned", m21["trash_junk"], 1)
+check("the key was pressed first", pressed21, ["Refill from stock"])
+check("and it still went to the bag",
+      MOVES, [(0x4030A3C2, m21["TRASH_BAG_SERIAL"])])
+check("the chest is binned even though the key leaves things inside",
+      [i.Serial for i in bag.Contains], [0x4030A3C2])
+
+print()
+print("=" * 100)
+print("THE MASTER KEY FIRST, FOR LEVELS 4 AND 5 ONLY  (asked 2026-10-05)")
+print("=" * 100)
+
+print("   -- levels 1, 2 and 3 never touch the key --")
+m50 = load()
+bag = fresh_pack(m50)
+pressed50 = give_master_key(m50)
+for i, lvl in enumerate([1, 2, 3]):
+    PACK.append(chest(0x51000000 + i, level=lvl))
+attempt("all three binned", m50["trash_junk"], 3)
+check("the key was never pressed", pressed50, [])
+
+print()
+print("   -- NO KEY IN THE PACK: 4 and 5 are held back, 1-3 still go --")
+print("      binning them would destroy what the key was meant to store")
+m51 = load()
+bag = fresh_pack(m51)
+del MSGS[:]
+m51["Misc"].WaitForContext = lambda i, d, sc=None: []
+PACK.append(chest(0x52000001, level=2))
+PACK.append(chest(0x52000004, level=4))
+PACK.append(chest(0x52000005, level=5))
+attempt("only the low one is binned", m51["trash_junk"], 1)
+check("and it was the Level 2", MOVES,
+      [(0x52000001, m51["TRASH_BAG_SERIAL"])])
+check("both high ones are still in the pack",
+      sorted(i.Serial for i in PACK if i.Serial in (0x52000004, 0x52000005)),
+      [0x52000004, 0x52000005])
+check("and it said why", any("LEFT IN THE PACK" in x for x in MSGS), True)
+
+print()
+print("   -- KEY_REQUIRED_BEFORE_TRASH False bins them anyway --")
+m52 = load()
+bag = fresh_pack(m52)
+del MSGS[:]
+m52["KEY_REQUIRED_BEFORE_TRASH"] = False
+m52["Misc"].WaitForContext = lambda i, d, sc=None: []
+PACK.append(chest(0x53000005, level=5))
+attempt("binned without the key", m52["trash_junk"], 1)
+check("with a warning", any("KEY_REQUIRED_BEFORE_TRASH" in x for x in MSGS),
+      True)
+
+print()
+print("   -- an unrecognised menu is NOT pressed on a guess --")
+m53 = load()
+bag = fresh_pack(m53)
+del MSGS[:]
+pressed53 = give_master_key(m53, menu=("Open", "Add", "Empty the key"))
+PACK.append(chest(0x54000005, level=5))
+attempt("nothing binned", m53["trash_junk"], 0)
+check("and nothing pressed", pressed53, [])
+check("the menu is printed so the wording can be added",
+      any("Empty the key" in x for x in MSGS), True)
+
+print()
+print("   -- a key that swallows the chest outright leaves nothing to bin --")
+m54 = load()
+bag = fresh_pack(m54)
+del MSGS[:]
+PACK.append(PackItem(0x4F0F0001, m54["MASTER_KEY_ID"], m54["MASTER_KEY_HUE"],
+                     "a master key"))
+m54["Misc"].WaitForContext = lambda i, d, sc=None: [
+    Ctx(e) for e in ("Open", "Refill from stock")]
+
+
+def swallow_chest(item, label):
+    for it in list(PACK):
+        if it.Name == "a glimmering chest of belongings":
+            PACK.remove(it)
+
+
+m54["Misc"].ContextReply = swallow_chest
+PACK.append(chest(0x55000005, level=5))
+attempt("counted as dealt with", m54["trash_junk"], 1)
+check("and nothing went to the bag", MOVES, [])
+check("it said the key took it", any("took" in x for x in MSGS), True)
+
+print()
+print("   -- KEY_CHEST_LEVELS = [] restores the old straight-to-the-bag --")
+m55 = load()
+bag = fresh_pack(m55)
+m55["KEY_CHEST_LEVELS"] = []
+pressed55 = give_master_key(m55)
+PACK.append(chest(0x56000005, level=5))
+attempt("binned", m55["trash_junk"], 1)
+check("with no key press at all", pressed55, [])
 
 print()
 print("   -- require_level True still gates, for whoever turns it back on --")
@@ -1157,9 +1295,14 @@ print("=" * 100)
 print("CAMP - a fixed configured spot, not wherever the script started")
 print("=" * 100)
 m29 = load()
-check("CAMP_POINT is the configured spot", m29["CAMP_POINT"], (750, 475))
+# CAMP_POINT is TUNED - the live copy sits a couple of tiles off the repo's.
+# Pin its shape, not its value: hard-coding the number here turns the user
+# moving their camp into a failing test.
+check("CAMP_POINT is a tile", (len(m29["CAMP_POINT"]),
+                               all(isinstance(n, int)
+                                   for n in m29["CAMP_POINT"])), (2, True))
 m29["_camp"] = (m29["CAMP_POINT"][0], m29["CAMP_POINT"][1])
-m29["Player"].Position = Point(750, 475)
+m29["Player"].Position = Point(*m29["CAMP_POINT"])
 check("already there -> no walk", m29["return_to_camp"](), True)
 
 m30 = load()
@@ -1174,11 +1317,6 @@ print()
 print("=" * 100)
 print("CHEST_ACTION - trash, hand to the master key, or leave alone")
 print("=" * 100)
-
-
-class Ctx(object):
-    def __init__(self, entry):
-        self.Entry = entry
 
 
 def with_master_key(module, menu, key_id=None, key_hue=None):
