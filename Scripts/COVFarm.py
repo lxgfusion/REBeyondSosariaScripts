@@ -44,6 +44,8 @@ What it does
    THE LEVEL DECIDES WHETHER THE MASTER KEY GETS FIRST REFUSAL.
    KEY_CHEST_LEVELS is [4, 5]: a chest of one of those has the key pressed on
    it - storing what the key takes - and then goes in the bag like any other.
+   CONFIRMED IN GAME on a Level 5, 2026-10-05: keyed, then binned. Level 4
+   takes the identical branch.
    Levels 1-3 go straight in. The key does not empty a level 4/5 chest
    completely; the handful of things it does not store are destroyed with it,
    which is expected.

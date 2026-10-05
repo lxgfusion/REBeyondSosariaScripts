@@ -15,7 +15,7 @@ detail lives in the handoffs named below; this file is the map and the state.
 | `resource_order_runner.py` | `2026-09-13.5` | in step | partly tested; see below |
 | `Sandmaker.py` | `2026-09-30.4` | in step | **working** — 186 stones converted and stored 2026-09-30. Drag retries added after one refusal ended that run; those are untested |
 | `diag_storage_gump.py` | — | deployed 2026-09-18 | **the live copy was stale** — see below |
-| `COVFarm.py` | `1.7.0` | in step | Level 4/5 chests get the master key before the bag (2026-10-05). **Untested in game** |
+| `COVFarm.py` | `1.7.0` | in step | Level 4/5 chests get the master key before the bag. **Confirmed in game 2026-10-05** on a Level 5 — keyed, then binned |
 | `diag_gump_watch.py` | — | deployed 2026-09-30 | waiting on a run; see the order-runner note |
 | `diag_taming_levels.py` | — | n/a | never run |
 
