@@ -56,6 +56,22 @@ player = 0                #YOUR character serial - Item Inspector, or
 storage = 0               #Fisherman's Haul or Master Key - takes the fish
 treasure = 0              #Treasure Hunter's Storage - nets and maps.
                           #  Its graphic is 0xA321 if you need to find it.
+
+# ONE KEY OR TWO.
+#
+# A MASTER KEY takes everything in a single press, so asking it a second time
+# for the nets and maps is a wasted context menu and a wasted second on every
+# single trip. Set this True when the key in `storage` is one.
+#
+# False is the two-key setup this started as: the Fisherman's Haul takes the
+# fish, and the Treasure Hunter's Storage takes the nets and maps, which needs
+# both presses.
+#
+# You do NOT have to set it if both serials above are the same key - that is
+# detected on its own, because pressing one container twice cannot do anything
+# the first press did not. The flag is for a master key whose serial you have
+# only put in `storage`.
+masterKey = False
 fish = [0x09CC,0x4306,0x4303,0x4307,0x44C5,0x44C6,0x44C3]
 trash = 0                 # your trash bag. 0 disables binning entirely.
 junk = [0x1711,0x170B,0x0DD6,0x44C4,0x44C3,0x170D]
@@ -213,10 +229,32 @@ def storeKey(serial, label):
                      % (label, FALLBACK_INDEX, " | ".join(names)), 33, True)
     return False
 
-# Stores fish in your storage key, and nets/maps in the treasure storage
+# True when one key takes the lot, so the second press is pointless.
+#
+# Either you said so with masterKey, or both serials are the SAME container -
+# and pressing one container twice cannot store anything the first press did
+# not. `storage` must be set for this to mean anything; with it at 0 there is
+# no key to press once or twice.
+def usingOneKey():
+    if not storage:
+        return False
+    return bool(masterKey) or storage == treasure
+
+
+# What to call the key in the log, so a master key is not reported as a
+# Fisherman's Haul it is not.
+def storageLabel():
+    return "Master Key" if usingOneKey() else "Fisherman's Haul"
+
+
+# Stores fish in your storage key, and nets/maps in the treasure storage.
+#
+# ONE press with a master key, two with the Haul/Treasure pair.
 def storeFish():
-    storeKey(storage, "Fisherman's Haul")
+    storeKey(storage, storageLabel())
     Misc.Pause(300)
+    if usingOneKey():
+        return
     storeKey(treasure, "Treasure Hunter's Storage")
     Misc.Pause(300)
 
@@ -466,13 +504,34 @@ def checkConfig():
                          33, True)
         return False
 
-    for value, label, why in (
-            (storage, "storage", "the fish will pile up in your pack"),
-            (treasure, "treasure", "nets and maps will not be stored"),
-            (trash, "trash", "junk will not be binned"),
-            (dagger, "dagger", "a dagger is looked up by graphic instead")):
+    checks = [(storage, "storage", "the fish will pile up in your pack")]
+    if not usingOneKey():
+        checks.append((treasure, "treasure",
+                       "nets and maps will not be stored"))
+    checks.append((trash, "trash", "junk will not be binned"))
+    checks.append((dagger, "dagger",
+                   "a dagger is looked up by graphic instead"))
+    for value, label, why in checks:
         if not value:
             Misc.SendMessage("%s is 0 - %s." % (label, why), 43, True)
+
+    # Say which way it will store, out loud, before the first trip. One press
+    # or two is the difference the user asked for, and a flag that quietly did
+    # nothing would look exactly like a flag that worked.
+    if usingOneKey():
+        why = ("masterKey is on" if masterKey
+               else "storage and treasure are the same key")
+        Misc.SendMessage("Storing with ONE press of 0x%X (%s)."
+                         % (storage, why), 90, True)
+        if masterKey and treasure and treasure != storage:
+            Misc.SendMessage("  NOTE: treasure 0x%X is a different container "
+                             "and will NOT be used while masterKey is on - "
+                             "nets and maps go into the master key instead."
+                             % treasure, 43, True)
+    else:
+        Misc.SendMessage("Storing with TWO presses: the Haul 0x%X, then the "
+                         "Treasure Storage 0x%X. Set masterKey = True if one "
+                         "key takes the lot." % (storage, treasure), 90, True)
     return True
 
 # Casts wildfire when a gray shows up (must set enemy in RE targeting tab)

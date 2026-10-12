@@ -28,6 +28,31 @@ the buttons first so they scrolled away — why the dump never arrived. The
 current one is now live under the right name; the comma-named copy is still
 there and should be deleted.
 
+## AFK Fisher — one key or two
+
+`masterKey` (2026-10-12) decides whether the storage key is pressed once or
+twice. A Master Key takes everything in one press, so the second one was a
+wasted context menu on every trip.
+
+It is also worked out on its own when `storage` and `treasure` hold the SAME
+serial — pressing one container twice cannot store what the first press did
+not — so the user's live copy was already a one-press setup before the flag
+existed. The flag covers a master key whose serial is only in `storage`.
+`masterKey` ships **False**: the published copy is the two-key Haul/Treasure
+setup, and a flag that shipped on would quietly stop storing nets and maps
+for anyone cloning it with two keys.
+
+**The live copy is config-only different** from the repo — `player`,
+`storage`, `treasure`, `trash`, `dagger` and `masterKey = True`. Deploy by
+writing the repo file to live with those lines carried over, the way
+`2026-10-12` did it.
+
+**History worth keeping:** that deploy also carried across a `refreshPack()`
+fix that had been committed to the repo and never reached the live folder, so
+the running copy still had the stale-snapshot ordering bug. The usual warning
+in `CLAUDE.md` is about editing only the repo copy; this is what it looks like
+when it happens.
+
 ## COVFarm — the live copy carries two tuned values
 
 `Scripts/COVFarm.py` and the live copy differ in **config only**, and both

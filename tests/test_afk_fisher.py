@@ -434,6 +434,114 @@ def test_both_keys_are_offered_once_each(m):
     check("two replies, not one per fish", len(misc.replies), 2)
 
 
+def test_a_master_key_is_pressed_ONCE(m):
+    """A Master Key takes everything in one press, so the second one is a
+    wasted context menu and a wasted second on every trip (asked 2026-10-12).
+    """
+    misc = FakeMisc(menu=["Open", "Add", "Refill from stock"])
+    mod = load(misc=misc)
+    mod["storage"] = 0x4335A205
+    mod["treasure"] = 0
+    mod["masterKey"] = True
+    mod["storeFish"]()
+    check("one reply, not two", len(misc.replies), 1)
+    check("and it went to the master key",
+          [s for s, _l in misc.replies], [0x4335A205])
+
+
+def test_the_same_key_in_both_slots_is_pressed_once_without_the_flag(m):
+    """Pressing one container twice cannot store anything the first press did
+    not, so this needs no configuring - which is the state the user's live
+    copy was already in."""
+    misc = FakeMisc(menu=["Open", "Add", "Refill from stock"])
+    mod = load(misc=misc)
+    mod["storage"] = 0x4335A205
+    mod["treasure"] = 0x4335A205        # the same key in both slots
+    mod["masterKey"] = False            # NOT set, deliberately
+    check("it works it out on its own", mod["usingOneKey"](), True)
+    mod["storeFish"]()
+    check("still one press", len(misc.replies), 1)
+
+
+def test_two_different_keys_are_still_pressed_twice(m):
+    """The Haul/Treasure pair is the setup this started as, and it needs both.
+    """
+    misc = FakeMisc(menu=["Open", "Add", "Refill from stock"])
+    mod = load(misc=misc)
+    mod["storage"] = 0x0AA01000
+    mod["treasure"] = 0x07BE5A00
+    mod["masterKey"] = False
+    check("two keys is not one key", mod["usingOneKey"](), False)
+    mod["storeFish"]()
+    check("both pressed", sorted(s for s, _l in misc.replies),
+          sorted([0x0AA01000, 0x07BE5A00]))
+
+
+def test_no_storage_key_at_all_is_not_mistaken_for_a_master_key(m):
+    """With storage at 0 there is no key to press once or twice. Reporting
+    "one press" there would be reporting a press that cannot happen."""
+    mod = load(misc=FakeMisc(menu=["Open", "Add", "Refill from stock"]))
+    mod["storage"] = 0
+    mod["treasure"] = 0
+    mod["masterKey"] = True
+    check("not one key - no key", mod["usingOneKey"](), False)
+    mod["masterKey"] = False
+    check("and two zeroes are not 'the same key' either",
+          mod["usingOneKey"](), False)
+
+
+def test_the_startup_line_says_which_way_it_will_store(m):
+    """A flag that quietly did nothing would look exactly like a flag that
+    worked. It is said before the first trip, either way."""
+    misc = FakeMisc(menu=["Open", "Add", "Refill from stock"])
+    mod = load(misc=misc)
+    mod["player"] = 0x003A0836
+    mod["storage"] = 0x4335A205
+    mod["treasure"] = 0
+    mod["masterKey"] = True
+    mod["checkConfig"]()
+    said = " ".join(misc.messages)
+    check("it says ONE press", "ONE press" in said, True)
+    check("and names the key", "0x4335A205" in said, True)
+    check("and it does NOT nag about treasure being 0",
+          "treasure is 0" in said, False)
+
+    misc = FakeMisc(menu=["Open", "Add", "Refill from stock"])
+    mod = load(misc=misc)
+    mod["player"] = 0x003A0836
+    mod["storage"] = 0x0AA01000
+    mod["treasure"] = 0x07BE5A00
+    mod["masterKey"] = False
+    mod["checkConfig"]()
+    said = " ".join(misc.messages)
+    check("two keys says TWO presses", "TWO presses" in said, True)
+    check("and points at the flag", "masterKey = True" in said, True)
+
+
+def test_a_treasure_key_ignored_by_masterKey_is_called_out(m):
+    """masterKey on with a DIFFERENT treasure serial means that container is
+    never pressed. Silently skipping a real key is how nets and maps pile up
+    with nobody knowing why."""
+    misc = FakeMisc(menu=["Open", "Add", "Refill from stock"])
+    mod = load(misc=misc)
+    mod["player"] = 0x003A0836
+    mod["storage"] = 0x4335A205
+    mod["treasure"] = 0x07BE5A00
+    mod["masterKey"] = True
+    mod["checkConfig"]()
+    said = " ".join(misc.messages)
+    check("it warns the treasure key is unused", "will NOT be used" in said,
+          True)
+    check("and names it", "0x7BE5A00" in said or "0x07BE5A00" in said, True)
+
+
+def test_the_master_key_option_ships_off(m):
+    """The published copy is the two-key setup it started as. A flag that
+    ships on would silently stop storing nets and maps for whoever cloned it
+    with two keys."""
+    check("masterKey defaults off", m["masterKey"], False)
+
+
 def test_a_key_with_no_menu_is_reported(m):
     misc = FakeMisc(menu=[])
     mod = load(misc=misc)
