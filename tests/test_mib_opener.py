@@ -159,29 +159,58 @@ def bottle(serial, amount=1):
 
 # ---------------------------------------------------------------------------
 
-def test_a_bottle_inside_a_bag_is_found(m_world):
-    """UseItemByID searches the pack's TOP LEVEL only, so a bottle in a bag was
-    never opened by the one-liner this replaces."""
+def test_no_bag_is_ever_opened_by_default(m_world):
+    """THE REPORTED BUG, 2026-10-12: it opened bags continuously.
+
+    A container only reports what is in it just after it is opened, so
+    searching bags meant RE-OPENING every bag on every count - and the count
+    runs twice per bottle. The pack itself is still re-read, because that is
+    where the bottles are and a stale snapshot hides them.
+    """
     inner = Item(0x4000BBBB, 0x0E76, contains=[bottle(0x40000003)],
                  container=True)
     outer = Item(0x4000AAAA, 0x0E76, contains=[bottle(0x40000002), inner],
                  container=True)
     world = World(pack_with(bottle(0x40000001), outer))
     m = load(world)
+    check("it ships off", m["SEARCH_BAGS"], False)
 
     total, found = m["find_bottles"]()
-    check("all three found, two of them in bags", total, 3)
+    check("only the loose one is counted", total, 1)
+    check("and it is the one in the pack",
+          [int(i.Serial) for i in found], [0x40000001])
+    check("NO bag was opened - only the pack itself",
+          sorted(set(world.opened)), [0x41D40F58])
+
+    # A whole run must not open one either: the count happens over and over.
+    del world.opened[:]
+    m["main"]()
+    check("not during a full run either", sorted(set(world.opened)),
+          [0x41D40F58])
+
+
+def test_search_bags_turns_the_deeper_search_back_on(m_world):
+    """For whoever keeps their bottles in a bag and would rather have the
+    churn."""
+    inner = Item(0x4000BBBB, 0x0E76, contains=[bottle(0x40000003)],
+                 container=True)
+    outer = Item(0x4000AAAA, 0x0E76, contains=[bottle(0x40000002), inner],
+                 container=True)
+    world = World(pack_with(bottle(0x40000001), outer))
+    m = load(world)
+    m["SEARCH_BAGS"] = True
+
+    total, found = m["find_bottles"]()
+    check("all three found", total, 3)
     check("including the one two bags deep",
           sorted(int(i.Serial) for i in found),
           [0x40000001, 0x40000002, 0x40000003])
-    check("and every bag was RE-OPENED to read it",
+    check("and every bag was re-opened to read it",
           sorted(set(world.opened)),
           sorted([0x41D40F58, 0x4000AAAA, 0x4000BBBB]))
 
-    # Depth is capped, and the cap is honoured.
     m["MAX_BAG_DEPTH"] = 1
-    total, _ = m["find_bottles"]()
-    check("a depth cap of 1 leaves the deepest one alone", total, 2)
+    check("the depth cap is honoured", m["find_bottles"]()[0], 2)
 
 
 def test_a_stack_counts_as_its_amount(m_world):

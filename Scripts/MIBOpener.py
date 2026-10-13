@@ -7,8 +7,7 @@ freeshard.
 
 WHAT IT DOES
 ------------
-    open every Message in a Bottle it can find, in the pack AND in the bags
-    inside it, one at a time
+    open every Message in a Bottle in the BACKPACK, one at a time
     stop the moment there are none left
     hand what came out to your storage key(s)
 
@@ -17,10 +16,17 @@ WHAT IT REPLACES
     Items.UseItemByID(0x099F)
     Misc.Pause(400)
 
-in a loop that never ended. Two things were wrong with that beyond the
-stopping: `UseItemByID` searches the backpack's top level only, so a bottle in
-a bag was never opened; and nothing checked that a bottle actually opened, so
-a refusal looked exactly like success.
+in a loop that never ended. The other thing wrong with it: nothing checked
+that a bottle actually opened, so a refusal looked exactly like success.
+
+THE BACKPACK ONLY, BY DEFAULT
+-----------------------------
+Bottles sitting loose in the pack are opened; bags inside it are left shut.
+SEARCH_BAGS turns the deeper search on, and it is OFF because of what it
+costs: a container's contents are only current just after it is opened, so
+searching bags means re-opening every one of them on every count - and the
+count runs twice per bottle. That is a bag window flapping open over and over
+for the whole run, which is exactly how it behaved when it shipped on.
 
 WHAT COMES OUT
 --------------
@@ -61,7 +67,7 @@ import time
 # Printed as the first line at startup. Razor CACHES the loaded script even
 # after the file on disk changes - if this line is not what you expect, hit
 # Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-10-12.2"
+SCRIPT_VERSION = "2026-10-12.3"
 
 
 # =============================================================================
@@ -76,6 +82,10 @@ SCRIPT_VERSION = "2026-10-12.2"
 #
 #   serial  the exact item. 0 means "find it by graphic".
 #   id/hue  the fallback. hue -1 means any hue.
+#
+# IF YOUR KEY LIVES IN A BAG, SET ITS SERIAL. The graphic fallback searches
+# the same place everything else does, which with SEARCH_BAGS off is the
+# backpack's top level - a key in a pouch is found by serial or not at all.
 #
 # A MASTER KEY takes everything in one press, so if that is all you carry,
 # leave the treasure key disabled - a second press on a key that already took
@@ -117,8 +127,20 @@ MIB_HUE = -1                    # -1 = any
 SOS_IDS = [0x14EE]
 SOS_NAMES = ["sos"]
 
-# How deep to look. The backpack is depth 0, a bag in it is 1, a bag in that
-# is 2. Bags inside bags inside bags are rare and the walk is not free.
+# LOOK INSIDE BAGS? Off.
+#
+# A container only reports what is in it just after it has been opened, so
+# searching bags means RE-OPENING every bag on every count - and the count
+# runs twice for every bottle. On a pack with a few bags that is a window
+# flapping open continuously for the whole run, which is what it did when
+# this shipped on.
+#
+# Leave it False and bottles have to be loose in the backpack. Turn it on
+# only if you keep them in a bag and would rather have the churn.
+SEARCH_BAGS = False
+
+# How deep to look WHEN SEARCH_BAGS IS ON. The backpack is depth 0, a bag in
+# it is 1, a bag in that is 2.
 MAX_BAG_DEPTH = 3
 
 # Ceiling on bottles opened in one run, so nothing can spin forever even if
@@ -207,17 +229,23 @@ def is_container(item):
 
 
 def walk_pack():
-    """Every item in the pack and in the bags inside it, bags re-opened first.
+    """Everything this script can see. The BACKPACK'S TOP LEVEL by default.
 
-    Breadth first, with a visited set: a bag that somehow contains itself
-    would otherwise be walked until the recursion limit, and "it hung" is a
-    worse failure than "it missed one".
+    With SEARCH_BAGS off nothing but the pack is ever opened - no bag window
+    opens at all, which is the whole point of the flag.
+
+    With it on, breadth first with a visited set: a bag that somehow contains
+    itself would otherwise be walked until the recursion limit, and "it hung"
+    is a worse failure than "it missed one".
     """
     pack = Player.Backpack
     if pack is None:
         return []
 
     open_container(pack)
+    if not SEARCH_BAGS:
+        return contents_of(pack)
+
     found = []
     seen = set([int(pack.Serial)])
     level = [(pack, 0)]
@@ -455,11 +483,14 @@ def preflight():
             % ", ".join(e.get("label", "key") for e in enabled))
 
     total, _ = find_bottles()
-    log("  %d bottle(s) found (graphic %s, bags %d deep)"
-        % (total, ", ".join("0x%04X" % i for i in MIB_IDS), MAX_BAG_DEPTH),
+    log("  %d bottle(s) found (graphic %s, %s)"
+        % (total, ", ".join("0x%04X" % i for i in MIB_IDS),
+           "bags searched %d deep" % MAX_BAG_DEPTH if SEARCH_BAGS
+           else "backpack only - bags are left shut"),
         HUE_GOOD if total else HUE_WARN)
     if not total:
-        log("Nothing to open.", HUE_WARN)
+        log("Nothing to open. Bottles have to be loose in the backpack unless "
+            "you set SEARCH_BAGS = True.", HUE_WARN)
         return False
     return True
 
