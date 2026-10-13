@@ -22,6 +22,16 @@ stopping: `UseItemByID` searches the backpack's top level only, so a bottle in
 a bag was never opened; and nothing checked that a bottle actually opened, so
 a refusal looked exactly like success.
 
+WHAT COMES OUT
+--------------
+Confirmed in game 2026-10-12: the bottle is CONSUMED and leaves behind an SOS
+- "a waterstained SOS" (ItemID 0x14EE, 1 stone) or "an Ancient SOS", whose
+graphic has not been inspected yet and so is matched by name.
+
+That is why counting works: the bottle really does leave the pack. If a shard
+ever left the bottle in place, the count would not move and the run would stop
+after RETRY_PASSES saying so, rather than spinning.
+
 HOW IT KNOWS WHEN TO STOP
 -------------------------
 It counts. Every pass re-reads the pack, counts the bottles, opens ONE, and
@@ -51,7 +61,7 @@ import time
 # Printed as the first line at startup. Razor CACHES the loaded script even
 # after the file on disk changes - if this line is not what you expect, hit
 # Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-10-12.1"
+SCRIPT_VERSION = "2026-10-12.2"
 
 
 # =============================================================================
@@ -96,6 +106,16 @@ DEPOSIT_EVERY = 25
 # is not pinned because it has never needed to be.
 MIB_IDS = [0x099F]
 MIB_HUE = -1                    # -1 = any
+
+# WHAT COMES OUT, so the run can say how many it got and whether the key
+# actually took them.
+#
+# Inspected 2026-10-12: "a waterstained SOS", ItemID 0x14EE, hue 0x0000, 1
+# stone, in the backpack. There is also "an Ancient SOS" whose graphic has not
+# been inspected - hence the NAME list, which catches it whatever it is drawn
+# as. Either test is enough; neither is required for the opening to work.
+SOS_IDS = [0x14EE]
+SOS_NAMES = ["sos"]
 
 # How deep to look. The backpack is depth 0, a bag in it is 1, a bag in that
 # is 2. Bags inside bags inside bags are rare and the walk is not free.
@@ -236,6 +256,35 @@ def amount_of(item):
         return int(item.Amount or 1)
     except Exception:
         return 1
+
+
+def is_sos(item):
+    """Something a bottle turned into. Graphic OR name.
+
+    The name is what catches the Ancient SOS, whose graphic nobody has
+    inspected. Item.Name can be empty until the properties load, which only
+    costs this a nicer count - nothing hangs on it.
+    """
+    try:
+        if int(item.ItemID) in SOS_IDS:
+            return True
+    except Exception:
+        pass
+    try:
+        name = (item.Name or "").strip().lower()
+    except Exception:
+        return False
+    if not name:
+        return False
+    for want in SOS_NAMES:
+        if want.strip().lower() in name:
+            return True
+    return False
+
+
+def sos_on_hand():
+    """How many SOS are in the pack and its bags right now."""
+    return sum(amount_of(i) for i in walk_pack() if is_sos(i))
 
 
 def find_bottles():
@@ -419,6 +468,10 @@ def main():
     if not preflight():
         return
 
+    # What was already on you, so the run reports what IT produced rather than
+    # what happens to be in the pack.
+    sos_before = sos_on_hand()
+
     opened = 0
     stalled = 0
     since_deposit = 0
@@ -456,9 +509,24 @@ def main():
     else:
         log("Stopped at the MAX_OPENS ceiling of %d." % MAX_OPENS, HUE_WARN)
 
+    produced = max(0, sos_on_hand() - sos_before)
     if opened:
+        log("%d bottle(s) opened, %d SOS on you." % (opened, produced),
+            HUE_GOOD)
         deposit("end of run")
-    log("%d bottle(s) opened." % opened, HUE_GOOD if opened else HUE_WARN)
+
+        # VERIFIED BY RESULT. The menu entry can be answered and store
+        # nothing, and "the reply was sent" is not evidence that anything
+        # moved - so the pack is counted again rather than trusted.
+        left = sos_on_hand()
+        if left:
+            log("%d SOS still in your pack - the key did not take them. Check "
+                "it is the right key and that it accepts maps." % left,
+                HUE_WARN)
+        else:
+            log("every SOS went into storage.", HUE_GOOD)
+    else:
+        log("No bottles were opened.", HUE_WARN)
 
 
 main()

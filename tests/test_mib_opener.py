@@ -53,9 +53,13 @@ class Entry(object):
 class World(object):
     """The pack, the stubs, and what the script did to them."""
 
-    def __init__(self, pack, menu=("Open", "Add", "Refill from stock")):
+    def __init__(self, pack, menu=("Open", "Add", "Refill from stock"),
+                 produces_sos=True, key_takes=True):
         self.pack = pack
         self.menu = list(menu)
+        self.produces_sos = produces_sos
+        self.key_takes = key_takes
+        self._next_sos = 0x4F050000
         self.opened = []        # containers re-opened
         self.used = []          # bottles used
         self.replied = []       # context menu answers
@@ -69,6 +73,12 @@ class World(object):
             return
         self.used.append(serial)
         self._consume(serial)
+        if self.produces_sos:
+            # CONFIRMED IN GAME: the bottle turns into "a waterstained SOS",
+            # ItemID 0x14EE, in the backpack.
+            self._next_sos += 1
+            self.pack.Contains.append(
+                Item(self._next_sos, 0x14EE, name="a waterstained SOS"))
 
     def _consume(self, serial):
         """A bottle that opens leaves the pack."""
@@ -113,6 +123,16 @@ class World(object):
 
     def ContextReply(self, item, label):
         self.replied.append(label)
+        if not self.key_takes:
+            return
+        # A storage key that works empties the SOS out of the pack.
+        def strip(container):
+            for it in list(container.Contains):
+                if int(getattr(it, "ItemID", 0)) == 0x14EE:
+                    container.Contains.remove(it)
+                else:
+                    strip(it)
+        strip(self.pack)
 
     def __getattr__(self, name):
         return lambda *a, **k: None
@@ -244,6 +264,61 @@ def test_an_exact_entry_wins_over_an_earlier_loose_one(m_world):
     check("but CONTEXT_NEVER refuses it", m["pick_entry"]([nasty]), None)
     check("and a clean loose match is still taken",
           m["pick_entry"](["Refill from stock pile"]), "Refill from stock pile")
+
+
+def test_what_comes_out_is_counted_and_reported(m_world):
+    """Confirmed in game 2026-10-12: the bottle is consumed and leaves "a
+    waterstained SOS" (0x14EE) behind."""
+    world = World(pack_with(bottle(0x40000001), bottle(0x40000002),
+                            Item(0x40001111, 0x176B, 0x0481)))
+    m = load(world)
+    m["main"]()
+    said = " ".join(world.messages)
+    check("both opened", len(world.used), 2)
+    check("and the yield is reported", "2 SOS on you" in said, True)
+    check("the key took them", "every SOS went into storage" in said, True)
+
+
+def test_an_sos_the_key_refuses_is_called_out(m_world):
+    """The menu entry can be answered and store nothing. "The reply was sent"
+    is not evidence that anything moved."""
+    world = World(pack_with(bottle(0x40000001),
+                            Item(0x40001111, 0x176B, 0x0481)),
+                  key_takes=False)
+    m = load(world)
+    m["main"]()
+    said = " ".join(world.messages)
+    check("the key was pressed", world.replied, ["Refill from stock"])
+    check("but it is NOT reported as stored",
+          "every SOS went into storage" in said, False)
+    check("it says how many are left", "1 SOS still in your pack" in said,
+          True)
+
+
+def test_sos_already_in_the_pack_are_not_counted_as_produced(m_world):
+    """The run reports what IT produced, not what happened to be in there."""
+    old_one = Item(0x40002222, 0x14EE, name="a waterstained SOS")
+    world = World(pack_with(bottle(0x40000001), old_one,
+                            Item(0x40001111, 0x176B, 0x0481)),
+                  key_takes=False)
+    m = load(world)
+    check("two on hand before the run", m["sos_on_hand"](), 1)
+    m["main"]()
+    check("one bottle, one new SOS", "1 SOS on you" in " ".join(world.messages),
+          True)
+
+
+def test_an_ancient_sos_is_matched_by_name(m_world):
+    """Its graphic has not been inspected, so the name has to carry it."""
+    ancient = Item(0x40003333, 0x1234, name="an Ancient SOS")
+    water = Item(0x40004444, 0x14EE, name="")      # name not loaded yet
+    junk = Item(0x40005555, 0x0EED, name="gold coins")
+    world = World(pack_with(ancient, water, junk))
+    m = load(world)
+    check("the ancient one, by name", m["is_sos"](ancient), True)
+    check("the waterstained one, by graphic alone", m["is_sos"](water), True)
+    check("and gold is neither", m["is_sos"](junk), False)
+    check("counted together", m["sos_on_hand"](), 2)
 
 
 def test_the_run_is_capped(m_world):
