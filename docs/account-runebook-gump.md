@@ -100,6 +100,43 @@ Lines that are not entries — `New Rune`, `New Runebook`, `Organize`, the folde
 name, the header, the `Page X/Y` footer — carry no entry button and are skipped
 by the same pattern test.
 
+## Three buttons per rune row, and one of them deletes
+
+Inside a folder every rune draws **three** buttons (root folders draw two):
+
+| Button | What it does |
+|---|---|
+| `entry` (10, 11, ...) | recall |
+| `entry + 30000` | open a gate |
+| `entry + 60000` | **DELETE the rune** |
+
+The entry range (`10`-`499`) keeps the other two out of the pairing, but the
+thing that actually protects you is pairing entries to buttons **sorted
+ascending, zipped shortest-first** — the recall buttons always sort first.
+Nothing should ever press a `+60000`; a mis-pairing there does not misfire a
+recall, it destroys somebody's rune.
+
+## Names are truncated, sometimes mid-phrase
+
+The gump cuts a name wherever its column runs out, and not at a word boundary:
+
+```
+1. Britt Mage Shop (Tramm...      <- "Mage Shop" survives
+7. Serpents Hold Mage Sho...      <- cut THROUGH it
+```
+
+So filtering runes by a phrase cannot be a plain substring test — that drops
+Serpents Hold silently. Match the phrase, **or** a name that ends with the
+start of it, which is all truncation can leave behind. See `wanted_rune()` in
+[`Scripts/ReagentBuyer.py`](../Scripts/ReagentBuyer.py).
+
+## A live folder, 2026-10-24
+
+`Town Vendors` is entry **16**, on root page **2/3** — a folder search that
+reads only page 1 never finds it. Inside are 15 runes over two pages, and they
+are not all reagent shops: `Britt Carp Shop`, `Britt Blasksmith` and
+`Britt Inscribe` sit among twelve `... Mage Shop ...` entries.
+
 ## Recalling
 
 Click the entry button itself (e.g. `10`). The `+30000` variant opens a gate

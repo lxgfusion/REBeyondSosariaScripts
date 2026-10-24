@@ -314,6 +314,184 @@ def test_runes_are_told_from_folders_by_their_coordinates():
     check("the page footer is read", m["ar_page_info"](), (1, 2))
 
 
+# The real "Town Vendors" folder, 2026-10-24. Names are TRUNCATED in the gump
+# exactly as shown here, and every row draws THREE buttons: recall, gate
+# (+30000) and an X that DELETES the rune (+60000).
+LIVE_PAGE_1 = [
+    "<CENTER><BASEFONT COLOR=#FFFFFF><BIG>Account Runebook</CENTER>",
+    "Town Vendors", "New Rune", "New Runebook", "Organize",
+    "1. Britt Mage Shop (Tramm...", "(1492, 1544, 35)",
+    "2. Vesper Mage Shop (Tra...", "(2916, 675, 0)",
+    "3. Papua Mage Shop (Tram...", "(5736, 3196, 10)",
+    "4. Delucia Mage Shop (Tra...", "(5293, 3978, 37)",
+    "5. Moonglow Mage Shop (Tr...", "(4453, 1084, 0)",
+    "6. New Haven Mage Shop (...", "(3497, 2528, 27)",
+    "7. Serpents Hold Mage Sho...", "(3007, 3362, 15)",
+    "8. Skara Brae Mage Shop ...", "(603, 2179, 0)",
+    "9. Trinsic Mage Shop (Tram...", "(1845, 2711, 10)",
+    "<BASEFONT COLOR=#FFFFFF><CENTER>Page 1/2",
+]
+LIVE_PAGE_2 = [
+    "<CENTER><BASEFONT COLOR=#FFFFFF><BIG>Account Runebook</CENTER>",
+    "Town Vendors", "New Rune", "New Runebook", "Organize",
+    "10. Vesper Mage Shop (Tra...", "(2916, 676, 0)",
+    "11. Britt Carp Shop (Tramm...", "(1434, 1595, 20)",
+    "12. Britt Blasksmith (Tram...", "(1419, 1554, 30)",
+    "13. Britt Inscribe (Trammel)", "(1494, 1718, 7)",
+    "14. Umbra Mage Shop (Malas)", "(2025, 1383, -8...",
+    "15. Zento Mage Shop (Toku...", "(691, 1296, 26)",
+    "<BASEFONT COLOR=#FFFFFF><CENTER>Page 2/2",
+]
+
+
+def live_layout(count):
+    """A folder page as the server draws it: recall, gate and DELETE per row."""
+    pieces = ["{ button 20 440 4014 4015 1 0 503 }",
+              "{ button 400 440 4005 4006 1 0 504 }"]
+    for i in range(count):
+        entry = 10 + i
+        y = 90 + i * 40
+        pieces.append("{ button 545 %d 4005 4007 1 0 %d }" % (y, entry))
+        pieces.append("{ button 575 %d 4011 4012 1 0 %d }"
+                      % (y, entry + 30000))
+        pieces.append("{ button 605 %d 4017 4018 1 0 %d }"
+                      % (y, entry + 60000))
+    return "".join(pieces)
+
+
+def test_only_the_mage_shops_are_visited():
+    """The folder is not all reagent shops: inspected 2026-10-24 it also holds
+    Britt Carp Shop, Britt Blasksmith and Britt Inscribe."""
+    pages = [(LIVE_PAGE_1, live_layout(9)), (LIVE_PAGE_2, live_layout(6))]
+    stub = Stub()
+    state = {"page": 0}
+    stub.lines = pages[0][0]
+    stub.layout = pages[0][1]
+
+    def step(gump_id, button):
+        stub.actions.append(int(button))
+        if int(button) == 504 and state["page"] + 1 < len(pages):
+            state["page"] += 1
+        elif int(button) == 503 and state["page"] > 0:
+            state["page"] -= 1
+        stub.lines = pages[state["page"]][0]
+        stub.layout = pages[state["page"]][1]
+    stub.SendAction = step
+
+    m = load(stub)
+    runes = m["collect_runes"]()
+    names = [r[2] for r in runes]
+    check("twelve mage shops, both pages", len(runes), 12)
+    check("the carpenter is left out",
+          any("Carp" in n for n in names), False)
+    check("so is the blacksmith", any("Blasksmith" in n for n in names), False)
+    check("and the scribe", any("Inscribe" in n for n in names), False)
+    check("page 2's mage shops are included",
+          any("Umbra" in n for n in names) and any("Zento" in n for n in names),
+          True)
+    check("and it said what it skipped",
+          any("skipping 3 rune(s)" in x for x in stub.messages), True)
+
+    # The truncated coordinate on Umbra's row is still read as a coordinate.
+    umbra = [r for r in runes if "Umbra" in r[2]]
+    check("a truncated coordinate still parses",
+          umbra[0][3][:2] if umbra else None, [2025, 1383])
+
+
+def test_a_truncated_name_still_matches():
+    """The gump cut "Serpents Hold Mage Shop" to "Serpents Hold Mage Sho...".
+    A straight substring test drops that rune and says nothing."""
+    m = load(Stub())
+    w = m["wanted_rune"]
+    check("the phrase survives intact", w("Britt Mage Shop (Tramm..."), True)
+    check("THE REPORTED CASE: cut through the phrase",
+          w("Serpents Hold Mage Sho..."), True)
+    check("cut right after it", w("Skara Brae Mage Shop ..."), True)
+    check("cut down to just the first word", w("Umbra Mage"), True)
+
+    check("a carpenter is not a mage shop", w("Britt Carp Shop (Tramm..."),
+          False)
+    check("nor a blacksmith", w("Britt Blasksmith (Tram..."), False)
+    check("nor a scribe", w("Britt Inscribe (Trammel)"), False)
+    check("and a word that merely starts the same is not enough",
+          w("Magery Trainer"), False)
+
+    saved = m["RUNE_MUST_MATCH"]
+    try:
+        m["RUNE_MUST_MATCH"] = []
+        check("an empty list visits everything", w("Britt Carp Shop"), True)
+    finally:
+        m["RUNE_MUST_MATCH"] = saved
+
+
+def test_the_delete_button_is_never_paired_or_pressed():
+    """Every rune row draws an X at entry + 60000. Pairing one as an entry
+    would not misfire a recall - it would DELETE somebody's rune."""
+    stub = Stub(lines=LIVE_PAGE_1, layout=live_layout(9))
+    m = load(stub)
+
+    _folders, runes = m["parse_ar_page"]()
+    check("nine runes, one per row", len(runes), 9)
+    check("paired to the RECALL buttons only",
+          sorted(runes), list(range(10, 19)))
+    check("no gate button was paired",
+          any(b >= 30000 for b in runes), False)
+    check("and no delete button",
+          any(b >= 60000 for b in runes), False)
+
+    # The REAL protection is sorting the buttons and zipping shortest-first -
+    # the range cap is belt and braces. But a cap that lets gates and deletes
+    # in makes the parser cry "the pairing may be off" on every single page,
+    # which is noise that would hide a mismatch that mattered.
+    check("and no pairing warning on a perfectly normal page",
+          any("pairing may be off" in x for x in stub.messages), False)
+
+    m["collect_runes"]()
+    check("nothing in the delete range was ever pressed",
+          [b for b in stub.actions if b >= 60000], [])
+    check("nor the gate range",
+          [b for b in stub.actions if 30000 <= b < 60000], [])
+
+
+def test_the_folder_is_found_on_a_later_page():
+    """"Town Vendors" is entry 16, on page 2/3 of the root - a search that
+    reads only the first page never finds it."""
+    root1 = ["<CENTER>Account Runebook</CENTER>", "New Rune", "New Runebook",
+             "Organize"] + ["%d. Folder%d" % (i, i) for i in range(1, 10)] + [
+             "<CENTER>Page 1/3"]
+    root2 = ["<CENTER>Account Runebook</CENTER>", "New Rune", "New Runebook",
+             "Organize", "10. RO", "11. TamingDeed", "12. Farming",
+             "13. TMAP Spots", "14. Champ Spawns", "15. Overlords",
+             "16. Town Vendors", "17. IDOC", "18. population control",
+             "<CENTER>Page 2/3"]
+    # WITH the page buttons: without them ar_page_step cannot turn the page,
+    # and the test would fail on its own fixture rather than on the code.
+    folder_layout = ("{ button 20 440 4014 4015 1 0 503 }"
+                     "{ button 400 440 4005 4006 1 0 504 }") + "".join(
+        "{ button 545 %d 4005 4007 1 0 %d }" % (90 + i * 40, 10 + i)
+        for i in range(9))
+
+    pages = [root1, root2]
+    stub = Stub(lines=root1, layout=folder_layout)
+    state = {"page": 0, "entered": None}
+
+    def step(gump_id, button):
+        stub.actions.append(int(button))
+        if int(button) == 504 and state["page"] + 1 < len(pages):
+            state["page"] += 1
+            stub.lines = pages[state["page"]]
+        elif int(button) == 503 and state["page"] > 0:
+            state["page"] -= 1
+            stub.lines = pages[state["page"]]
+        elif 10 <= int(button) <= 499:
+            state["entered"] = int(button)
+    stub.SendAction = step
+
+    m = load(stub)
+    call("the folder is found", m["ar_enter_folder"], True, "Town Vendors")
+    check("by pressing ITS button, the 7th on page 2", state["entered"], 16)
+
+
 def test_a_recall_is_checked_against_the_runes_own_coordinates():
     """The runebook prints them, so arriving is checkable rather than assumed.
     """

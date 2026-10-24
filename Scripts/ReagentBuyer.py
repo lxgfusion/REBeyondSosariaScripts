@@ -8,7 +8,7 @@ freeshard.
 THE ROUND
 ---------
     walk the Account Runebook into the reagent-shop folder
-    for every rune in it, on every page:
+    for every "Mage Shop" rune in it, on every page:
         recall
         find the mage / alchemist standing there
         open their Buy window, let the Buy Agent fill it
@@ -76,7 +76,7 @@ import time
 # Printed as the first line at startup. Razor CACHES the loaded script even
 # after the file on disk changes - if this is not the version you expect, hit
 # Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-10-24.1"
+SCRIPT_VERSION = "2026-10-24.3"
 
 
 # =============================================================================
@@ -96,9 +96,33 @@ BUY_LIST_NAME = "reagent purchase"
 # ACCOUNT RUNEBOOK
 # ---------------------------------------------------------------------------
 
-# The folder path to the reagent shops, outermost first. Every rune inside it
-# is visited, on every page.
+# The folder path to the reagent shops, outermost first. Inspected
+# 2026-10-24: "Town Vendors" is entry 16, on page 2/3 of the root - which is
+# why the folder search walks pages rather than reading the first one.
 REAGENT_SHOPS_FOLDER = ["Town Vendors"]
+
+# WHICH RUNES IN THAT FOLDER TO VISIT.
+#
+# The folder is not all reagent shops. Inspected 2026-10-24, 15 runes over two
+# pages: twelve "... Mage Shop ...", plus "Britt Carp Shop", "Britt
+# Blasksmith" and "Britt Inscribe", which sell nothing this script wants.
+#
+# Matched case-insensitively against the rune's name. [] visits every rune in
+# the folder.
+#
+# THE NAMES ARE TRUNCATED IN THE GUMP, and not always in the same place:
+#
+#     1. Britt Mage Shop (Tramm...      <- the phrase survives
+#     7. Serpents Hold Mage Sho...      <- cut THROUGH it
+#
+# So a plain "is it in there" test drops Serpents Hold, silently. A wanted
+# phrase also matches when the name ENDS with the start of it, which is all
+# truncation can leave behind - see wanted_rune().
+RUNE_MUST_MATCH = ["Mage Shop"]
+
+# How much of a wanted phrase has to survive the truncation to count. Four is
+# "Mage"; going lower starts matching things that only begin like it.
+RUNE_MATCH_MIN_PREFIX = 4
 
 # NOT WIRED UP YET. The old script carried these and never used them - kept
 # because they are the serials-and-names kind of config that turns out to
@@ -182,6 +206,13 @@ AR_ROOT_BUTTON = 5
 AR_ENTRY_BUTTON_MIN = 10
 AR_ENTRY_BUTTON_MAX = 499
 AR_GATE_OFFSET = 30000
+
+# AND THE THIRD BUTTON ON EVERY ROW IS DELETE. Inside a folder each rune
+# draws three: recall, gate, and an X that destroys the rune. The entry range
+# above is what keeps both of the others out of the pairing - a delete button
+# paired as an entry would not misfire a recall, it would delete somebody's
+# rune. Nothing here ever presses one.
+AR_DELETE_OFFSET = 60000
 AR_CONTROL_BUTTONS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 500, 503, 504]
 AR_MAX_PAGES = 20
 
@@ -467,13 +498,47 @@ def go_to_reagent_folder():
     return True
 
 
+def wanted_rune(name):
+    """Is this rune one to visit? RUNE_MUST_MATCH, or everything if empty.
+
+    TRUNCATION-TOLERANT. The gump cuts names off wherever the column runs
+    out, and it cut "Serpents Hold Mage Shop" to "Serpents Hold Mage Sho...".
+    A straight substring test drops that rune and says nothing, which is
+    exactly the kind of silent miss that looks like the shop having no vendor.
+
+    So the phrase matches if it is in the name OR the name ends with the
+    start of it - the only thing truncation can leave. The tail has to be at
+    least RUNE_MATCH_MIN_PREFIX long, so "M" does not qualify everything.
+    """
+    if not RUNE_MUST_MATCH:
+        return True
+
+    low = " ".join((name or "").split()).lower()
+    visible = low.rstrip(" .")          # drop the ellipsis the gump adds
+    for want in RUNE_MUST_MATCH:
+        target = " ".join((want or "").split()).lower()
+        if not target:
+            continue
+        if target in low:
+            return True
+        longest = min(len(target) - 1, len(visible))
+        for cut in range(longest, RUNE_MATCH_MIN_PREFIX - 1, -1):
+            if visible.endswith(target[:cut]):
+                return True
+    return False
+
+
 def collect_runes():
-    """[(page, button, name, coord)] for every rune in the folder.
+    """[(page, button, name, coord)] for every rune worth visiting.
 
     Collected in one sweep BEFORE any recalling, because recalling closes the
     book and re-opening it lands back at the root.
+
+    Runes that do not match RUNE_MUST_MATCH are left out here rather than
+    skipped later, so the count printed at startup is the real round.
     """
     out = []
+    skipped = []
     if not ar_goto_page(1):
         log("Could not rewind to page 1 of the folder.", HUE_WARN)
 
@@ -481,8 +546,11 @@ def collect_runes():
         current, total = ar_page_info()
         _folders, runes = parse_ar_page()
         for button in sorted(runes):
-            out.append((current, button, runes[button]["name"],
-                        runes[button]["coord"]))
+            name = runes[button]["name"]
+            if not wanted_rune(name):
+                skipped.append(name)
+                continue
+            out.append((current, button, name, runes[button]["coord"]))
         if current >= total:
             break
         if not ar_page_step(AR_NEXT_PAGE_BUTTON):
@@ -492,6 +560,11 @@ def collect_runes():
             log("The runebook did not advance past page %d." % current,
                 HUE_WARN)
             break
+
+    if skipped:
+        log("  skipping %d rune(s) that are not %s: %s"
+            % (len(skipped), "/".join(RUNE_MUST_MATCH),
+               ", ".join(skipped[:6]) + (" ..." if len(skipped) > 6 else "")))
     return out[:MAX_RUNES_PER_LAP]
 
 
