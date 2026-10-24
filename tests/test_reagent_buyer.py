@@ -159,26 +159,57 @@ def load(stub):
 # THE VENDOR LOOKUP - fault 1
 # ---------------------------------------------------------------------------
 
-def test_the_title_is_read_from_the_tooltip_not_the_name():
-    """Mobiles.Filter().Name is an EXACT match against the NAME. "the mage" is
-    a TITLE and lives in the tooltip, so the old filter matched nothing,
-    ever."""
-    mage = Mob(1, "Zoe", props=["Zoe", "the mage"])
-    alch = Mob(2, "Hali", props=["Hali", "the alchemist"])
-    smith = Mob(3, "Gorn", props=["Gorn", "the blacksmith"])
-    stub = Stub(mobiles=[mage, alch, smith])
+def test_the_title_is_read_from_the_tooltip_and_has_no_article():
+    """Inspected 2026-10-24, from two real vendors:
+
+        Name: Arlinda   tooltip: Arlinda / Alchemist
+        Name: Shanata   tooltip: Shanata / Mage
+
+    The title is "Alchemist", not "the alchemist" - the first version looked
+    for the article and so saw no vendors anywhere. And it is a TITLE, which
+    lives in the tooltip; Mobiles.Filter().Name is an exact match against the
+    NAME and never sees it.
+    """
+    arlinda = Mob(0x000A8FC0, "Arlinda", props=["Arlinda", "Alchemist"])
+    shanata = Mob(0x000AA189, "Shanata", props=["Shanata", "Mage"])
+    smith = Mob(3, "Gorn", props=["Gorn", "Blacksmith"])
+    stub = Stub(mobiles=[arlinda, shanata, smith])
     m = load(stub)
 
-    check("the mage, by tooltip title", m["is_vendor"](mage), True)
-    check("the alchemist too", m["is_vendor"](alch), True)
-    check("but not the blacksmith", m["is_vendor"](smith), False)
-    check("both are returned", [int(x.Serial) for x in m["vendors_in_range"]()],
-          [1, 2])
+    check("the alchemist", m["is_vendor"](arlinda), True)
+    check("the mage", m["is_vendor"](shanata), True)
+    check("not the blacksmith", m["is_vendor"](smith), False)
+    check("both are returned",
+          [int(x.Serial) for x in m["vendors_in_range"]()],
+          [0x000A8FC0, 0x000AA189])
+
+
+def test_a_concatenated_tooltip_still_matches():
+    """Tooltip properties arrive run together - "ArlindaAlchemist" - and there
+    is no word boundary between "a" and "A", so a whole-word match finds
+    nothing on exactly the line that carries the title."""
+    squashed = Mob(1, "", props=["ArlindaAlchemist"])
+    stub = Stub(mobiles=[squashed])
+    m = load(stub)
+    check("the seam is opened up first", m["is_vendor"](squashed), True)
+
+
+def test_the_title_is_matched_as_whole_words():
+    """"Mage" must not claim "Magery" or a "Mageblade" somebody is carrying."""
+    stub = Stub()
+    m = load(stub)
+    check("Magery is not Mage",
+          m["is_vendor"](Mob(1, "Kell", props=["Kell", "Magery Trainer"])),
+          False)
+    check("nor is a Mageblade",
+          m["is_vendor"](Mob(2, "Kell", props=["Kell", "Mageblade"])), False)
+    check("but the bare title is", m["is_vendor"](Mob(3, "Zoe",
+                                                     props=["Mage"])), True)
 
 
 def test_a_guildmaster_is_refused():
     """Their menu charges for training rather than selling reagents."""
-    boss = Mob(4, "Lysander", props=["Lysander", "the mage Guildmaster"])
+    boss = Mob(4, "Lysander", props=["Lysander", "Mage Guildmaster"])
     stub = Stub(mobiles=[boss])
     m = load(stub)
     check("refused even though the title matches", m["is_vendor"](boss), False)
@@ -188,19 +219,19 @@ def test_a_guildmaster_is_refused():
 def test_the_range_is_always_set():
     """An unset RangeMax means everything the client knows about - 18-25 tiles
     of other people's vendors. See CLAUDE.md."""
-    stub = Stub(mobiles=[Mob(1, "Zoe", props=["the mage"])])
+    stub = Stub(mobiles=[Mob(1, "Zoe", props=["Mage"])])
     m = load(stub)
     m["vendors_in_range"]()
     check("RangeMax was set on the filter", stub.last_range, m["VENDOR_RANGE"])
 
 
 def test_a_vendor_named_outright_still_matches():
-    """Cheap first look at the name, so a shard that puts the title in the
-    name costs no tooltip wait."""
-    plain = Mob(5, "Zoe the mage", props=[])
+    """A shard that puts the title in the NAME works too - the name and the
+    tooltip are read as one string."""
+    plain = Mob(5, "Zoe the Mage", props=[])
     stub = Stub(mobiles=[plain])
     m = load(stub)
-    check("matched on the name alone", m["is_vendor"](plain), True)
+    check("matched on the name", m["is_vendor"](plain), True)
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +264,7 @@ def test_it_refuses_to_run_when_the_agent_will_not_come_on():
 
 def test_a_purchase_is_proved_by_gold_spent():
     """The shop window opening is not evidence that anything was bought."""
-    mage = Mob(1, "Zoe", props=["the mage"])
+    mage = Mob(1, "Zoe", props=["Mage"])
     stub = Stub(menu=["Buy", "Sell", "Bribe"], mobiles=[mage], gold=1000)
     m = load(stub)
 
@@ -275,6 +306,110 @@ def test_sell_and_bribe_are_never_pressed():
 # ---------------------------------------------------------------------------
 # THE RUNEBOOK - fault 3
 # ---------------------------------------------------------------------------
+
+def test_a_town_invader_means_leave():
+    """Asked 2026-10-24: a shop with one in it is abandoned at once and the
+    next rune recalled to."""
+    invader = Mob(9, "Grak", props=["Grak", "Town Invader"])
+    mage = Mob(1, "Shanata", props=["Shanata", "Mage"])
+    stub = Stub(mobiles=[invader, mage])
+    m = load(stub)
+    check("it is spotted by title", m["danger_here"](), "Grak")
+    check("an invader is not mistaken for a vendor", m["is_vendor"](invader),
+          False)
+
+    quiet = Stub(mobiles=[mage])
+    m2 = load(quiet)
+    check("and a quiet shop reports nothing", m2["danger_here"](), "")
+
+    # The whole-word rule applies here too.
+    odd = Stub(mobiles=[Mob(9, "Grak", props=["Grak", "Towns Invaders"])])
+    m3 = load(odd)
+    check("a near-miss title is not a panic", m3["danger_here"](), "")
+
+
+def test_nothing_is_bought_where_an_invader_stands():
+    """The bail-out has to come BEFORE the shopping, not after it."""
+    invader = Mob(9, "Grak", props=["Grak", "Town Invader"])
+    mage = Mob(1, "Shanata", props=["Shanata", "Mage"])
+    stub = Stub(menu=["Buy", "Sell"], mobiles=[invader, mage])
+    m = load(stub)
+    m["go_to_reagent_folder"] = lambda: True
+    m["collect_runes"] = lambda: [(1, 10, "Britt Mage Shop", [100, 100, 0])]
+    m["recall_to"] = lambda *a: True
+    call("the lap spends nothing", m["one_lap"], 0, 1)
+    check("and nobody was asked to trade", stub.replied, [])
+    check("it said why", any("leaving" in x for x in stub.messages), True)
+
+
+def test_the_wait_happens_at_the_bank_not_in_a_shop():
+    """A shop is where the invaders turn up, so the ten minutes are spent
+    somewhere else."""
+    check_src = open(SCRIPT, encoding="utf-8").read()
+    body = check_src[check_src.index("def main("):]
+    went = "go_home_and_wait()" in body
+    check("it goes home", went, True)
+    check("before the wait, not after",
+          went and "sleep_ms(CYCLE_PAUSE_MS)" in body
+          and body.index("go_home_and_wait()")
+          < body.index("sleep_ms(CYCLE_PAUSE_MS)"), True)
+
+    stub = Stub()
+    m = load(stub)
+    check("ten minutes", m["CYCLE_PAUSE_MS"], 600000)
+    check("in Trammel", m["HOME_FOLDER"], ["Trammel"])
+    check("at the bank",
+          all("bank" in w.lower() for w in m["HOME_RUNE"]), True)
+    check("and the spellings are a priority list, not one guess",
+          len(m["HOME_RUNE"]) > 1, True)
+
+
+def test_the_home_rune_lists_what_is_there_when_it_cannot_be_found():
+    """A name that does not match is fixed from the journal rather than
+    another round trip - the folder's runes are printed."""
+    lines = ["<CENTER>Account Runebook</CENTER>", "Trammel", "New Rune",
+             "New Runebook", "Organize",
+             "1. Britain Bank", "(1434, 1699, 0)",
+             "2. Vesper Bank", "(2898, 676, 0)",
+             "<CENTER>Page 1/1"]
+    layout = ("{ button 545 90 4005 4007 1 0 10 }"
+              "{ button 545 130 4005 4007 1 0 11 }")
+    stub = Stub(lines=lines, layout=layout)
+    m = load(stub)
+    m["ar_enter_folder"] = lambda name: True
+    m["HOME_RUNE"] = ["Nowhere At All"]
+    call("it gives up", m["go_home_and_wait"], False)
+    said = " ".join(stub.messages)
+    check("and lists what the folder really holds",
+          "Britain Bank" in said and "Vesper Bank" in said, True)
+
+    # THE SPELLING IS A LIST, best first. "Brittain" is not "Britain" and
+    # fuzzy-matching a name would risk recalling somewhere else entirely - so
+    # the second spelling is what finds it.
+    recalled = []
+    m["recall_to"] = lambda *a: recalled.append(a[2]) or True
+    m["HOME_RUNE"] = ["Brittain Bank", "Britain Bank", "Bank"]
+    call("the next spelling finds it", m["go_home_and_wait"], True)
+    check("and it recalled to the real rune", recalled, ["Britain Bank"])
+
+    # THE CATCH-ALL MUST NOT WIN ON PAGE ORDER. Vesper is listed FIRST here,
+    # so a loop that walks the runes and asks "does any wanted name match
+    # this one?" recalls to the wrong bank. The names have to be tried in
+    # THEIR order, each against the whole folder.
+    vesper_first = ["<CENTER>Account Runebook</CENTER>", "Trammel", "New Rune",
+                    "New Runebook", "Organize",
+                    "1. Vesper Bank", "(2898, 676, 0)",
+                    "2. Britain Bank", "(1434, 1699, 0)",
+                    "<CENTER>Page 1/1"]
+    stub2 = Stub(lines=vesper_first, layout=layout)
+    m2 = load(stub2)
+    m2["ar_enter_folder"] = lambda name: True
+    picked = []
+    m2["recall_to"] = lambda *a: picked.append(a[2]) or True
+    m2["HOME_RUNE"] = ["Britain Bank", "Bank"]
+    call("found", m2["go_home_and_wait"], True)
+    check("the specific name beats the catch-all", picked, ["Britain Bank"])
+
 
 def test_the_page_buttons_are_the_inspected_ones():
     """goNextPage() pressed 6, which does nothing, so every rune past page 1

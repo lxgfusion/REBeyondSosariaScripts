@@ -208,6 +208,12 @@ of the three, and file size alone will not tell two config blocks apart.
   shard, titles rarely do. Check `Name` first (cheap) and fall back to
   `WaitForProps` + `GetPropStringList`. Same shape as the deed-tooltip lesson:
   **whenever a lookup by name fails, check the tooltip before anything else.**
+  **The title carries no article, and it is one word.** Inspected 2026-10-24:
+  `Arlinda` → `Alchemist`, `Shanata` → `Mage` — not "the alchemist". A script
+  looking for `"the mage"` found no vendors anywhere and said nothing. Match
+  the bare title as **whole words** (`mage`), so it cannot also claim
+  `Magery` or a `Mageblade`, and run the tooltip through the concatenation
+  seam fix first — `ArlindaAlchemist` has no word boundary in it.
 - When an entity lookup fails, dump every candidate in range *with its tooltip*
   into the log. A failure that says only "not found" costs a whole extra
   test-and-report round trip with the user.

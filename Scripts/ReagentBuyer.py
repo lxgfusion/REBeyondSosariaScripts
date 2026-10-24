@@ -10,10 +10,11 @@ THE ROUND
     walk the Account Runebook into the reagent-shop folder
     for every "Mage Shop" rune in it, on every page:
         recall
+        if anything here is a Town Invader, leave for the next rune AT ONCE
         find the mage / alchemist standing there
         open their Buy window, let the Buy Agent fill it
         put what arrived into the storage key
-    pause, then do it again
+    recall to Trammel / the bank, wait ten minutes, and go round again
 
 WHY THE OLD ONE DID NOT BUY
 ---------------------------
@@ -76,7 +77,7 @@ import time
 # Printed as the first line at startup. Razor CACHES the loaded script even
 # after the file on disk changes - if this is not the version you expect, hit
 # Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-10-24.5"
+SCRIPT_VERSION = "2026-10-24.8"
 
 
 # =============================================================================
@@ -147,25 +148,63 @@ RUNE_MUST_MATCH = ["Mage Shop"]
 # "Mage"; going lower starts matching things that only begin like it.
 RUNE_MATCH_MIN_PREFIX = 4
 
-# NOT WIRED UP YET. The old script carried these and never used them - kept
-# because they are the serials-and-names kind of config that turns out to
-# matter later, not cruft. Nothing reads them today: the storage key is
-# carried, so there is no trip home.
-DROP_FOLDER = ["Homes"]
-DROP_POINT = "HOME"
+# WHERE TO WAIT BETWEEN LAPS. After every shop has been visited, the script
+# recalls here and waits CYCLE_PAUSE_MS before going round again.
+#
+# The folder is walked from the root the same way the shops are, so this is a
+# folder path and a rune name inside it. If the rune cannot be found, every
+# rune in that folder is listed in the journal so the real spelling is one
+# glance away rather than another round trip.
+HOME_FOLDER = ["Trammel"]
+
+# NAMES TO ACCEPT FOR THE WAITING RUNE, best first. The first one that matches
+# anything in the folder wins, so "Bank" at the end is a catch-all that only
+# gets a look if none of the specific spellings is there.
+#
+# A list because nobody can be sure how the rune is spelled without opening
+# the book - this one is written "Britt ..." elsewhere in the same runebook -
+# and matching a misspelling loosely would risk recalling somewhere else
+# entirely. If none of these matches, every rune in the folder is listed in
+# the journal and the run waits where it stands.
+HOME_RUNE = ["Britain Bank", "Britt Bank", "Bank"]
 
 # ---------------------------------------------------------------------------
 # THE VENDORS
 # ---------------------------------------------------------------------------
 
 # Matched against the mobile's TITLE from its tooltip, and against its name as
-# a cheap first look. Case-insensitive substring - a title reads like
-# "Zoe the mage", so "the mage" has to match inside it.
-VENDOR_TITLES = ["the mage", "the alchemist"]
+# a cheap first look.
+#
+# THE TITLE HAS NO ARTICLE. Inspected 2026-10-24:
+#
+#     Name: Arlinda   tooltip: Arlinda / Alchemist
+#     Name: Shanata   tooltip: Shanata / Mage
+#
+# so it reads "Alchemist", not "the alchemist" - which is why the first
+# version saw no vendors anywhere. Matched as WHOLE WORDS, so "Mage" does not
+# also claim "Magery" or a "Mageblade" somebody is carrying.
+VENDOR_TITLES = ["Mage", "Alchemist"]
 
 # Never approached, however well the title matches. A Guildmaster's menu
 # charges for training rather than selling reagents.
 VENDOR_NEVER = ["guildmaster"]
+
+# ---------------------------------------------------------------------------
+# DANGER - get out rather than shop
+#
+# A mobile whose name or title carries one of these means leave NOW: the
+# current shop is abandoned mid-round and the next rune is recalled to
+# immediately. Matched the same way as a vendor title, so "Town Invader"
+# catches "Orc Town Invader" too.
+DANGER_TITLES = ["Town Invader"]
+
+# Looked for further out than vendors are - something that makes you leave is
+# worth seeing before it is standing next to you.
+DANGER_RANGE = 20
+
+# A ceiling on how many mobiles get a tooltip read per check, so a crowded
+# bank does not turn into a tooltip storm.
+DANGER_MAX_CHECKS = 25
 
 # How far to look for them. ALWAYS set this - an unset RangeMax means
 # everything the client knows about, which is 18-25 tiles of other people's
@@ -202,9 +241,9 @@ CONTEXT_PAUSE_MS = 700
 GUMP_TIMEOUT_MS = 10000
 SETTLE_MS = 300
 
-# Between laps of the whole book. Slept in slices so stopping the script does
-# not mean waiting out the rest of it.
-CYCLE_PAUSE_MS = 300000
+# Between laps of the whole book - ten minutes, spent standing at HOME_RUNE.
+# Slept in slices so stopping the script does not mean waiting out the rest.
+CYCLE_PAUSE_MS = 600000
 SLEEP_SLICE_MS = 1000
 
 # Ceilings, so nothing can spin forever.
@@ -613,8 +652,11 @@ def go_to_reagent_folder():
     return True
 
 
-def wanted_rune(name):
+def wanted_rune(name, phrases=None):
     """Is this rune one to visit? RUNE_MUST_MATCH, or everything if empty.
+
+    `phrases` overrides the list, so the same truncation-tolerant matching
+    finds the rune to wait on between laps.
 
     TRUNCATION-TOLERANT. The gump cuts names off wherever the column runs
     out, and it cut "Serpents Hold Mage Shop" to "Serpents Hold Mage Sho...".
@@ -625,12 +667,13 @@ def wanted_rune(name):
     start of it - the only thing truncation can leave. The tail has to be at
     least RUNE_MATCH_MIN_PREFIX long, so "M" does not qualify everything.
     """
-    if not RUNE_MUST_MATCH:
+    wanted = RUNE_MUST_MATCH if phrases is None else phrases
+    if not wanted:
         return True
 
     low = " ".join((name or "").split()).lower()
     visible = low.rstrip(" .")          # drop the ellipsis the gump adds
-    for want in RUNE_MUST_MATCH:
+    for want in wanted:
         target = " ".join((want or "").split()).lower()
         if not target:
             continue
@@ -683,6 +726,60 @@ def collect_runes():
     return out[:MAX_RUNES_PER_LAP]
 
 
+def go_home_and_wait():
+    """Recall to HOME_RUNE and wait there. True once standing somewhere safe.
+
+    Between laps the character sits at a bank rather than in whichever shop
+    the round happened to end in - a shop is where the Town Invaders turn up.
+    """
+    wanted = [HOME_RUNE] if isinstance(HOME_RUNE, str) else list(HOME_RUNE)
+    wanted = [w for w in wanted if w]
+    if not wanted:
+        log("No HOME_RUNE set - waiting where we stand.", HUE_WARN)
+        return False
+
+    if not openAR():
+        return False
+    ar_root()
+    for folder in HOME_FOLDER:
+        if folder and not ar_enter_folder(folder):
+            return False
+
+    # EVERY rune in the folder first, then the names in HOME_RUNE in order.
+    # Picking the first rune that matches ANY of them would let the "Bank"
+    # catch-all win on page order and send the character to Vesper.
+    listed = []
+    if not ar_goto_page(1):
+        log("Could not rewind %s to page 1." % "/".join(HOME_FOLDER), HUE_WARN)
+    for _ in range(AR_MAX_PAGES):
+        current, total = ar_page_info()
+        _folders, runes = parse_ar_page()
+        for button in sorted(runes):
+            listed.append((current, button, runes[button]["name"],
+                           runes[button]["coord"]))
+        if current >= total or not ar_page_step(AR_NEXT_PAGE_BUTTON):
+            break
+
+    found = None
+    for want in wanted:
+        for entry in listed:
+            if wanted_rune(entry[2], [want]):
+                found = entry
+                break
+        if found:
+            break
+
+    if found is None:
+        log("No rune matching %s in %s. It holds: %s"
+            % (wanted, "/".join(HOME_FOLDER),
+               ", ".join(e[2] for e in listed) or "nothing"), HUE_BAD)
+        return False
+
+    page, button, name, coord = found
+    log("recalling to %s to wait." % name)
+    return recall_to(page, button, name, coord)
+
+
 def arrived_at(coord):
     """Did the recall land where the rune says? None coord = cannot tell."""
     if not coord or len(coord) < 2:
@@ -722,42 +819,91 @@ def recall_to(page, button, name, coord):
 # THE VENDORS
 # =============================================================================
 
-def mobile_title(mob):
-    """A mobile's tooltip as one lowered string.
+def tidy(text):
+    """Lowered, with the tooltip's run-together seams opened up.
 
-    THE TITLE IS NOT THE NAME. "the mage" is a title and lives in the tooltip;
-    Mobiles.Filter().Name is an exact match against the NAME and never sees
-    it. That is why the old script never found a vendor.
+    Tooltip properties arrive CONCATENATED - "ArlindaAlchemist" - and there is
+    no word boundary between "a" and "A", so a whole-word match for the title
+    finds nothing on exactly the line that carries it. A space at each
+    lower/digit -> upper seam first. See CLAUDE.md.
     """
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", str(text or ""))
+    return " ".join(spaced.split()).lower()
+
+
+def says(blob, phrase):
+    """Is `phrase` in `blob` as whole words?
+
+    Whole words, so "Mage" does not claim "Magery" or a "Mageblade" somebody
+    happens to be carrying - the titles here are single words and a loose
+    match would be wrong far more often than it was right.
+    """
+    want = tidy(phrase)
+    if not want:
+        return False
+    return re.search(r"\b%s\b" % re.escape(want), blob) is not None
+
+
+def mobile_title(mob):
+    """A mobile's name and tooltip as one tidy string.
+
+    THE TITLE IS NOT THE NAME, and it has no article: the tooltip reads
+    "Arlinda / Alchemist". Mobiles.Filter().Name is an exact match against the
+    NAME and never sees it, which is why the old script found no vendors.
+    """
+    try:
+        name = str(mob.Name or "")
+    except Exception:
+        name = ""
     try:
         Mobiles.WaitForProps(mob, 1000)
         lines = list(Mobiles.GetPropStringList(mob) or [])
     except Exception:
-        return ""
-    return " ".join(str(l or "") for l in lines).lower()
+        lines = []
+    return tidy(name + " " + " ".join(str(l or "") for l in lines))
 
 
 def is_vendor(mob):
-    """Does this mobile sell reagents? Name first, tooltip second."""
-    try:
-        name = (mob.Name or "").strip().lower()
-    except Exception:
-        name = ""
+    """Does this mobile sell reagents? Its title says so."""
+    blob = mobile_title(mob)
+    if not blob:
+        return False
     for banned in VENDOR_NEVER:
-        if banned.strip().lower() in name:
-            return False
-
-    blob = name
-    if not any(t.strip().lower() in blob for t in VENDOR_TITLES):
-        blob = (name + " " + mobile_title(mob)).strip()
-
-    for banned in VENDOR_NEVER:
-        if banned.strip().lower() in blob:
+        if says(blob, banned):
             return False
     for title in VENDOR_TITLES:
-        if title.strip().lower() in blob:
+        if says(blob, title):
             return True
     return False
+
+
+def danger_here():
+    """The name of something that means leave now, or "".
+
+    Checked after every recall and between vendors. A Town Invader is not
+    something to finish shopping through.
+    """
+    if not DANGER_TITLES:
+        return ""
+    try:
+        f = Mobiles.Filter()
+        f.Enabled = True
+        f.RangeMax = DANGER_RANGE
+        near = list(Mobiles.ApplyFilter(f) or [])
+    except Exception:
+        return ""
+
+    for mob in near[:DANGER_MAX_CHECKS]:
+        blob = mobile_title(mob)
+        if not blob:
+            continue
+        for word in DANGER_TITLES:
+            if says(blob, word):
+                try:
+                    return (mob.Name or word).strip()
+                except Exception:
+                    return word
+    return ""
 
 
 def vendors_in_range():
@@ -927,6 +1073,13 @@ def preflight():
         log("No runes in %s. Check the folder name."
             % " / ".join(REAGENT_SHOPS_FOLDER), HUE_BAD)
         return False
+    log("  between laps: %s / %s, then %d minute(s)."
+        % ("/".join(HOME_FOLDER) or "(nowhere)",
+           (HOME_RUNE if isinstance(HOME_RUNE, str)
+            else " or ".join(HOME_RUNE)) or "(nowhere)",
+           CYCLE_PAUSE_MS / 60000))
+    if DANGER_TITLES:
+        log("  leaving a shop at once for: %s" % ", ".join(DANGER_TITLES))
     log("  %d rune(s) in %s: %s"
         % (len(runes), " / ".join(REAGENT_SHOPS_FOLDER),
            ", ".join(r[2] for r in runes[:6])
@@ -952,19 +1105,35 @@ def one_lap(lap):
         if not recall_to(page, button, name, coord):
             continue
 
+        # BEFORE ANYTHING ELSE. A shop with a Town Invader standing in it is
+        # not a shop to finish the round in.
+        threat = danger_here()
+        if threat:
+            log("  %s is here - leaving %s for the next rune."
+                % (threat, name), HUE_BAD)
+            continue
+
         sellers = vendors_in_range()
         if not sellers:
             log("  no mage or alchemist within %d tiles of %s."
                 % (VENDOR_RANGE, name), HUE_WARN)
             continue
 
+        bailed = False
         for mob in sellers:
             spent += buy_from(mob)
             grab_and_store()
+            threat = danger_here()
+            if threat:
+                log("  %s turned up - abandoning %s." % (threat, name),
+                    HUE_BAD)
+                bailed = True
+                break
 
-        # One more sweep: the last purchase's goods may still have been
-        # arriving when the key was pressed.
-        grab_and_store()
+        if not bailed:
+            # One more sweep: the last purchase's goods may still have been
+            # arriving when the key was pressed.
+            grab_and_store()
     return spent
 
 
@@ -982,8 +1151,11 @@ def main():
         total += one_lap(lap)
         if Player.IsGhost:
             break
-        log("lap %d done, %d gold spent in total. Waiting %d second(s)."
-            % (lap, total, CYCLE_PAUSE_MS / 1000), HUE_GOOD)
+
+        # Every shop visited: go and stand somewhere safe for the wait.
+        go_home_and_wait()
+        log("lap %d done, %d gold spent in total. Waiting %d minute(s)."
+            % (lap, total, CYCLE_PAUSE_MS / 60000), HUE_GOOD)
         sleep_ms(CYCLE_PAUSE_MS)
 
     if Player.IsGhost:
