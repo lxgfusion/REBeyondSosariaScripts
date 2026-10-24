@@ -12,8 +12,9 @@ THE ROUND
         recall
         if anything here is a Town Invader, leave for the next rune AT ONCE
         buy from EVERY mage and alchemist standing there
-        press the storage key ONCE, when they have all been bought from
-    recall to Trammel / the bank, wait ten minutes, and go round again
+    recall to Trammel / the bank
+    empty the pack into the storage key there - ONE press for the whole lap
+    wait ten minutes, and go round again
 
 WHY THE OLD ONE DID NOT BUY
 ---------------------------
@@ -62,7 +63,8 @@ Nothing here trusts that a click worked:
     runebook prints under every entry
   * a purchase is confirmed by GOLD SPENT - the shop window opening is not
     evidence that anything was bought
-  * a deposit is confirmed by the pack being lighter afterwards
+  * a deposit waits for the server before counting the pack again - counting
+    straight after the menu reported a working deposit as a failed one
 
 JOURNAL
 -------
@@ -76,7 +78,7 @@ import time
 # Printed as the first line at startup. Razor CACHES the loaded script even
 # after the file on disk changes - if this is not the version you expect, hit
 # Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-10-24.10"
+SCRIPT_VERSION = "2026-10-24.11"
 
 
 # =============================================================================
@@ -238,6 +240,11 @@ ARRIVE_TOLERANCE = 3        # tiles from the rune's own coordinates
 BUY_SETTLE_MS = 2500        # for the Buy Agent to fill the vendor window
 CONTEXT_TIMEOUT_MS = 10000
 CONTEXT_PAUSE_MS = 700
+
+# After answering the storage key, BEFORE counting the pack again. The
+# server takes a moment to move things, and counting straight away
+# reported a working deposit as "the key took nothing" (2026-10-24).
+STORE_SETTLE_MS = 1500
 GUMP_TIMEOUT_MS = 10000
 SETTLE_MS = 300
 
@@ -988,11 +995,18 @@ def pack_count():
 
 
 def store_haul():
-    """Push the pack into the storage key. True if it took anything.
+    """Push the pack into the storage key. True if it was pressed.
 
-    One press. A Master Key takes the lot in one go, and the key is answered
-    by LABEL - the old script sent context entry 2, which is whatever the
-    shard happens to have put in that slot.
+    ONE press, at the end of the round - see main(). A Master Key takes the
+    lot in one go, and the key is answered by LABEL; the old script sent
+    context entry 2, which is whatever the shard happens to have put there.
+
+    The count before and after is REPORTING, not a verdict. It said "the key
+    took nothing" while the key was plainly taking things (2026-10-24),
+    because the pack was re-counted the instant the menu was answered - the
+    server had not finished moving anything yet. It waits STORE_SETTLE_MS now,
+    and a count that still has not moved is reported as what it is: a number
+    that did not change, which may mean nothing was due to move.
     """
     if not STORAGE_KEY_SERIAL:
         return False
@@ -1005,15 +1019,20 @@ def store_haul():
     before = pack_count()
     if not context_select(STORAGE_KEY_SERIAL, FILL_ENTRIES, "the storage key"):
         return False
+
+    # The server takes a moment. Counting before it has finished is what made
+    # a working deposit report as a failed one.
+    Misc.Pause(STORE_SETTLE_MS)
     after = pack_count()
 
     if before < 0 or after < 0:
-        return True             # it was pressed; the pack could not be read
-    if after < before:
+        log("  key pressed; the pack could not be counted.")
+    elif after < before:
         log("  stored %d item(s)." % (before - after), HUE_GOOD)
-        return True
-    log("  the key took nothing.", HUE_WARN)
-    return False
+    else:
+        log("  key pressed; the pack still shows %d item(s). That is normal "
+            "when there was nothing it takes." % after)
+    return True
 
 
 # =============================================================================
@@ -1128,18 +1147,14 @@ def one_lap(lap):
         spent += bought
 
         if bailed:
-            # Leave with the goods still in the pack. The next shop's key
-            # press takes them, and standing still to answer a menu is the
-            # last thing to do with an invader here.
+            # Leave with the goods still in the pack - standing still to
+            # answer a menu is the last thing to do with an invader here.
             continue
-        if bought:
-            store_haul()
 
-    # ONE LAST PRESS, if anything was bought at all. A shop abandoned to an
-    # invader leaves its goods in the pack, and if nothing was bought after
-    # it there would be no later press to take them.
-    if spent:
-        store_haul()
+    # NOTHING IS STORED DURING THE ROUND. The pack holds everything until the
+    # character is back at the bank for the cooldown, which is one key press
+    # per lap instead of one per shop - and the only place it matters that
+    # the pack is empty again is before the NEXT lap starts.
     return spent
 
 
@@ -1158,8 +1173,10 @@ def main():
         if Player.IsGhost:
             break
 
-        # Every shop visited: go and stand somewhere safe for the wait.
+        # Every shop visited: go and stand somewhere safe, empty the pack
+        # into the key there, and then wait out the cooldown.
         go_home_and_wait()
+        store_haul()
         log("lap %d done, %d gold spent in total. Waiting %d minute(s)."
             % (lap, total, CYCLE_PAUSE_MS / 60000), HUE_GOOD)
         sleep_ms(CYCLE_PAUSE_MS)

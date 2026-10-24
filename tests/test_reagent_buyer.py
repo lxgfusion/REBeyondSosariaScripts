@@ -822,11 +822,9 @@ def test_every_vendor_is_bought_from_before_the_key_is_pressed():
     m["one_lap"](1)
     pressed = [label for _s, label in stub.replied]
     check("all three vendors were bought from", pressed.count("Buy"), 3)
-    check("and the key was pressed once for the shop, once to finish",
-          pressed.count("Refill from stock"), 2)
-    check("after the buying, never between it",
-          pressed, ["Buy", "Buy", "Buy", "Refill from stock",
-                    "Refill from stock"])
+    check("and the key was NOT touched during the round",
+          "Refill from stock" in pressed, False)
+    check("nothing but buying happened", pressed, ["Buy", "Buy", "Buy"])
 
 
 def test_a_shop_that_sells_nothing_gets_no_key_press():
@@ -847,10 +845,10 @@ def test_a_shop_that_sells_nothing_gets_no_key_press():
           "Refill from stock" in pressed, False)
 
 
-def test_goods_from_an_abandoned_shop_are_stored_at_the_end_of_the_lap():
-    """A shop left to an invader keeps its goods in the pack. If nothing is
-    bought after it there is no later press to take them - so the lap ends
-    with one."""
+def test_the_pack_is_emptied_at_the_cooldown_stop_not_in_the_shops():
+    """Asked 2026-10-24: one press per lap, at the bank, before the next run
+    starts. The pack carries everything until then - infinite weight - and a
+    shop abandoned to an invader keeps its goods the same way."""
     sellers = [Mob(1, "Shanata", props=["Mage"]),
                Mob(9, "Grak", props=["Town Invader"])]
     stub = Stub(menu=["Buy", "Sell", "Refill from stock"], mobiles=sellers,
@@ -878,10 +876,23 @@ def test_goods_from_an_abandoned_shop_are_stored_at_the_end_of_the_lap():
     m["one_lap"](1)
     pressed = [label for _s, label in stub.replied]
     check("it bought once then left", pressed.count("Buy"), 1)
-    check("the goods are stored once the lap is over",
-          pressed[-1], "Refill from stock")
-    check("and only after the shop was abandoned, not in it",
-          pressed, ["Buy", "Refill from stock"])
+    check("and stored nothing on the way", pressed, ["Buy"])
+
+    # The press happens in main(), once, after the trip to the bank.
+    src = open(SCRIPT, encoding="utf-8").read()
+    body = src[src.index("def main("):]
+    went = "go_home_and_wait()" in body and "store_haul()" in body
+    check("main goes home then empties the pack", went, True)
+    check("in that order",
+          went and body.index("go_home_and_wait()")
+          < body.index("store_haul()"), True)
+    check("and before the wait, not after",
+          went and "sleep_ms(CYCLE_PAUSE_MS)" in body
+          and body.index("store_haul()")
+          < body.index("sleep_ms(CYCLE_PAUSE_MS)"), True)
+    check("the lap itself never presses the key",
+          "store_haul()" in src[src.index("def one_lap("):src.index("def main(")],
+          False)
 
 
 def test_nothing_says_grab_any_more():
@@ -924,21 +935,33 @@ def test_an_invader_mid_round_leaves_without_stopping_to_key():
     m["one_lap"](1)
     pressed = [label for _s, label in stub.replied]
     check("it bought once before leaving", pressed.count("Buy"), 1)
-    # It does not stop to key AT THE SHOP. The lap's closing press still
-    # happens, once, after it has left.
-    check("no key press while standing with the invader",
-          pressed[:2], ["Buy", "Refill from stock"])
-    check("and exactly one press in total",
-          pressed.count("Refill from stock"), 1)
+    check("and never stopped to answer a menu",
+          "Refill from stock" in pressed, False)
     check("saying why", any("abandoning" in x for x in stub.messages), True)
 
 
-def test_a_key_that_takes_nothing_is_reported():
+def test_the_deposit_waits_before_counting_the_pack_again():
+    """IT SAID "the key took nothing" WHILE IT WAS WORKING (2026-10-24),
+    because the pack was re-counted the instant the menu was answered - the
+    server had not finished moving anything yet."""
+    src = open(SCRIPT, encoding="utf-8").read()
+    body = src[src.index("def store_haul("):src.index("# ======", src.index("def store_haul("))]
+    waited = "Misc.Pause(STORE_SETTLE_MS)" in body
+    check("it waits after the press", waited, True)
+    check("before counting again",
+          waited and body.index("Misc.Pause(STORE_SETTLE_MS)")
+          < body.rindex("pack_count()"), True)
+
+    # An unchanged count is REPORTED, not called a failure: there is often
+    # nothing in the pack the key wants.
     stub = Stub(menu=["Open", "Add", "Refill from stock"])
     m = load(stub)
     m["pack_count"] = lambda: 5
-    call("it says so", m["store_haul"], False)
-    check("out loud", any("took nothing" in x for x in stub.messages), True)
+    call("the press still counts as done", m["store_haul"], True)
+    check("and it says what it saw",
+          any("still shows 5 item(s)" in x for x in stub.messages), True)
+    check("without crying failure",
+          any("took nothing" in x for x in stub.messages), False)
 
 
 def test_the_lap_is_bounded():
