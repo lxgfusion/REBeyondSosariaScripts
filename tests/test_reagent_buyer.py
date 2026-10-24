@@ -25,6 +25,18 @@ def check(label, got, want):
     _checks.append((label, got, want, got == want))
 
 
+def run(label, fn, *args):
+    """Call something for its side effects; a raise is a FAILED CHECK.
+
+    The suite is a flat script, so one traceback hides every check after it -
+    the failure mode CLAUDE.md names.
+    """
+    try:
+        fn(*args)
+    except Exception as err:
+        check(label, "raised %s: %s" % (type(err).__name__, err), "no error")
+
+
 def strip_comments(src):
     """Source with docstrings and comments removed.
 
@@ -349,7 +361,10 @@ def test_nothing_is_bought_where_an_invader_stands():
     m["recall_to"] = lambda *a: True
     call("the lap spends nothing", m["one_lap"], 0, 1)
     check("and nobody was asked to trade", stub.replied, [])
-    check("it said why", any("leaving" in x for x in stub.messages), True)
+    check("it said why", any("getting out of" in x for x in stub.messages),
+          True)
+    check("and it escaped rather than picking its way to the next rune",
+          any("ESCAPE" in x for x in stub.messages), True)
 
 
 def test_the_wait_happens_at_the_bank_not_in_a_shop():
@@ -419,6 +434,107 @@ def test_the_home_rune_lists_what_is_there_when_it_cannot_be_found():
     m2["HOME_RUNE"] = ["Britain Bank", "Bank"]
     call("found", m2["go_home_and_wait"], True)
     check("the specific name beats the catch-all", picked, ["Britain Bank"])
+
+
+# The page "[ar RO RO" opens on, inspected 2026-10-24.
+ESCAPE_PAGE = [
+    "<CENTER><BASEFONT COLOR=#FFFFFF><BIG>Account Runebook</CENTER>",
+    "RO", "New Rune", "New Runebook", "Organize",
+    "1. RO (Trammel)", "(1412, 1721, 20)",
+    "2. Start Fill (Malas)", "(1281, 1193, -90)",
+    "3. Deposit items (Malas)", "(1275, 1164, -83)",
+    "4. Deposit PS (Malas)", "(1266, 1166, -83)",
+    "<BASEFONT COLOR=#FFFFFF><CENTER>Page 1/1",
+]
+# The entry buttons start at 14, NOT 10: this book numbers continuously
+# across pages, and a hardcoded "press 10" would press a button that is not
+# even drawn here. The real page's first entry happened to be 10, which made
+# reading it and guessing it look identical.
+ESCAPE_FIRST_BUTTON = 14
+ESCAPE_LAYOUT = ("{ button 20 440 4014 4015 1 0 503 }"
+                 "{ button 400 440 4005 4006 1 0 504 }"
+                 + "".join(
+                     "{ button 545 %d 4005 4007 1 0 %d }"
+                     "{ button 575 %d 4011 4012 1 0 %d }"
+                     "{ button 605 %d 4017 4018 1 0 %d }"
+                     % (90 + i * 40, ESCAPE_FIRST_BUTTON + i,
+                        90 + i * 40, 30000 + ESCAPE_FIRST_BUTTON + i,
+                        90 + i * 40, 60000 + ESCAPE_FIRST_BUTTON + i)
+                     for i in range(4)))
+
+
+def escape_stub(**kw):
+    """A world where the book is NOT already registered open.
+
+    E1 needs that: with HasGump answering True, a stray openAR() returns at
+    once without saying "[ar", so reopening-at-the-root was invisible.
+    """
+    stub = Stub(lines=ESCAPE_PAGE, layout=ESCAPE_LAYOUT, pos=(1412, 1721),
+                **kw)
+    stub.HasGump = lambda gump_id: False
+    return stub
+
+
+def test_the_escape_is_one_command_and_one_button():
+    """Asked 2026-10-24: "[ar RO RO" opens the book already inside the RO
+    folder, and the first entry on it is the way out. No paging through runes
+    while something is hitting you."""
+    stub = escape_stub()
+    m = load(stub)
+    check("the command is the one that opens the folder",
+          m["ESCAPE_COMMAND"], "[ar RO RO")
+
+    call("it gets out", m["emergency_escape"], True)
+    check("it said the command once", stub.said, ["[ar RO RO"])
+    check("and pressed the FIRST entry, nothing else", stub.actions,
+          [ESCAPE_FIRST_BUTTON])
+    check("which is NOT the lowest number a page can use",
+          ESCAPE_FIRST_BUTTON != 10, True)
+    check("naming where it went",
+          any("RO (Trammel)" in x for x in stub.messages), True)
+
+
+def test_the_escape_never_reopens_the_book_at_the_root():
+    """Saying "[ar" again lands at the root and throws away the folder the
+    escape command just opened - which would leave it pressing the first
+    entry of the ROOT page instead."""
+    stub = escape_stub()
+    m = load(stub)
+    run("the escape ran", m["emergency_escape"])
+    check("only the escape command was said", stub.said, ["[ar RO RO"])
+    check("the plain [ar was never sent",
+          any(x.strip() == "[ar" for x in stub.said), False)
+
+
+def test_the_escape_presses_no_page_or_delete_button():
+    """Paging is what it exists to avoid, and the third button on every row
+    deletes the rune."""
+    stub = escape_stub()
+    m = load(stub)
+    run("the escape ran", m["emergency_escape"])
+    check("no page buttons",
+          [b for b in stub.actions if b in (503, 504)], [])
+    check("no gate or delete buttons",
+          [b for b in stub.actions if b >= 30000], [])
+
+
+def test_the_escape_works_on_buttons_alone_if_the_text_is_late():
+    """The names may not have arrived. The buttons are enough to leave on."""
+    stub = escape_stub()
+    stub.lines = []
+    m = load(stub)
+    call("it still goes", m["emergency_escape"], True)
+    check("pressing the lowest entry button", stub.actions,
+          [ESCAPE_FIRST_BUTTON])
+
+
+def test_the_escape_says_so_when_the_book_will_not_open():
+    stub = escape_stub()
+    stub.lines, stub.layout = [], ""
+    m = load(stub)
+    call("it reports failure", m["emergency_escape"], False)
+    check("nothing was pressed", stub.actions, [])
+    check("out loud", any("did not open" in x for x in stub.messages), True)
 
 
 def test_the_page_buttons_are_the_inspected_ones():
@@ -819,7 +935,7 @@ def test_every_vendor_is_bought_from_before_the_key_is_pressed():
             stub.Gold -= 100
     stub.ContextReply = spend
 
-    m["one_lap"](1)
+    run("the lap ran", m["one_lap"], 1)
     pressed = [label for _s, label in stub.replied]
     check("all three vendors were bought from", pressed.count("Buy"), 3)
     check("and the key was NOT touched during the round",
@@ -838,7 +954,7 @@ def test_a_shop_that_sells_nothing_gets_no_key_press():
     m["recall_to"] = lambda *a: True
     m["pack_count"] = lambda: 5
     # ContextReply records but never spends: the vendor stocks nothing wanted.
-    m["one_lap"](1)
+    run("the lap ran", m["one_lap"], 1)
     pressed = [label for _s, label in stub.replied]
     check("the vendor was asked", pressed.count("Buy"), 1)
     check("and the key was left alone",
@@ -873,7 +989,7 @@ def test_the_pack_is_emptied_at_the_cooldown_stop_not_in_the_shops():
             stub.Gold -= 100
     stub.ContextReply = spend
 
-    m["one_lap"](1)
+    run("the lap ran", m["one_lap"], 1)
     pressed = [label for _s, label in stub.replied]
     check("it bought once then left", pressed.count("Buy"), 1)
     check("and stored nothing on the way", pressed, ["Buy"])
@@ -932,12 +1048,14 @@ def test_an_invader_mid_round_leaves_without_stopping_to_key():
             stub.Gold -= 100
     stub.ContextReply = spend
 
-    m["one_lap"](1)
+    run("the lap ran", m["one_lap"], 1)
     pressed = [label for _s, label in stub.replied]
     check("it bought once before leaving", pressed.count("Buy"), 1)
     check("and never stopped to answer a menu",
           "Refill from stock" in pressed, False)
     check("saying why", any("abandoning" in x for x in stub.messages), True)
+    check("and it ESCAPED rather than walking to the next rune",
+          any("ESCAPE" in x for x in stub.messages), True)
 
 
 def test_the_deposit_waits_before_counting_the_pack_again():

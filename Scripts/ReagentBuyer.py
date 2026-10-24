@@ -10,7 +10,8 @@ THE ROUND
     walk the Account Runebook into the reagent-shop folder
     for every "Mage Shop" rune in it, on every page:
         recall
-        if anything here is a Town Invader, leave for the next rune AT ONCE
+        if anything here is a Town Invader, run "[ar RO RO" and press the
+            first rune on it - out in one command, no paging
         buy from EVERY mage and alchemist standing there
     recall to Trammel / the bank
     empty the pack into the storage key there - ONE press for the whole lap
@@ -78,7 +79,7 @@ import time
 # Printed as the first line at startup. Razor CACHES the loaded script even
 # after the file on disk changes - if this is not the version you expect, hit
 # Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-10-24.11"
+SCRIPT_VERSION = "2026-10-24.12"
 
 
 # =============================================================================
@@ -206,6 +207,25 @@ DANGER_RANGE = 20
 # A ceiling on how many mobiles get a tooltip read per check, so a crowded
 # bank does not turn into a tooltip storm.
 DANGER_MAX_CHECKS = 25
+
+# ---------------------------------------------------------------------------
+# THE ESCAPE - one command, one button, no searching
+#
+# "[ar RO RO" opens the Account Runebook ALREADY INSIDE the RO folder, so
+# there is no paging and no hunting for a rune while something is hitting you.
+# Inspected 2026-10-24, the page it opens on:
+#
+#     1. RO (Trammel)      (1412, 1721, 20)   <- the first option, the escape
+#     2. Start Fill (Malas)
+#     3. Deposit items (Malas)
+#     4. Deposit PS (Malas)
+#
+# The FIRST entry on whatever page that command opens is what gets pressed -
+# read off the open window, so it is the button the server actually drew
+# rather than a number typed here that could go stale.
+ESCAPE_COMMAND = "[ar RO RO"
+ESCAPE_GUMP_TIMEOUT_MS = 5000
+ESCAPE_SETTLE_MS = 2000
 
 # How far to look for them. ALWAYS set this - an unset RangeMax means
 # everything the client knows about, which is 18-25 tiles of other people's
@@ -522,8 +542,14 @@ def openAR():
     return bool(ret) or has_gump(AR_GUMPID)
 
 
-def ar_buttons():
-    if not openAR():
+def ar_buttons(ensure_open=True):
+    """Every button on the open runebook page.
+
+    `ensure_open` False reads what is ALREADY on screen. That matters for the
+    escape: "[ar" would reopen the book at the root and throw away the folder
+    the escape command just opened.
+    """
+    if ensure_open and not openAR():
         return []
     try:
         layout = Gumps.GetGumpRawLayout(AR_GUMPID) or ""
@@ -547,7 +573,7 @@ def ar_page_info():
     return (1, 1)
 
 
-def parse_ar_page():
+def parse_ar_page(ensure_open=True):
     """Folders and runes on the CURRENT page.
 
     Entries are picked out by their "N. Name" text and paired with the page's
@@ -558,11 +584,11 @@ def parse_ar_page():
     A rune is followed by a coordinate line; a folder is not. That is the
     discriminator, with the +30000 gate button as a second opinion.
     """
-    if not openAR():
+    if ensure_open and not openAR():
         return {}, {}
 
     lines = gump_lines(AR_GUMPID)
-    buttons = ar_buttons()
+    buttons = ar_buttons(ensure_open=ensure_open)
     entry_buttons = sorted(b for b in buttons
                            if AR_ENTRY_BUTTON_MIN <= b <= AR_ENTRY_BUTTON_MAX
                            and b not in AR_CONTROL_BUTTONS)
@@ -884,6 +910,51 @@ def is_vendor(mob):
     return False
 
 
+def emergency_escape():
+    """Get out NOW. One command, one button. True if the button was pressed.
+
+    NO SEARCHING. ESCAPE_COMMAND opens the book already inside the escape
+    folder, and the first entry on that page is pressed - which is the whole
+    point: paging through runes while something is hitting you is how you
+    die holding a gump.
+
+    The page is read WITHOUT reopening the book. Saying "[ar" again would
+    land back at the root and undo the one thing the escape command did.
+    """
+    log("ESCAPE: %r" % ESCAPE_COMMAND, HUE_BAD)
+    if not chat_say(ESCAPE_COMMAND):
+        return False
+    Gumps.WaitForGump(AR_GUMPID, ESCAPE_GUMP_TIMEOUT_MS)
+    Misc.Pause(SETTLE_MS)
+
+    name, coord = "the first rune", None
+    _folders, runes = parse_ar_page(ensure_open=False)
+    if runes:
+        first = min(runes)
+        name = runes[first]["name"]
+        coord = runes[first]["coord"]
+    else:
+        # The text may not have arrived; the BUTTONS are enough to escape on.
+        drawn = [b for b in ar_buttons(ensure_open=False)
+                 if AR_ENTRY_BUTTON_MIN <= b <= AR_ENTRY_BUTTON_MAX
+                 and b not in AR_CONTROL_BUTTONS]
+        if not drawn:
+            log("  the escape book did not open - nothing pressed.", HUE_BAD)
+            return False
+        first = min(drawn)
+
+    log("  recalling to %s." % name, HUE_WARN)
+    Gumps.SendAction(AR_GUMPID, first)
+    Misc.Pause(ESCAPE_SETTLE_MS)
+
+    where = arrived_at(coord)
+    if where is False:
+        log("  the escape recall did not land - still at %d,%d."
+            % (Player.Position.X, Player.Position.Y), HUE_BAD)
+        return False
+    return True
+
+
 def danger_here():
     """The name of something that means leave now, or "".
 
@@ -1090,7 +1161,8 @@ def preflight():
             else " or ".join(HOME_RUNE)) or "(nowhere)",
            CYCLE_PAUSE_MS / 60000))
     if DANGER_TITLES:
-        log("  leaving a shop at once for: %s" % ", ".join(DANGER_TITLES))
+        log("  escaping with %r for: %s"
+            % (ESCAPE_COMMAND, ", ".join(DANGER_TITLES)))
     log("  %d rune(s) in %s: %s"
         % (len(runes), " / ".join(REAGENT_SHOPS_FOLDER),
            ", ".join(r[2] for r in runes[:6])
@@ -1120,8 +1192,8 @@ def one_lap(lap):
         # not a shop to finish the round in.
         threat = danger_here()
         if threat:
-            log("  %s is here - leaving %s for the next rune."
-                % (threat, name), HUE_BAD)
+            log("  %s is here - getting out of %s." % (threat, name), HUE_BAD)
+            emergency_escape()
             continue
 
         sellers = vendors_in_range()
@@ -1142,6 +1214,7 @@ def one_lap(lap):
             if threat:
                 log("  %s turned up - abandoning %s." % (threat, name),
                     HUE_BAD)
+                emergency_escape()
                 bailed = True
                 break
         spent += bought
