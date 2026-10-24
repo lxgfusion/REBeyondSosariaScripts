@@ -76,16 +76,39 @@ import time
 # Printed as the first line at startup. Razor CACHES the loaded script even
 # after the file on disk changes - if this is not the version you expect, hit
 # Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-10-24.3"
+SCRIPT_VERSION = "2026-10-24.5"
 
 
 # =============================================================================
 # CONFIG - THE THINGS YOU SET
 # =============================================================================
 
-# The storage key the reagents go into. A Master Key takes everything in one
-# press. 0 means "do not store at all - leave it in the pack".
+# THE STORAGE KEY the reagents go into. 0 means "do not store at all".
+#
+# EITHER KIND WORKS - a Master Key or a reagent key - because the mechanism is
+# the same for both: single-click the key and answer "Refill from stock". All
+# that has to be right is the serial. Inspected 2026-10-24:
+#
+#     Master Keys, 0x4335A205, ItemID 0x176B, hue 0x0481, Blessed, 5 stones
+#
 STORAGE_KEY_SERIAL = 0x4335A205
+
+# WHERE THE KEY LIVES - you do not have to say. Loose in the backpack or
+# tucked in a bag inside it, both work.
+#
+# An item inside a container the client has not opened this session can fail
+# to resolve by serial at all - the same way a key in a pouch went missing in
+# Sandmaker - so when the direct lookup comes up empty the bags in your pack
+# are opened, one at a time, until it turns up. That search runs ONCE per run,
+# not on every deposit.
+#
+# Setting this to the bag's serial skips the search. Inspected 2026-10-24,
+# the Master Keys were in 0x42385515; left at 0 so that moving them to
+# another bag, or into the pack itself, needs no edit here.
+KEY_BAG_SERIAL = 0
+
+# How deep to hunt for it. 1 is the bags in your pack, 2 is bags inside those.
+KEY_SEARCH_DEPTH = 2
 
 # The Razor BUY AGENT list to use, set up in the Razor Enhanced GUI with the
 # reagents and amounts you want. The agent is enabled and pointed at this list
@@ -275,6 +298,98 @@ def chat_say(phrase):
     except Exception as err:
         log("could not say %r: %r" % (phrase, err), HUE_BAD)
         return False
+
+
+def open_container(serial):
+    """Open a container so the client knows what is in it. True if it exists.
+
+    A container's contents only exist once it has been opened, and an item
+    inside one that has never been opened can fail to resolve by serial.
+    """
+    if not serial:
+        return False
+    item = Items.FindBySerial(int(serial))
+    if item is None:
+        return False
+    try:
+        Items.UseItem(item)
+        Items.WaitForContents(item, 3000)
+    except Exception:
+        pass
+    Misc.Pause(SETTLE_MS)
+    return True
+
+
+# Whether the bags have already been turned out this run. The search is a
+# one-off: opening every bag before each deposit is the churn that made the
+# bottle opener flap windows open all run.
+_key_hunted = [False]
+
+
+def find_storage_key(force=False):
+    """The storage key, wherever it is. None if it really is not on you.
+
+    Three looks, cheapest first:
+
+      1. straight by serial - all it takes when the client can already see it,
+         which is the usual case and costs nothing
+      2. KEY_BAG_SERIAL, if one is configured
+      3. the bags in your pack, opened one at a time until it turns up
+
+    Step 3 happens ONCE per run unless `force` says otherwise. A Master Key
+    and a reagent key are the same thing here: nothing cares which it is, only
+    that single-clicking it offers "Refill from stock".
+    """
+    if not STORAGE_KEY_SERIAL:
+        return None
+
+    key = Items.FindBySerial(STORAGE_KEY_SERIAL)
+    if key is not None:
+        return key
+
+    if KEY_BAG_SERIAL and open_container(KEY_BAG_SERIAL):
+        key = Items.FindBySerial(STORAGE_KEY_SERIAL)
+        if key is not None:
+            return key
+
+    if _key_hunted[0] and not force:
+        return None
+    _key_hunted[0] = True
+
+    pack = Player.Backpack
+    if pack is None:
+        return None
+    log("  key 0x%X is not in sight - looking in your bags."
+        % STORAGE_KEY_SERIAL)
+    open_container(int(pack.Serial))
+
+    seen = set([int(pack.Serial)])
+    level = [(pack, 0)]
+    while level:
+        container, depth = level.pop(0)
+        try:
+            inside = list(getattr(container, "Contains", None) or [])
+        except Exception:
+            inside = []
+        for item in inside:
+            try:
+                serial = int(item.Serial)
+                if not bool(item.IsContainer):
+                    continue
+            except Exception:
+                continue
+            if serial in seen or depth >= KEY_SEARCH_DEPTH:
+                continue
+            seen.add(serial)
+            open_container(serial)
+
+            key = Items.FindBySerial(STORAGE_KEY_SERIAL)
+            if key is not None:
+                log("  found it in bag 0x%X. Set KEY_BAG_SERIAL to that to "
+                    "skip the search next time." % serial, HUE_GOOD)
+                return key
+            level.append((item, depth + 1))
+    return None
 
 
 def context_is_blocked(label):
@@ -735,7 +850,7 @@ def store_haul():
     """
     if not STORAGE_KEY_SERIAL:
         return False
-    key = Items.FindBySerial(STORAGE_KEY_SERIAL)
+    key = find_storage_key()
     if key is None:
         log("Storage key 0x%X is not on you - nothing stored."
             % STORAGE_KEY_SERIAL, HUE_WARN)
@@ -794,10 +909,13 @@ def preflight():
         "holds the reagents you want.)")
 
     if STORAGE_KEY_SERIAL:
-        key = Items.FindBySerial(STORAGE_KEY_SERIAL)
-        log("  storage key 0x%X%s" % (STORAGE_KEY_SERIAL,
-                                      "" if key is not None
-                                      else "  WARNING: not on you right now"),
+        # Opened up front so the first deposit is not the thing that finds out
+        # the key is in a bag the client has never looked in.
+        key = find_storage_key(force=True)
+        log("  storage key 0x%X%s"
+            % (STORAGE_KEY_SERIAL,
+               "" if key is not None
+               else "  WARNING: not found, in your pack or any bag in it"),
             HUE_INFO if key is not None else HUE_WARN)
     else:
         log("  no storage key set - reagents stay in your pack.", HUE_WARN)

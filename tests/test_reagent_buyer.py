@@ -544,6 +544,116 @@ def test_the_storage_key_is_answered_by_label_not_index():
           "Refill from stock")
 
 
+class Bag(object):
+    def __init__(self, serial, contains=()):
+        self.Serial = serial
+        self.IsContainer = True
+        self.Contains = list(contains)
+
+
+def key_world(where):
+    """A pack holding a bag holding a bag, with the key at `where`.
+
+    The key only resolves by serial once the container it is in has been
+    opened - which is the whole trap: an item in a bag the client has never
+    looked in can fail to resolve at all.
+    """
+    inner = Bag(0x42385516)
+    outer = Bag(0x42385515, [inner])
+    pack = Bag(0x41D40F58, [outer])
+    stub = Stub(menu=["Open", "Add", "Refill from stock"])
+    stub.Backpack = pack
+    opened = []
+
+    def find(serial):
+        serial = int(serial)
+        if serial == 0x4335A205 and where not in opened and where != "pack":
+            return None
+        for bag in (pack, outer, inner):
+            if int(bag.Serial) == serial:
+                return bag
+        return type("I", (), {"Serial": serial, "IsContainer": False})()
+
+    stub.FindBySerial = find
+    stub.UseItem = lambda item: opened.append(int(item.Serial))
+    return stub, opened
+
+
+def test_the_key_is_found_loose_in_the_pack():
+    """The usual case, and it must cost nothing: no bag is opened looking for
+    something already in sight."""
+    stub, opened = key_world("pack")
+    m = load(stub)
+    m["STORAGE_KEY_SERIAL"] = 0x4335A205
+    check("found straight away", m["find_storage_key"]() is not None, True)
+    check("and no bag was opened for it", opened, [])
+
+
+def test_the_key_is_found_in_a_bag_without_being_told_which():
+    """Inspected 2026-10-24: the Master Keys sit in a bag inside the pack.
+    KEY_BAG_SERIAL is 0, so the bags get turned out until it appears."""
+    stub, opened = key_world(0x42385515)
+    m = load(stub)
+    m["STORAGE_KEY_SERIAL"] = 0x4335A205
+    check("found in the end", m["find_storage_key"]() is not None, True)
+    check("by opening the pack and then that bag",
+          opened, [0x41D40F58, 0x42385515])
+
+
+def test_the_key_is_found_in_a_bag_inside_a_bag():
+    stub, opened = key_world(0x42385516)
+    m = load(stub)
+    m["STORAGE_KEY_SERIAL"] = 0x4335A205
+    check("found two deep", m["find_storage_key"]() is not None, True)
+    check("having opened both bags on the way",
+          opened, [0x41D40F58, 0x42385515, 0x42385516])
+
+
+def test_the_bags_are_turned_out_once_not_before_every_deposit():
+    """Opening every bag before each deposit is the churn that made the bottle
+    opener flap windows open all run."""
+    stub, opened = key_world("nowhere")
+    m = load(stub)
+    m["STORAGE_KEY_SERIAL"] = 0x4335A205
+    check("not found", m["find_storage_key"](), None)
+    first = len(opened)
+    check("it did look", first > 1, True)
+
+    m["find_storage_key"]()
+    m["find_storage_key"]()
+    check("and did not look again", len(opened), first)
+
+    # Unless something asks it to, which is what preflight does.
+    m["find_storage_key"](True)
+    check("force searches again", len(opened) > first, True)
+
+
+def test_a_configured_bag_skips_the_search():
+    stub, opened = key_world(0x42385515)
+    m = load(stub)
+    m["STORAGE_KEY_SERIAL"] = 0x4335A205
+    m["KEY_BAG_SERIAL"] = 0x42385515
+    check("found", m["find_storage_key"]() is not None, True)
+    check("straight to the bag, no walking", opened, [0x42385515])
+
+
+def test_either_kind_of_key_works():
+    """A Master Key and a reagent key take the same single click and the same
+    "Refill from stock" - only the serial differs."""
+    stub = Stub(menu=["Open", "Add", "Refill from stock"])
+    m = load(stub)
+    m["pack_count"] = lambda: 5 if not stub.replied else 1
+    for serial in (0x4335A205, 0x404D69CE):
+        del stub.replied[:]
+        m["STORAGE_KEY_SERIAL"] = serial
+        call("0x%X stores" % serial, m["store_haul"], True)
+        check("  pressed by label on 0x%X" % serial,
+              stub.replied[-1][1] if stub.replied else None,
+              "Refill from stock")
+        check("  and on the key itself",
+              stub.replied[-1][0] if stub.replied else None, serial)
+
+
 def test_a_key_that_takes_nothing_is_reported():
     stub = Stub(menu=["Open", "Add", "Refill from stock"])
     m = load(stub)
