@@ -11,9 +11,8 @@ THE ROUND
     for every "Mage Shop" rune in it, on every page:
         recall
         if anything here is a Town Invader, leave for the next rune AT ONCE
-        find the mage / alchemist standing there
-        open their Buy window, let the Buy Agent fill it
-        put what arrived into the storage key
+        buy from EVERY mage and alchemist standing there
+        press the storage key ONCE, when they have all been bought from
     recall to Trammel / the bank, wait ten minutes, and go round again
 
 WHY THE OLD ONE DID NOT BUY
@@ -77,7 +76,7 @@ import time
 # Printed as the first line at startup. Razor CACHES the loaded script even
 # after the file on disk changes - if this is not the version you expect, hit
 # Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-10-24.8"
+SCRIPT_VERSION = "2026-10-24.10"
 
 
 # =============================================================================
@@ -225,9 +224,10 @@ CONTEXT_NEVER = [
 # Entries that empty the pack into a storage key, tried in this order.
 FILL_ENTRIES = ["Refill from stock", "Fill from backpack"]
 
-# The shard's pick-everything-up command, said after each purchase because
-# bought goods that will not fit land on the floor. "" turns it off.
-GRAB_PHRASE = "[grab"
+# NO PICK-EVERYTHING-UP COMMAND, deliberately. This is run with infinite
+# backpack weight, so bought goods go straight into the pack and there is
+# never anything on the floor to collect. Saying "[grab" after every purchase
+# was a command and a pause per vendor, buying nothing.
 
 # ---------------------------------------------------------------------------
 # TIMING
@@ -1016,14 +1016,6 @@ def store_haul():
     return False
 
 
-def grab_and_store():
-    """Pick up anything that landed on the floor, then store."""
-    if GRAB_PHRASE:
-        chat_say(GRAB_PHRASE)
-        Misc.Pause(CONTEXT_PAUSE_MS)
-    store_haul()
-
-
 # =============================================================================
 # THE RUN
 # =============================================================================
@@ -1119,21 +1111,35 @@ def one_lap(lap):
                 % (VENDOR_RANGE, name), HUE_WARN)
             continue
 
+        # EVERY VENDOR HERE FIRST, THEN ONE KEY PRESS. The goods all land in
+        # the pack - infinite weight - so there is nothing to be gained by
+        # storing between vendors, and a key press per vendor is a context
+        # menu and a pause each.
         bailed = False
+        bought = 0
         for mob in sellers:
-            spent += buy_from(mob)
-            grab_and_store()
+            bought += buy_from(mob)
             threat = danger_here()
             if threat:
                 log("  %s turned up - abandoning %s." % (threat, name),
                     HUE_BAD)
                 bailed = True
                 break
+        spent += bought
 
-        if not bailed:
-            # One more sweep: the last purchase's goods may still have been
-            # arriving when the key was pressed.
-            grab_and_store()
+        if bailed:
+            # Leave with the goods still in the pack. The next shop's key
+            # press takes them, and standing still to answer a menu is the
+            # last thing to do with an invader here.
+            continue
+        if bought:
+            store_haul()
+
+    # ONE LAST PRESS, if anything was bought at all. A shop abandoned to an
+    # invader leaves its goods in the pack, and if nothing was bought after
+    # it there would be no later press to take them.
+    if spent:
+        store_haul()
     return spent
 
 

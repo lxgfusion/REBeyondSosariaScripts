@@ -25,6 +25,16 @@ def check(label, got, want):
     _checks.append((label, got, want, got == want))
 
 
+def strip_comments(src):
+    """Source with docstrings and comments removed.
+
+    Needed because this script QUOTES the old buggy lines to explain them, so
+    a search for them in the raw text finds the explanation.
+    """
+    code = re.sub(r'"""[\s\S]*?"""', "", src)
+    return "\n".join(l.split("#", 1)[0] for l in code.splitlines())
+
+
 def call(label, fn, want, *args):
     """check() for a real call: an exception is a FAILURE, not a traceback
     that hides every check after it."""
@@ -787,6 +797,140 @@ def test_either_kind_of_key_works():
               "Refill from stock")
         check("  and on the key itself",
               stub.replied[-1][0] if stub.replied else None, serial)
+
+
+def test_every_vendor_is_bought_from_before_the_key_is_pressed():
+    """Asked 2026-10-24. The goods all land in the pack - infinite weight - so
+    storing between vendors buys nothing and costs a context menu each."""
+    sellers = [Mob(1, "Shanata", props=["Mage"]),
+               Mob(2, "Arlinda", props=["Alchemist"]),
+               Mob(3, "Kell", props=["Mage"])]
+    stub = Stub(menu=["Buy", "Sell", "Refill from stock"], mobiles=sellers,
+                gold=1000)
+    m = load(stub)
+    m["go_to_reagent_folder"] = lambda: True
+    m["collect_runes"] = lambda: [(1, 10, "Britt Mage Shop", [100, 100, 0])]
+    m["recall_to"] = lambda *a: True
+    m["pack_count"] = lambda: 9 if len(stub.replied) < 4 else 2
+
+    def spend(serial, label):
+        stub.replied.append((int(serial), label))
+        if label == "Buy":
+            stub.Gold -= 100
+    stub.ContextReply = spend
+
+    m["one_lap"](1)
+    pressed = [label for _s, label in stub.replied]
+    check("all three vendors were bought from", pressed.count("Buy"), 3)
+    check("and the key was pressed once for the shop, once to finish",
+          pressed.count("Refill from stock"), 2)
+    check("after the buying, never between it",
+          pressed, ["Buy", "Buy", "Buy", "Refill from stock",
+                    "Refill from stock"])
+
+
+def test_a_shop_that_sells_nothing_gets_no_key_press():
+    """Pressing a key with nothing to put in it is a context menu and a pause
+    for no reason."""
+    stub = Stub(menu=["Buy", "Sell", "Refill from stock"],
+                mobiles=[Mob(1, "Shanata", props=["Mage"])], gold=1000)
+    m = load(stub)
+    m["go_to_reagent_folder"] = lambda: True
+    m["collect_runes"] = lambda: [(1, 10, "Britt Mage Shop", [100, 100, 0])]
+    m["recall_to"] = lambda *a: True
+    m["pack_count"] = lambda: 5
+    # ContextReply records but never spends: the vendor stocks nothing wanted.
+    m["one_lap"](1)
+    pressed = [label for _s, label in stub.replied]
+    check("the vendor was asked", pressed.count("Buy"), 1)
+    check("and the key was left alone",
+          "Refill from stock" in pressed, False)
+
+
+def test_goods_from_an_abandoned_shop_are_stored_at_the_end_of_the_lap():
+    """A shop left to an invader keeps its goods in the pack. If nothing is
+    bought after it there is no later press to take them - so the lap ends
+    with one."""
+    sellers = [Mob(1, "Shanata", props=["Mage"]),
+               Mob(9, "Grak", props=["Town Invader"])]
+    stub = Stub(menu=["Buy", "Sell", "Refill from stock"], mobiles=sellers,
+                gold=1000)
+    m = load(stub)
+    m["go_to_reagent_folder"] = lambda: True
+    m["collect_runes"] = lambda: [(1, 10, "Britt Mage Shop", [100, 100, 0])]
+    m["recall_to"] = lambda *a: True
+    m["pack_count"] = lambda: 5
+
+    seen = {"n": 0}
+    real_danger = m["danger_here"]
+
+    def danger():
+        seen["n"] += 1
+        return "" if seen["n"] == 1 else real_danger()
+    m["danger_here"] = danger
+
+    def spend(serial, label):
+        stub.replied.append((int(serial), label))
+        if label == "Buy":
+            stub.Gold -= 100
+    stub.ContextReply = spend
+
+    m["one_lap"](1)
+    pressed = [label for _s, label in stub.replied]
+    check("it bought once then left", pressed.count("Buy"), 1)
+    check("the goods are stored once the lap is over",
+          pressed[-1], "Refill from stock")
+    check("and only after the shop was abandoned, not in it",
+          pressed, ["Buy", "Refill from stock"])
+
+
+def test_nothing_says_grab_any_more():
+    """Infinite backpack weight: bought goods go straight to the pack and
+    there is never anything on the floor to pick up."""
+    src = open(SCRIPT, encoding="utf-8").read()
+    code = strip_comments(src)
+    check("no grab command in the code", "grab" in code.lower(), False)
+    check("and no leftover helper", "grab_and_store" in src, False)
+
+
+def test_an_invader_mid_round_leaves_without_stopping_to_key():
+    """Standing still to answer a context menu is the last thing to do with
+    one of those here - the next shop's key press takes the goods."""
+    sellers = [Mob(1, "Shanata", props=["Mage"]),
+               Mob(9, "Grak", props=["Town Invader"])]
+    stub = Stub(menu=["Buy", "Sell", "Refill from stock"], mobiles=sellers,
+                gold=1000)
+    m = load(stub)
+    m["go_to_reagent_folder"] = lambda: True
+    m["collect_runes"] = lambda: [(1, 10, "Britt Mage Shop", [100, 100, 0])]
+    m["recall_to"] = lambda *a: True
+    m["pack_count"] = lambda: 5
+
+    # Quiet on arrival; the invader walks in after the first purchase.
+    seen = {"n": 0}
+    real_danger = m["danger_here"]
+
+    def danger():
+        seen["n"] += 1
+        return "" if seen["n"] == 1 else real_danger()
+    m["danger_here"] = danger
+
+    def spend(serial, label):
+        stub.replied.append((int(serial), label))
+        if label == "Buy":
+            stub.Gold -= 100
+    stub.ContextReply = spend
+
+    m["one_lap"](1)
+    pressed = [label for _s, label in stub.replied]
+    check("it bought once before leaving", pressed.count("Buy"), 1)
+    # It does not stop to key AT THE SHOP. The lap's closing press still
+    # happens, once, after it has left.
+    check("no key press while standing with the invader",
+          pressed[:2], ["Buy", "Refill from stock"])
+    check("and exactly one press in total",
+          pressed.count("Refill from stock"), 1)
+    check("saying why", any("abandoning" in x for x in stub.messages), True)
 
 
 def test_a_key_that_takes_nothing_is_reported():
