@@ -7,6 +7,7 @@ freeshard.
 
 THE ROUND
 ---------
+    read "[events" - whichever town is being invaded is skipped this lap
     walk the Account Runebook into the reagent-shop folder
     for every "Mage Shop" rune in it, on every page:
         recall
@@ -79,7 +80,7 @@ import time
 # Printed as the first line at startup. Razor CACHES the loaded script even
 # after the file on disk changes - if this is not the version you expect, hit
 # Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-10-24.12"
+SCRIPT_VERSION = "2026-10-24.13"
 
 
 # =============================================================================
@@ -207,6 +208,60 @@ DANGER_RANGE = 20
 # A ceiling on how many mobiles get a tooltip read per check, so a crowded
 # bank does not turn into a tooltip storm.
 DANGER_MAX_CHECKS = 25
+
+# ---------------------------------------------------------------------------
+# THE EVENTS WINDOW - skip the town BEFORE walking into it
+#
+# "[events" opens a window that names the town being invaded while it is
+# happening. Reading it at the start of every lap means the invaded town is
+# never visited, rather than being escaped from once something is already
+# hitting you.
+#
+# Captured 2026-10-24 with nothing running:
+#
+#     Town Invasion: Inactive
+#     Next: 8m 55s (Sat 08:00 PM)
+#
+# THE ACTIVE WORDING IS NOT KNOWN YET. Rather than guess it, the whole
+# window is searched for any town in TOWN_ALIASES, and the stripped lines are
+# printed whenever it is not plainly inactive - so the real wording lands in
+# the journal and can be pinned here later. A guessed shard string is worse
+# than none: it matches nothing and looks exactly like the message never
+# appeared.
+EVENTS_ENABLED = True
+EVENTS_COMMAND = "[events"
+EVENTS_GUMPID = 0x235A52C
+EVENTS_WAIT_MS = 5000
+
+# The word that means nothing is running. Anything else is treated as "it
+# might be on", which fails towards caution.
+EVENTS_INACTIVE_WORDS = ["inactive", "none", "no invasion"]
+
+# Towns, with the spellings that mean the same place. The runebook writes
+# "Britt Mage Shop" while a server message would say "Britain", so both have
+# to be on the same line for the rune to be matched to the warning.
+#
+# A rune is skipped when its name carries any alias of an invaded town.
+TOWN_ALIASES = [
+    ["Britain", "Britt", "Brit"],
+    ["Vesper"],
+    ["Papua"],
+    ["Delucia"],
+    ["Moonglow"],
+    ["New Haven", "Haven"],
+    ["Serpents Hold", "Serpent's Hold"],
+    ["Skara Brae", "Skara"],
+    ["Trinsic"],
+    ["Umbra"],
+    ["Zento"],
+    ["Jhelom"],
+    ["Yew"],
+    ["Minoc"],
+    ["Cove"],
+    ["Nujelm", "Nujel'm"],
+    ["Magincia"],
+    ["Ocllo"],
+]
 
 # ---------------------------------------------------------------------------
 # THE ESCAPE - one command, one button, no searching
@@ -910,6 +965,91 @@ def is_vendor(mob):
     return False
 
 
+def strip_tags(text):
+    """A gump line with its <BASEFONT ...> and <CENTER> markup taken out."""
+    return " ".join(re.sub(r"<[^>]*>", " ", str(text or "")).split())
+
+
+def events_lines():
+    """The [events window as plain text lines. [] if it will not open."""
+    try:
+        Gumps.CloseGump(EVENTS_GUMPID)
+    except Exception:
+        pass
+    Misc.Pause(SETTLE_MS)
+
+    if not chat_say(EVENTS_COMMAND):
+        return []
+    Gumps.WaitForGump(EVENTS_GUMPID, EVENTS_WAIT_MS)
+    Misc.Pause(SETTLE_MS)
+
+    lines = [strip_tags(l) for l in gump_lines(EVENTS_GUMPID)]
+    lines = [l for l in lines if l]
+    try:
+        Gumps.CloseGump(EVENTS_GUMPID)
+    except Exception:
+        pass
+    return lines
+
+
+def invaded_towns():
+    """Towns to stay out of this lap. [] when nothing is running.
+
+    The window is searched for ANY town in TOWN_ALIASES rather than for a
+    sentence nobody has seen yet - the active wording has not been captured,
+    and a guessed string would match nothing while looking exactly like the
+    warning never appeared.
+
+    Fails towards caution: a window that cannot be read at all is treated as
+    "nothing known", but one that is readable and does not say "inactive" has
+    its lines printed so the real wording gets written down.
+    """
+    if not EVENTS_ENABLED:
+        return []
+
+    lines = events_lines()
+    if not lines:
+        log("  the %s window did not open - carrying on without it."
+            % EVENTS_COMMAND, HUE_WARN)
+        return []
+
+    blob = " ".join(lines).lower()
+    if any(word.strip().lower() in blob for word in EVENTS_INACTIVE_WORDS):
+        log("  no invasion running.")
+        return []
+
+    # Something IS running. Print it verbatim: this is the wording nobody has
+    # captured yet, and it is the only way it gets pinned down.
+    log("  %s says:" % EVENTS_COMMAND, HUE_WARN)
+    for line in lines[:6]:
+        log("    %s" % line[:90], HUE_WARN)
+
+    hits = []
+    for aliases in TOWN_ALIASES:
+        for alias in aliases:
+            if alias.strip().lower() in blob:
+                hits.append(aliases[0])
+                break
+    if hits:
+        log("  AVOIDING: %s" % ", ".join(hits), HUE_BAD)
+    else:
+        log("  no town in that text matched TOWN_ALIASES - visiting "
+            "everything. Add the town's spelling there.", HUE_WARN)
+    return hits
+
+
+def in_town(name, town):
+    """Is this rune in that town? Any alias of it counts."""
+    low = " ".join(str(name or "").split()).lower()
+    for aliases in TOWN_ALIASES:
+        if aliases[0].strip().lower() != str(town or "").strip().lower():
+            continue
+        for alias in aliases:
+            if alias.strip().lower() in low:
+                return True
+    return False
+
+
 def emergency_escape():
     """Get out NOW. One command, one button. True if the button was pressed.
 
@@ -1160,6 +1300,9 @@ def preflight():
            (HOME_RUNE if isinstance(HOME_RUNE, str)
             else " or ".join(HOME_RUNE)) or "(nowhere)",
            CYCLE_PAUSE_MS / 60000))
+    if EVENTS_ENABLED:
+        log("  reading %s each lap to skip the invaded town."
+            % EVENTS_COMMAND)
     if DANGER_TITLES:
         log("  escaping with %r for: %s"
             % (ESCAPE_COMMAND, ", ".join(DANGER_TITLES)))
@@ -1173,12 +1316,29 @@ def preflight():
 def one_lap(lap):
     """Visit every rune once. How much gold was spent."""
     log("--- lap %d ---" % lap, HUE_GOOD)
+
+    # BEFORE ANY TRAVEL. Knowing which town is being invaded means never
+    # going there, which beats escaping from it once something is swinging.
+    avoid = invaded_towns()
+
     if not go_to_reagent_folder():
         return 0
     runes = collect_runes()
     if not runes:
         log("No runes to visit this lap.", HUE_WARN)
         return 0
+
+    if avoid:
+        keep = [r for r in runes
+                if not any(in_town(r[2], town) for town in avoid)]
+        if len(keep) != len(runes):
+            log("  skipping %d rune(s) in %s this lap."
+                % (len(runes) - len(keep), ", ".join(avoid)), HUE_WARN)
+        runes = keep
+        if not runes:
+            log("Every shop is in an invaded town - nothing to visit.",
+                HUE_WARN)
+            return 0
 
     spent = 0
     for page, button, name, coord in runes:

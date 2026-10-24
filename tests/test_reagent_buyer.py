@@ -329,6 +329,136 @@ def test_sell_and_bribe_are_never_pressed():
 # THE RUNEBOOK - fault 3
 # ---------------------------------------------------------------------------
 
+# The [events window, captured 2026-10-24 with nothing running. Gump id
+# 0x235A52C. The markup is part of the line, not a separate field.
+EVENTS_INACTIVE = [
+    " <BASEFONT COLOR=#80BFFF>Town Invasion:</BASEFONT> "
+    "<BASEFONT COLOR=#FF6666>Inactive</BASEFONT>",
+    " <CENTER><BASEFONT COLOR=#7FFF7F>Next:</BASEFONT> "
+    "<BASEFONT COLOR=#80BFFF>8m 55s (Sat 08:00 PM)</BASEFONT></CENTER>",
+]
+
+
+def events_stub(lines, **kw):
+    """A world where [events returns `lines` and the runebook is elsewhere."""
+    stub = Stub(**kw)
+    stub._events = list(lines)
+
+    def get_lines(gump_id, dataOnly=False):
+        if int(gump_id) == 0x235A52C:
+            return list(stub._events)
+        return list(stub.lines)
+    stub.GetLineList = get_lines
+    return stub
+
+
+def test_the_markup_is_stripped_from_an_events_line():
+    """<BASEFONT COLOR=#80BFFF> is part of the line. Matching a town name
+    through that is matching against noise."""
+    stub = events_stub(EVENTS_INACTIVE)
+    m = load(stub)
+    check("tags out, text kept",
+          m["strip_tags"](EVENTS_INACTIVE[0]), "Town Invasion: Inactive")
+    check("and the timer line reads plainly",
+          m["strip_tags"](EVENTS_INACTIVE[1]),
+          "Next: 8m 55s (Sat 08:00 PM)")
+    check("an empty line stays empty", m["strip_tags"](""), "")
+
+
+def test_nothing_is_avoided_when_the_invasion_is_inactive():
+    stub = events_stub(EVENTS_INACTIVE)
+    m = load(stub)
+    check("no towns to avoid", m["invaded_towns"](), [])
+    check("it said the command", stub.said, ["[events"])
+    check("and said nothing alarming",
+          any("AVOIDING" in x for x in stub.messages), False)
+    # It must RECOGNISE "Inactive", not merely scan an active window and
+    # find no town in it - those give the same answer today and different
+    # ones the moment the idle text mentions a place.
+    check("it read the status", any("no invasion running" in x
+                                    for x in stub.messages), True)
+    check("and did not dump the window as if something were running",
+          any("says:" in x for x in stub.messages), False)
+
+
+def test_the_invaded_town_is_picked_out_however_it_is_worded():
+    """THE ACTIVE WORDING HAS NOT BEEN CAPTURED. So the window is searched for
+    any known town rather than for a sentence nobody has seen - a guessed
+    shard string matches nothing and looks exactly like the warning never
+    appeared."""
+    for wording in (
+            " <BASEFONT COLOR=#80BFFF>Town Invasion:</BASEFONT> "
+            "<BASEFONT COLOR=#7FFF7F>Vesper</BASEFONT> - 14 invaders alive",
+            "Town Invasion: Active in Vesper (23 remaining)",
+            "VESPER IS UNDER ATTACK"):
+        stub = events_stub([wording])
+        m = load(stub)
+        check("Vesper is spotted in %r" % wording[:28].strip(),
+              m["invaded_towns"](), ["Vesper"])
+
+    # And the real text is printed, because that is how the wording finally
+    # gets written down.
+    stub = events_stub(["Town Invasion: Active in Vesper (23 remaining)"])
+    m = load(stub)
+    m["invaded_towns"]()
+    check("the line is echoed verbatim",
+          any("Active in Vesper" in x for x in stub.messages), True)
+
+
+def test_an_unknown_town_is_said_rather_than_guessed_at():
+    stub = events_stub(["Town Invasion: Active in Ilshenar Outpost"])
+    m = load(stub)
+    check("nothing matched", m["invaded_towns"](), [])
+    check("and it asks for the spelling",
+          any("TOWN_ALIASES" in x for x in stub.messages), True)
+
+
+def test_a_rune_is_matched_to_its_town_through_the_runebook_spelling():
+    """The runebook writes "Britt Mage Shop"; a server message would say
+    "Britain". Both have to mean the same place."""
+    stub = events_stub(EVENTS_INACTIVE)
+    m = load(stub)
+    check("Britt is Britain", m["in_town"]("Britt Mage Shop (Tramm...",
+                                           "Britain"), True)
+    check("Vesper is Vesper", m["in_town"]("Vesper Mage Shop (Tra...",
+                                           "Vesper"), True)
+    check("but Vesper is not Britain",
+          m["in_town"]("Vesper Mage Shop", "Britain"), False)
+    check("and Skara Brae is matched whole",
+          m["in_town"]("Skara Brae Mage Shop ...", "Skara Brae"), True)
+
+
+def test_the_invaded_towns_runes_are_never_visited():
+    """Not going there beats escaping from it once something is swinging."""
+    stub = events_stub(["Town Invasion: Active in Vesper (23 remaining)"],
+                       menu=["Buy", "Sell", "Refill from stock"])
+    m = load(stub)
+    visited = []
+    m["go_to_reagent_folder"] = lambda: True
+    m["collect_runes"] = lambda: [
+        (1, 10, "Britt Mage Shop (Tramm...", [100, 100, 0]),
+        (1, 11, "Vesper Mage Shop (Tra...", [200, 200, 0]),
+        (1, 12, "Trinsic Mage Shop (Tram...", [300, 300, 0])]
+    m["recall_to"] = lambda page, button, name, coord: (
+        visited.append(name) or True)
+    m["vendors_in_range"] = lambda: []
+
+    run("the lap ran", m["one_lap"], 1)
+    check("Vesper was skipped", [v for v in visited if "Vesper" in v], [])
+    check("the other two were visited", len(visited), 2)
+    check("and it said so",
+          any("skipping 1 rune(s) in Vesper" in x for x in stub.messages),
+          True)
+
+
+def test_an_events_window_that_will_not_open_does_not_stop_the_run():
+    stub = events_stub([])
+    m = load(stub)
+    check("nothing avoided", m["invaded_towns"](), [])
+    check("and it said the window was no help",
+          any("did not open" in x for x in stub.messages), True)
+
+
 def test_a_town_invader_means_leave():
     """Asked 2026-10-24: a shop with one in it is abandoned at once and the
     next rune recalled to."""
