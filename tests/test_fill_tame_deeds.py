@@ -208,8 +208,12 @@ def test_paragons(m):
     check("hostile paragon is killed", got is not None, True)
     check("...and sized x5", got and got[1],
           m["HOSTILE_HITS"]["harpy"] * m["PARAGON_HITS_MULT"])
-    check("...so it gets the big spell", m["pick_spell"](got[1])[0],
-          m["SPELL_BIG"])
+    # 65 x5 = 325 is still under the shard's 500, so an arrow does it.
+    check("...a harpy paragon is still an arrow job",
+          m["pick_spell"](got[1])[0], m["SPELL_SMALL"])
+    big = v(Mob(26, "a dragon", 3, 0x3B, props=["a dragon", "(Paragon)"]))
+    check("a dragon paragon (486 x5) gets the big spell",
+          m["pick_spell"](big[1])[0], m["SPELL_BIG"])
     check("paragon by hue alone",
           v(Mob(21, "a harpy", 3, 0x1E, color=0x501)) is not None, True)
     check("paragon of a passive species -> ignored",
@@ -231,10 +235,15 @@ def test_paragons(m):
 
 def test_spell_choice(m):
     ps = m["pick_spell"]
+    # The line is 500 on this shard: 3,467 Spell Damage Increase makes a
+    # Magic Arrow enough for anything under it (user, 2026-10-25).
+    check("the shard's line is 500", m["SPELL_BIG_HITS"], 500)
     check("orc-sized -> Magic Arrow", ps(65)[0], "Magic Arrow")
-    check("at the line -> Energy Bolt", ps(m["SPELL_BIG_HITS"])[0],
-          "Energy Bolt")
-    check("dragon -> Energy Bolt", ps(486)[0], "Energy Bolt")
+    check("dragon (486) -> Magic Arrow on this shard", ps(486)[0],
+          "Magic Arrow")
+    check("one under the line -> Magic Arrow", ps(499)[0], "Magic Arrow")
+    check("at the line -> Energy Bolt", ps(500)[0], "Energy Bolt")
+    check("ogre lord (514) -> Energy Bolt", ps(514)[0], "Energy Bolt")
     check("unknown -> Energy Bolt", ps(None)[0], "Energy Bolt")
 
 

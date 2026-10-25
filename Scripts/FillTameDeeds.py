@@ -83,7 +83,7 @@ import time
 # loaded script even after the file on disk changes, and two debugging rounds
 # have already been spent on a bug that was fixed on disk but not in the folder
 # Razor reads. If this line does not say what you expect, hit Reload.
-SCRIPT_VERSION = "2026-10-25.1"
+SCRIPT_VERSION = "2026-10-25.2"
 
 
 # =============================================================================
@@ -468,10 +468,15 @@ SPELL_BIG = "Energy Bolt"
 SPELL_BIG_MANA = 20
 SPELL_SCHOOL = "magery"
 
-# The line between the two, in hit points from the tables below. 150 puts
-# orcs, harpies, ettins, wolves and imps under it, and trolls-and-up - ogre
-# lords, drakes, dragons, daemons, elementals - over it.
-SPELL_BIG_HITS = 150
+# The line between the two, in hit points from the tables below.
+#
+# 500 ON THIS SHARD, not the 150 a stock server would want. The shard is
+# customised and this character carries 3,467 Spell Damage Increase, so a
+# Magic Arrow kills anything under 500 safely (your call, 2026-10-25). That
+# puts dragons (486), drakes, daemons, trolls and elementals under it, and
+# ogre lords (514), balrons (651), ancient wyrms (684) and the champion-sized
+# things over it. A stock 150 would be Energy Bolting things an arrow kills.
+SPELL_BIG_HITS = 500
 
 # For a creature that is hostile but whose hit points are not known (the
 # UOGuide-only names). Unknown is treated as big: an Energy Bolt too many
@@ -502,10 +507,11 @@ KILL_BODY_NOTORIETY = [6]
 # PARAGONS ARE NEVER TAMED - they cannot be. Some spawns roll one now and
 # then; recognised by "(Paragon)" in the tooltip or the paragon hue.
 #
-# A paragon of a HOSTILE species is killed like any other hostile, but always
-# with SPELL_BIG: ServUO multiplies a paragon's hit points by
-# PARAGON_HITS_MULT, so an orc paragon is no Magic Arrow job. A paragon of
-# anything NOT on the hostile list - a paragon hind, say - is ignored.
+# A paragon of a HOSTILE species is killed like any other hostile, with its
+# hit points counted x PARAGON_HITS_MULT - ServUO's own multiplier - before
+# the spell is picked. Against the 500 line that keeps a harpy paragon (325)
+# on Magic Arrow and puts a dragon paragon (2430) on Energy Bolt. A paragon
+# of anything NOT on the hostile list - a paragon hind, say - is ignored.
 PARAGON_IGNORE = True
 PARAGON_HUE = 0x0501              # ServUO Scripts/Mobiles/Special/Paragon.cs
 PARAGON_HITS_MULT = 5             # Paragon.HitsBuff in the same file
@@ -2959,8 +2965,8 @@ def hostile_verdict(mob):
                     if entry is not None and notoriety in KILL_BODY_NOTORIETY:
                         verdict = (entry[0], entry[1])
                 if verdict is not None and is_paragon(mob):
-                    # Hostile AND a paragon: still killed, but sized up so it
-                    # gets the big spell from the first cast.
+                    # Hostile AND a paragon: still killed, but sized up first
+                    # so the spell is picked for what it really is.
                     hits = verdict[1]
                     verdict = ("%s (paragon)" % verdict[0],
                                SPELL_BIG_HITS if hits is None
