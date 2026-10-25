@@ -56,6 +56,7 @@ two must be kept in step.
 | `resource_order_runner.py`, `diag_resource_orders.py` | `E:\uoclients\RazorEnhanced\Scripts\` |
 | `harvest_runner.py` | `E:\uoclients\UOAlive_Package\razor\Scripts\` |
 | `TameAndFill.py` | `E:\uoclients\RazorEnhanced\Scripts\` |
+| `FillTameDeeds.py` (TameAndFill minus harvest, plus `[ar` round and kill list — **untested in game**, see `docs/fill-tame-deeds-handoff.md`) | `E:\uoclients\RazorEnhanced\Scripts\` |
 | `Leatherman.py` | `E:\uoclients\RazorEnhanced\Scripts\` |
 | `sandmaker.py` (lower-case live, `Sandmaker.py` in the repo) | `E:\uoclients\RazorEnhanced\Scripts\` |
 
@@ -471,6 +472,10 @@ python tests/test_harvest_runner.py
 
 ```bash
 python tests/test_extract_re_api.py
+```
+
+```bash
+python tests/test_fill_tame_deeds.py
 ```
 
 No Razor runtime needed. `tests/test_tame_animals.py` reads the script, strips
