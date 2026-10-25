@@ -80,7 +80,7 @@ import time
 # Printed as the first line at startup. Razor CACHES the loaded script even
 # after the file on disk changes - if this is not the version you expect, hit
 # Reload in the Scripting tab.
-SCRIPT_VERSION = "2026-10-24.14"
+SCRIPT_VERSION = "2026-10-24.16"
 
 
 # =============================================================================
@@ -260,6 +260,12 @@ TOWN_ALIASES = [
 ESCAPE_COMMAND = "[ar RO RO"
 ESCAPE_GUMP_TIMEOUT_MS = 5000
 ESCAPE_SETTLE_MS = 2000
+
+# ANY RUNE IN THAT FOLDER IS A VALID ESCAPE (confirmed 2026-10-24), so if the
+# first one does not land - blocked, or the recall was refused - the next is
+# tried rather than standing there reporting failure while something swings
+# at you. The first is still preferred; this is only the fallback.
+ESCAPE_MAX_TRIES = 3
 
 # How far to look for them. ALWAYS set this - an unset RangeMax means
 # everything the client knows about, which is 18-25 tiles of other people's
@@ -859,13 +865,64 @@ def arrived_at(coord):
     return gap <= ARRIVE_TOLERANCE
 
 
+def same_rune(a, b):
+    """Two rune names from the same book, compared."""
+    return " ".join(str(a or "").split()).lower() \
+        == " ".join(str(b or "").split()).lower()
+
+
+def find_rune(name):
+    """(page, button, coord) for the rune called `name`, or None.
+
+    Walks the folder it is already in. Used to recover when the book is not
+    showing what it was.
+    """
+    if not ar_goto_page(1):
+        return None
+    for _ in range(AR_MAX_PAGES):
+        current, total = ar_page_info()
+        _folders, runes = parse_ar_page(ensure_open=False)
+        for button in sorted(runes):
+            if same_rune(runes[button]["name"], name):
+                return current, button, runes[button]["coord"]
+        if current >= total or not ar_page_step(AR_NEXT_PAGE_BUTTON):
+            return None
+    return None
+
+
 def recall_to(page, button, name, coord):
-    """Recall to one rune. True once standing there (or unverifiable)."""
+    """Recall to one rune. True once standing there (or unverifiable).
+
+    THE BUTTON IS CHECKED AGAINST THE NAME BEFORE IT IS PRESSED. Button
+    numbers mean nothing on their own: they are per-page, and the book does
+    not have to reopen on the page it was left on. After an escape it was
+    last used in the RO folder, where button 11 is "Start Fill (Malas)" -
+    pressing it would recall somewhere else entirely and the only sign would
+    be the coordinate check failing afterwards, once the character had
+    already gone.
+    """
     if not openAR():
         return False
     if not ar_goto_page(page):
         log("Could not get back to page %d for %s." % (page, name), HUE_WARN)
         return False
+
+    _folders, showing = parse_ar_page(ensure_open=False)
+    here = showing.get(button)
+    if here is None or not same_rune(here["name"], name):
+        log("  the book is not showing %s where it was (button %d is %r) - "
+            "finding it again."
+            % (name, button, here["name"] if here else "nothing"), HUE_WARN)
+        if not go_to_reagent_folder():
+            return False
+        hit = find_rune(name)
+        if hit is None:
+            log("  %s is not in the folder any more - skipping it." % name,
+                HUE_BAD)
+            return False
+        page, button, coord = hit
+        if not ar_goto_page(page):
+            return False
 
     Gumps.SendAction(AR_GUMPID, button)
     Misc.Pause(RECALL_SETTLE_MS)
@@ -1018,32 +1075,36 @@ def emergency_escape():
     Gumps.WaitForGump(AR_GUMPID, ESCAPE_GUMP_TIMEOUT_MS)
     Misc.Pause(SETTLE_MS)
 
-    name, coord = "the first rune", None
+    # The entries on that page, in order. The FIRST is the one to take; the
+    # rest are the fallback, because any rune in this folder gets you out.
+    options = []
     _folders, runes = parse_ar_page(ensure_open=False)
-    if runes:
-        first = min(runes)
-        name = runes[first]["name"]
-        coord = runes[first]["coord"]
-    else:
+    for button in sorted(runes):
+        options.append((button, runes[button]["name"], runes[button]["coord"]))
+    if not options:
         # The text may not have arrived; the BUTTONS are enough to escape on.
-        drawn = [b for b in ar_buttons(ensure_open=False)
-                 if AR_ENTRY_BUTTON_MIN <= b <= AR_ENTRY_BUTTON_MAX
-                 and b not in AR_CONTROL_BUTTONS]
-        if not drawn:
-            log("  the escape book did not open - nothing pressed.", HUE_BAD)
-            return False
-        first = min(drawn)
-
-    log("  recalling to %s." % name, HUE_WARN)
-    Gumps.SendAction(AR_GUMPID, first)
-    Misc.Pause(ESCAPE_SETTLE_MS)
-
-    where = arrived_at(coord)
-    if where is False:
-        log("  the escape recall did not land - still at %d,%d."
-            % (Player.Position.X, Player.Position.Y), HUE_BAD)
+        for button in sorted(b for b in ar_buttons(ensure_open=False)
+                             if AR_ENTRY_BUTTON_MIN <= b <= AR_ENTRY_BUTTON_MAX
+                             and b not in AR_CONTROL_BUTTONS):
+            options.append((button, "rune %d" % button, None))
+    if not options:
+        log("  the escape book did not open - nothing pressed.", HUE_BAD)
         return False
-    return True
+
+    for button, name, coord in options[:max(1, int(ESCAPE_MAX_TRIES))]:
+        log("  recalling to %s." % name, HUE_WARN)
+        Gumps.SendAction(AR_GUMPID, button)
+        Misc.Pause(ESCAPE_SETTLE_MS)
+
+        if arrived_at(coord) is not False:
+            return True         # landed, or there is no way to tell
+        log("  %s did not land - trying the next rune in the folder."
+            % name, HUE_WARN)
+        if not openAR():
+            return False
+
+    log("  could not get out through %s." % ESCAPE_COMMAND, HUE_BAD)
+    return False
 
 
 def danger_here():

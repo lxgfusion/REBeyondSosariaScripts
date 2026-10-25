@@ -629,6 +629,42 @@ def test_the_escape_is_one_command_and_one_button():
           any("RO (Trammel)" in x for x in stub.messages), True)
 
 
+def test_any_rune_in_the_escape_folder_will_do():
+    """Confirmed 2026-10-24: anything in the RO folder is a valid escape. So
+    a first rune that will not land is not the end of it - standing there
+    reporting failure is the worst outcome while something is swinging."""
+    stub = escape_stub()
+    stub.Position = Position(9999, 9999)        # the first recall lands nowhere
+    m = load(stub)
+
+    landed = {"n": 0}
+
+    def send(gump_id, button):
+        stub.actions.append(int(button))
+        landed["n"] += 1
+        if landed["n"] == 2:                    # the SECOND rune works
+            stub.Position = Position(1281, 1193)
+    stub.SendAction = send
+
+    call("it gets out on the second try", m["emergency_escape"], True)
+    check("having tried the first, then the next",
+          stub.actions, [ESCAPE_FIRST_BUTTON, ESCAPE_FIRST_BUTTON + 1])
+    check("and said why it moved on",
+          any("did not land" in x for x in stub.messages), True)
+
+
+def test_the_escape_gives_up_after_a_few_runes():
+    """Bounded like everything else - it cannot sit pressing runes forever."""
+    stub = escape_stub()
+    stub.Position = Position(9999, 9999)
+    m = load(stub)
+    call("it reports failure", m["emergency_escape"], False)
+    check("after ESCAPE_MAX_TRIES presses, not the whole folder",
+          len(stub.actions), m["ESCAPE_MAX_TRIES"])
+    check("saying it could not get out",
+          any("could not get out" in x for x in stub.messages), True)
+
+
 def test_the_escape_never_reopens_the_book_at_the_root():
     """Saying "[ar" again lands at the root and throws away the folder the
     escape command just opened - which would leave it pressing the first
@@ -886,6 +922,85 @@ def test_the_folder_is_found_on_a_later_page():
     m = load(stub)
     call("the folder is found", m["ar_enter_folder"], True, "Town Vendors")
     check("by pressing ITS button, the 7th on page 2", state["entered"], 16)
+
+
+# The shop folder, and the RO folder the escape leaves the book sitting in.
+SHOP_PAGE = [
+    "<CENTER>Account Runebook</CENTER>", "Town Vendors", "New Rune",
+    "New Runebook", "Organize",
+    "1. Britt Mage Shop (Tramm...", "(1492, 1544, 35)",
+    "2. Vesper Mage Shop (Tra...", "(2916, 675, 0)",
+    "<CENTER>Page 1/1",
+]
+RO_PAGE = [
+    "<CENTER>Account Runebook</CENTER>", "RO", "New Rune", "New Runebook",
+    "Organize",
+    "1. RO (Trammel)", "(1412, 1721, 20)",
+    "2. Start Fill (Malas)", "(1281, 1193, -90)",
+    "<CENTER>Page 1/1",
+]
+TWO_ROW_LAYOUT = ("{ button 20 440 4014 4015 1 0 503 }"
+                  "{ button 400 440 4005 4006 1 0 504 }"
+                  "{ button 545 90 4005 4007 1 0 10 }"
+                  "{ button 545 130 4005 4007 1 0 11 }")
+
+
+def test_the_button_is_checked_against_the_rune_before_it_is_pressed():
+    """Button numbers mean nothing on their own - they are per page, and the
+    book does not have to reopen where it was left. After an escape it was
+    last in the RO folder, where button 11 is "Start Fill (Malas)"."""
+    stub = Stub(lines=RO_PAGE, layout=TWO_ROW_LAYOUT, pos=(2916, 675))
+    m = load(stub)
+
+    # Pretend re-entering the folder fixes the view, as it does in game.
+    def reenter():
+        stub.lines = SHOP_PAGE
+        return True
+    m["go_to_reagent_folder"] = reenter
+
+    call("it recalls", m["recall_to"], True,
+         1, 11, "Vesper Mage Shop (Tra...", [2916, 675, 0])
+    check("it noticed the book was showing something else",
+          any("not showing" in x for x in stub.messages), True)
+    check("and pressed the button only after re-finding it",
+          stub.actions[-1], 11)
+
+
+def test_a_rune_that_has_gone_is_skipped_not_guessed_at():
+    stub = Stub(lines=RO_PAGE, layout=TWO_ROW_LAYOUT)
+    m = load(stub)
+    m["go_to_reagent_folder"] = lambda: True        # view never changes
+    call("it gives up on that rune", m["recall_to"], False,
+         1, 11, "Trinsic Mage Shop", [300, 300, 0])
+    check("nothing was pressed",
+          [a for a in stub.actions if 10 <= a <= 499], [])
+    check("and it said so",
+          any("not in the folder any more" in x for x in stub.messages), True)
+
+
+def test_the_right_view_presses_straight_away():
+    """The usual case must not pay for the check - no re-navigation when the
+    book is showing what it should."""
+    stub = Stub(lines=SHOP_PAGE, layout=TWO_ROW_LAYOUT, pos=(2916, 675))
+    m = load(stub)
+    reentered = []
+    m["go_to_reagent_folder"] = lambda: reentered.append(1) or True
+    call("it recalls", m["recall_to"], True,
+         1, 11, "Vesper Mage Shop (Tra...", [2916, 675, 0])
+    check("pressed the button it was given", stub.actions[-1], 11)
+    check("and never re-entered the folder", reentered, [])
+
+
+def test_the_round_carries_on_to_the_next_shop_after_an_escape():
+    """Asked 2026-10-24. An escape is not the end of the lap - the next rune
+    on the list is next."""
+    m, stub, clock, visited = lap_world(RUNES, invader_at="Britt")
+    run("the lap ran", m["one_lap"], 1)
+    check("it still tried every rune after the escape", len(visited), 4)
+    check("starting with the one it escaped from",
+          visited[0].startswith("Britt"), True)
+    check("and Britain was held afterwards",
+          any("Britain is off the round" in x for x in stub.messages), True)
 
 
 def test_a_recall_is_checked_against_the_runes_own_coordinates():
