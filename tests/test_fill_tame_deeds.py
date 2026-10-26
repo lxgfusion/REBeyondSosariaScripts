@@ -526,13 +526,15 @@ def test_red_name_is_an_enemy(m):
 
 
 class Walker(object):
-    """A player who moves one tile per accepted step, with walls."""
+    """A player who moves like the real client: a move in a direction you
+    are not FACING only turns you; the next one steps. Walls refuse."""
 
-    def __init__(self, m, x=100, y=100, blocked=()):
+    def __init__(self, m, x=100, y=100, blocked=(), facing=None):
         self.m = m
         self.pos = Point(x, y)
         self.blocked = set(blocked)
         self.steps = []
+        self.facing = facing
         m["Player"].Position = self.pos
 
     DELTA = {"North": (0, -1), "Right": (1, -1), "East": (1, 0),
@@ -543,6 +545,10 @@ class Walker(object):
         dx, dy = self.DELTA[direction]
         nx, ny = self.pos.X + dx, self.pos.Y + dy
         self.steps.append(direction)
+        if self.facing is not None and self.facing != direction:
+            self.facing = direction         # a turn, not a step
+            return True
+        self.facing = direction
         if (nx, ny) in self.blocked:
             return False
         self.pos.X, self.pos.Y = nx, ny
@@ -599,6 +605,49 @@ def test_backs_off_when_too_close(m):
     mob2.Position = Point(105, 100)                # it closed to 5
     m["enforce_distance"](86)
     check("closer than KITE_HOLD -> one step away", w2.steps, ["West"])
+
+
+def test_backing_off_survives_the_turn(m):
+    """Facing the monster (east), a move west only TURNS you. 2026-10-25.6
+    tried each of three directions once, so it turned three ways on the
+    spot and never stepped: "moved in place" in game."""
+    w = Walker(m, 100, 100, facing="East")
+    mob = Mob(87, "an ettin", 3, 0x12)
+    mob.Position = Point(103, 100)
+    m["Player"].Run = staticmethod(w.run)
+    check("it actually stepped back", m["step_away_from"](mob), True)
+    check("straight back, after turning", (w.pos.X, w.pos.Y), (99, 100))
+    check("turn then step - no side directions tried", w.steps,
+          ["West", "West"])
+
+
+def test_walks_out_of_a_no_recall_zone(m):
+    """Lord Oaks champion spawn: no recall at 1646,1152, fine at 1634,1164.
+    Standing inside, the script walks to the exit before pressing a rune."""
+    zones = m["NO_RECALL_ZONES"]
+    check("the reported zone is configured",
+          [(z["near"], z["walk_to"]) for z in zones],
+          [((1646, 1152), (1634, 1164))])
+    w = Walker(m, 1646, 1152)
+    m["Player"].Run = staticmethod(w.run)
+    m["Player"].Map = 2
+    m["pathfind_to"] = lambda x, y: False      # make it walk the steps
+    check("inside the zone", (m["no_recall_zone_here"]() or {}).get("label"),
+          "Lord Oaks champion spawn")
+    check("walks out", m["leave_no_recall_zone"](), True)
+    check("ends at the exit", max(abs(w.pos.X - 1634), abs(w.pos.Y - 1164))
+          <= m["ZONE_EXIT_TOLERANCE"], True)
+    check("now outside", m["no_recall_zone_here"](), None)
+    for z in zones:
+        gap = max(abs(z["walk_to"][0] - z["near"][0]),
+                  abs(z["walk_to"][1] - z["near"][1]))
+        check("%s: walk_to lies outside its own radius" % z["label"],
+              gap > z["radius"], True)
+
+    w2 = Walker(m, 1500, 1000)
+    m["Player"].Run = staticmethod(w2.run)
+    check("elsewhere: nothing to do", m["leave_no_recall_zone"](), True)
+    check("...and no steps taken", w2.steps, [])
 
 
 def test_house_wall_is_given_up_on(m):

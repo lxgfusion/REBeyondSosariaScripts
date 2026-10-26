@@ -83,7 +83,7 @@ import time
 # loaded script even after the file on disk changes, and two debugging rounds
 # have already been spent on a bug that was fixed on disk but not in the folder
 # Razor reads. If this line does not say what you expect, hit Reload.
-SCRIPT_VERSION = "2026-10-25.6"
+SCRIPT_VERSION = "2026-10-25.7"
 
 
 # =============================================================================
@@ -112,6 +112,30 @@ LAP_PAUSE_MS = 60000
 
 # 0 = keep going until every deed is full or you stop it.
 MAX_LAPS = 0
+
+# NO-RECALL ZONES - places the server will not let you recall from, with a
+# spot just outside to walk to first. Checked before EVERY recall, the
+# escape included: standing inside one, the script walks to "walk_to" and
+# recalls from there.
+#
+#   near / radius   the zone: within `radius` tiles of `near`
+#   walk_to         where recalling works again
+#   map             Player.Map number, or None for any facet
+#
+# Champion spawns are the usual cause. If a recall fails somewhere not
+# listed here, the log prints where you were standing so a row can be added.
+NO_RECALL_ZONES = [
+    # Reported 2026-10-25: the third rune in the folder, by the Lord Oaks
+    # champion spawn. No recall at 1646,1152; it works from 1634,1164 on.
+    # Radius 11, not 12: walk_to must lie OUTSIDE its own zone, and
+    # 1634,1164 is exactly 12 tiles out. Preflight checks every row.
+    {"label": "Lord Oaks champion spawn", "near": (1646, 1152), "radius": 11,
+     "walk_to": (1634, 1164), "map": None},
+]
+
+# Walk to "walk_to" itself, not merely near it - near it can still be in.
+ZONE_EXIT_TOLERANCE = 0
+ZONE_EXIT_TIMEOUT_MS = 30000
 
 
 # =============================================================================
@@ -3336,10 +3360,18 @@ def step_away_from(mob):
     i = _DIRECTIONS.index(first)
     for direction in (first, _DIRECTIONS[(i + 1) % 8],
                       _DIRECTIONS[(i - 1) % 8]):
-        before = (Player.Position.X, Player.Position.Y)
-        move(direction)
-        if (Player.Position.X, Player.Position.Y) != before:
-            return True
+        # TWO tries per direction. A move you are not FACING only turns you
+        # - the step needs a second one. One try each turned the character
+        # three ways on the spot, read every turn as a wall, and then cast
+        # with the monster still beside you (2026-10-25.6).
+        for _ in range(2):
+            before = (Player.Position.X, Player.Position.Y)
+            move(direction)
+            if (Player.Position.X, Player.Position.Y) != before:
+                return True
+            Misc.Pause(100)         # the position can trail the move
+            if (Player.Position.X, Player.Position.Y) != before:
+                return True
     return False
 
 
@@ -3939,13 +3971,83 @@ def find_rune(name):
     return None
 
 
+def no_recall_zone_here():
+    """The NO_RECALL_ZONES row we are standing in, or None."""
+    try:
+        x, y = int(Player.Position.X), int(Player.Position.Y)
+        facet = int(Player.Map)
+    except Exception:
+        return None
+    for zone in NO_RECALL_ZONES:
+        if zone.get("map") is not None and int(zone["map"]) != facet:
+            continue
+        nx, ny = zone["near"]
+        if max(abs(x - nx), abs(y - ny)) <= int(zone.get("radius", 10)):
+            return zone
+    return None
+
+
+def walk_to_point(x, y, tolerance, timeout_ms):
+    """Walk to a map point. True once within `tolerance` tiles.
+
+    Pathfinder first - this is open ground, not a creature, so walking
+    right up to it is the point - then single steps for the last stretch
+    or if the pathfinder gives up.
+    """
+    deadline = time.time() + timeout_ms / 1000.0
+    pathfound = False
+    stuck = 0
+    while time.time() < deadline:
+        gap = max(abs(Player.Position.X - x), abs(Player.Position.Y - y))
+        if gap <= tolerance:
+            return True
+        if not pathfound and gap > PATHFIND_MIN_DIST:
+            pathfound = True
+            pathfind_to(x, y)
+            continue
+        before = (Player.Position.X, Player.Position.Y)
+        move(direction_to(x - Player.Position.X, y - Player.Position.Y))
+        Misc.Pause(MOVE_PAUSE)
+        if (Player.Position.X, Player.Position.Y) == before:
+            stuck += 1
+            if stuck >= STUCK_LIMIT * 2:      # a turn costs a move too
+                return False
+        else:
+            stuck = 0
+    return False
+
+
+def leave_no_recall_zone():
+    """If we are standing where recall is refused, walk out. True when it is
+    safe to recall (we were never in one, or we got out)."""
+    zone = no_recall_zone_here()
+    if zone is None:
+        return True
+    wx, wy = zone["walk_to"]
+    log("In a no-recall zone (%s) at %d,%d - walking to %d,%d first."
+        % (zone.get("label", "?"), Player.Position.X, Player.Position.Y,
+           wx, wy), HUE_WARN)
+    walk_to_point(wx, wy, ZONE_EXIT_TOLERANCE, ZONE_EXIT_TIMEOUT_MS)
+    # OUT is what matters, not the exact tile: terrain may stop us a step
+    # short of walk_to but already past the edge.
+    if no_recall_zone_here() is None:
+        return True
+    log("  could not get to %d,%d - still at %d,%d. Trying the recall anyway."
+        % (wx, wy, Player.Position.X, Player.Position.Y), HUE_BAD)
+    return False
+
+
 def recall_to(page, button, name, coord):
     """Recall to one rune. True once standing there (or unverifiable).
 
     THE BUTTON IS CHECKED AGAINST THE NAME BEFORE IT IS PRESSED. Buttons are
     per page, and after an escape the book was last used in the RO folder,
     where the same number is a different rune.
+
+    Walks out of a NO_RECALL_ZONES area first - pressing the rune from
+    inside one does nothing but cost the attempt.
     """
+    leave_no_recall_zone()
     if not openAR():
         return False
     if not ar_goto_page(page):
@@ -3973,9 +4075,14 @@ def recall_to(page, button, name, coord):
 
     where = arrived_at(coord)
     if where is False:
-        log("Recall to %s did not land - still at %d,%d, wanted %d,%d."
-            % (name, Player.Position.X, Player.Position.Y, coord[0], coord[1]),
+        log("Recall to %s did not land - still at %d,%d (map %s), wanted "
+            "%d,%d." % (name, Player.Position.X, Player.Position.Y,
+                        getattr(Player, "Map", "?"), coord[0], coord[1]),
             HUE_WARN)
+        if no_recall_zone_here() is None:
+            log("  If recall is refused here, add this spot to "
+                "NO_RECALL_ZONES with a walk_to point where it works.",
+                HUE_WARN)
         return False
     if where is None:
         log("  %s has no coordinates in the book - cannot confirm the recall."
@@ -3993,6 +4100,9 @@ def emergency_escape():
     log("ESCAPE at %d%% health: %r" % (player_health_pct(), ESCAPE_COMMAND),
         HUE_BAD)
     clear_cursor()
+    # Pressing a rune inside a no-recall zone does nothing, and doing nothing
+    # is the worst thing to do here. Walking out is at least moving away.
+    leave_no_recall_zone()
     if not chat_say(ESCAPE_COMMAND):
         return False
     Gumps.WaitForGump(AR_GUMPID, 5000)
@@ -4286,6 +4396,18 @@ def preflight():
     if ESCAPE_ENABLED:
         log("Escape below %d%% health through %r."
             % (ESCAPE_HITS_PCT, ESCAPE_COMMAND))
+
+    for zone in NO_RECALL_ZONES:
+        nx, ny = zone["near"]
+        wx, wy = zone["walk_to"]
+        if max(abs(wx - nx), abs(wy - ny)) <= int(zone.get("radius", 10)):
+            log("NO_RECALL_ZONES %r: walk_to %d,%d is INSIDE its own radius "
+                "%d - the walk-out would never count as out. Lower the "
+                "radius or move walk_to." % (zone.get("label", "?"), wx, wy,
+                                             zone.get("radius", 10)), HUE_BAD)
+    if NO_RECALL_ZONES:
+        log("No-recall zones: %s" % ", ".join(z.get("label", "?")
+                                              for z in NO_RECALL_ZONES))
 
     if Player.WarMode:
         log("Dropping war mode.", HUE_WARN)

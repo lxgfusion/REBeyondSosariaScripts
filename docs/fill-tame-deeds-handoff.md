@@ -1,7 +1,7 @@
 # FillTameDeeds — handoff
 
 `Scripts/FillTameDeeds.py`, live at `E:\uoclients\RazorEnhanced\Scripts\`.
-Current version `2026-10-25.6`. **Not yet run in game.**
+Current version `2026-10-25.7`. **Not yet run in game.**
 
 ## What it is
 
@@ -137,9 +137,28 @@ species (a wild dragon is red and is quarry), tame/bonded/summoned tags and
 `KILL_NEVER_WORDS`. This includes red players (murderers). Size is unknown,
 so they get Energy Bolt.
 
+## 2026-10-25.7: no-recall zones, and backing off that spun in place
+
+**Recall refused by the Lord Oaks champion spawn** (third rune). Recall does
+not work at 1646,1152 but does from 1634,1164.
+
+- `NO_RECALL_ZONES` rows hold `near`, `radius`, `walk_to` and optional `map`.
+- Before every recall, the escape included, `leave_no_recall_zone()` walks to
+  `walk_to` if you are inside one.
+- Radius is 11, because the exit is exactly 12 out and must lie outside its
+  own zone. Preflight warns about any row where it does not.
+- A recall that fails outside any listed zone logs the position and map so a
+  row can be added.
+
+**"Moved in place" instead of backing off.** A move in a direction you are not
+facing only turns you. `step_away_from` tried straight back once (a turn),
+read that as blocked, and turned to both sides. Now it tries twice per
+direction. The test walker models turning, which the old one did not, and
+that is how this got through.
+
 ## To check on the first run
 
-1. Banner `FillTameDeeds v2026-10-25.6`.
+1. Banner `FillTameDeeds v2026-10-25.7`.
 2. `N spot(s) in FillTameDeeds: ...`. If not found, read the folder list.
 3. First kill: is the spell right for the size?
 4. Whether `IsHuman` and `IgnorePets` behave on this shard (both are new
