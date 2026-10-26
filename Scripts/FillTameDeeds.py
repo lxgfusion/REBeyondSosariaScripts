@@ -83,7 +83,7 @@ import time
 # loaded script even after the file on disk changes, and two debugging rounds
 # have already been spent on a bug that was fixed on disk but not in the folder
 # Razor reads. If this line does not say what you expect, hit Reload.
-SCRIPT_VERSION = "2026-10-25.4"
+SCRIPT_VERSION = "2026-10-25.5"
 
 
 # =============================================================================
@@ -285,12 +285,33 @@ TAME_MAX_BLOCKED = 2
 # Hard ceiling on one creature, whatever else happens.
 TAME_CREATURE_MAX_MS = 180000
 
-# Notorieties a WILD creature can have. ServUO Scripts/Misc/Notoriety.cs: a
-# wild non-human creature is CanBeAttacked (3), or Murderer (6) when it is
-# that kind of creature. A PET takes its owner's notoriety - innocent blue
-# (1) for most players - and a vendor or mannequin is Invulnerable (7). So
-# anything outside these is somebody's, or nobody's, and never quarry.
+# WHO IS SOMEBODY'S PET - the TOOLTIP decides, not the colour.
+#
+# ServUO BaseCreature.GetProperties tags every controlled creature "(tame)",
+# "(bonded)" or "(summoned)", without exception, and identify() refuses any
+# of those. Colour cannot do that job on its own: a pet takes its owner's
+# notoriety (blue for most players), but so do two WILD species -
+#
+#   ServUO marks ki-rin and unicorn InitialInnocent (Kirin.cs, Unicorn.cs;
+#   the only two tameables that are), which makes them BLUE while wild.
+#   2026-10-25.4 used colour alone and refused every wild unicorn and
+#   ki-rin as "somebody's pet".
+#
+# So colour is only a cheap first cut and a fallback:
+#
+#   TAME_NEVER_NOTORIETY   never quarry, whatever the tooltip says:
+#                          2 ally (a guildmate's pet), 7 invulnerable
+#                          (vendors, mannequins)
+#   TAME_NOTORIETY         what an ordinary wild creature is: 3 grey, or 6
+#                          red for a murderer type (ServUO Notoriety.cs)
+#   INNOCENT_WILD_SPECIES  species that are wild AND blue
+#
+# A creature outside TAME_NOTORIETY is quarry only when it is one of the
+# INNOCENT_WILD_SPECIES and its tooltip carries no pet tag. A blue horse is
+# somebody's horse.
+TAME_NEVER_NOTORIETY = [2, 7]
 TAME_NOTORIETY = [3, 6]
+INNOCENT_WILD_SPECIES = ["ki-rin", "unicorn"]
 TAME_ATTEMPT_TIMEOUT = 30000   # ms for one attempt to resolve
 TARGET_CURSOR_TIMEOUT = 3000   # ms to wait for the taming target cursor
 APPROACH_TIMEOUT = 30000       # ms to spend walking to a creature
@@ -1998,16 +2019,16 @@ def identify(mob):
     if not owners and not contenders:
         return None
 
-    # Somebody's pet, or a vendor or mannequin. Checked before the name -
-    # it costs nothing - so a stable full of horses behind a house wall is
-    # never walked to at all. See TAME_NOTORIETY.
+    # A guildmate's pet, or a vendor or mannequin. Checked before the name -
+    # it costs nothing. Everything else goes on to the tooltip check at the
+    # end; see TAME_NEVER_NOTORIETY for why colour alone is not enough.
     try:
         notoriety = int(mob.Notoriety)
     except Exception:
         notoriety = 0
-    if notoriety not in TAME_NOTORIETY:
-        debug("Body 0x%X at notoriety %d is somebody's pet or protected - "
-              "not quarry." % (mob.Body, notoriety))
+    if notoriety in TAME_NEVER_NOTORIETY:
+        debug("Body 0x%X at notoriety %d is a guildmate's pet or "
+              "invulnerable - not quarry." % (mob.Body, notoriety))
         return None
 
     name = mob_name(mob)
@@ -2052,6 +2073,15 @@ def identify(mob):
         if word in text:
             debug("'%s' is %s - somebody's already." % (name, word), HUE_INFO)
             return None
+    # Blue (or orange, criminal) with no pet tag: wild only for the species
+    # that are blue in the wild. Anything else at that colour is a pet whose
+    # tooltip has not loaded - left alone rather than walked to.
+    innocent_wild = set(n.strip().lower() for n in INNOCENT_WILD_SPECIES)
+    if notoriety not in TAME_NOTORIETY             and species["name"] not in innocent_wild:
+        debug("'%s' is notoriety %d with no pet tag - a %s is never that "
+              "colour wild, so it is somebody's." % (name, notoriety,
+                                                    species["name"]))
+        return None
     if is_paragon(mob, text):
         log("'%s' is a PARAGON - it cannot be tamed. Leaving it." % name,
             HUE_WARN)

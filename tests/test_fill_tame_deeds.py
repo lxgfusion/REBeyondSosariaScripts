@@ -471,6 +471,32 @@ def test_somebodys_pet_is_not_quarry(m):
           None)
 
 
+def test_wild_unicorn_and_kirin_are_blue_and_still_quarry(m):
+    """ServUO marks ki-rin and unicorn InitialInnocent, so they are BLUE
+    while wild. Inspected in game 2026-10-25: a unicorn 0x000E29FF and a
+    ki-rin 0x000E2A06, both notoriety 1, both wild. 2026-10-25.4 refused
+    them as "somebody's pet or protected"."""
+    hold_deeds(m, "unicorn", "ki-rin")
+    m["_body_owners"].clear()
+    m["_body_owners"][0x7A] = ["unicorn"]
+    m["_body_owners"][0x84] = ["ki-rin"]
+    ident = m["identify"]
+    check("wild blue unicorn is quarry",
+          (ident(Mob(0x000E29FF, "a unicorn", 1, 0x7A)) or {}).get("name"),
+          "unicorn")
+    check("wild blue ki-rin is quarry",
+          (ident(Mob(0x000E2A06, "a ki-rin", 1, 0x84)) or {}).get("name"),
+          "ki-rin")
+    check("somebody's unicorn - blue AND tagged tame - is not",
+          ident(Mob(70, "a unicorn", 1, 0x7A, props=["a unicorn", "(tame)"])),
+          None)
+    check("bonded ki-rin is not",
+          ident(Mob(71, "a ki-rin", 1, 0x84, props=["a ki-rin", "(bonded)"])),
+          None)
+    for name in m["INNOCENT_WILD_SPECIES"]:
+        check("%s is a catalogue species" % name, name in m["_species"], True)
+
+
 def test_house_wall_is_given_up_on(m):
     """ServUO's taming cursor accepts a target through a wall; the server
     stops the tame with "no clear path" a few seconds in. Walking closer

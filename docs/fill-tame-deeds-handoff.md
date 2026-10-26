@@ -1,7 +1,7 @@
 # FillTameDeeds — handoff
 
 `Scripts/FillTameDeeds.py`, live at `E:\uoclients\RazorEnhanced\Scripts\`.
-Current version `2026-10-25.4`. **Not yet run in game.**
+Current version `2026-10-25.5`. **Not yet run in game.**
 
 ## What it is
 
@@ -96,9 +96,25 @@ looks at either. The likely cause, from ServUO source:
 Not confirmed from a log. If it sticks again, the `Found X at N tiles` /
 `Taming X (attempt n)` lines will say what it was after.
 
+## 2026-10-25.5: wild unicorns and ki-rin are blue
+
+`.4` refused every wild unicorn and ki-rin. Your journal showed `Body 0x84`
+and `0x7A at notoriety 1 is somebody's pet or protected`. ServUO marks
+exactly two tameables `InitialInnocent`, `Kirin.cs` and `Unicorn.cs`, which
+makes them blue (1) while wild. Colour cannot tell a pet from those.
+
+- **The tooltip decides.** `BaseCreature.GetProperties` tags every
+  controlled creature `(tame)`, `(bonded)` or `(summoned)`. `identify()`
+  refuses those at any colour.
+- **Colour is a first cut only.** `TAME_NEVER_NOTORIETY = [2, 7]` (ally,
+  invulnerable) is refused before the name is read.
+- **Outside 3/6 with no pet tag** a creature is quarry only if it is in
+  `INNOCENT_WILD_SPECIES = ["ki-rin", "unicorn"]`. A blue horse whose tooltip
+  has not loaded is still left alone.
+
 ## To check on the first run
 
-1. Banner `FillTameDeeds v2026-10-25.4`.
+1. Banner `FillTameDeeds v2026-10-25.5`.
 2. `N spot(s) in FillTameDeeds: ...`. If not found, read the folder list.
 3. First kill: is the spell right for the size?
 4. Whether `IsHuman` and `IgnorePets` behave on this shard (both are new

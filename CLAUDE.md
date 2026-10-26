@@ -387,6 +387,13 @@ of the three, and file size alone will not tell two config blocks apart.
   (`re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", raw)`) before matching. Prefer reading
   a named field (`Creature Type:`) over scanning the whole tooltip; the value
   ends where the next field's label begins.
+- **Notoriety does not tell a pet from a wild creature — the tooltip does.**
+  A pet takes its owner's colour (blue for most players), but ki-rin and
+  unicorn are `InitialInnocent` in ServUO and are blue while **wild** too.
+  FillTameDeeds `.4` refused every wild unicorn on colour alone. ServUO tags
+  every controlled creature `(tame)`, `(bonded)` or `(summoned)` in its
+  tooltip; test for those. Use colour only to rule out 2 (ally) and 7
+  (invulnerable: vendors, mannequins).
 - Colour is `Item.Hue` but `Mobile.Color`. War mode is `Mobile.WarMode`,
   `Player.WarMode`, and `Mobiles.Filter.Warmode` (lowercase m).
 
