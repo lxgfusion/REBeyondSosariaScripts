@@ -261,12 +261,194 @@ def test_kill_upgrades_a_stubborn_arrow_fight(m):
         casts.append(spell)
         if len(casts) >= 7:
             del m["Mobiles"].by_serial[30]       # dies
-        return True
+        return "cast"
     m["cast_at"] = fake_cast
     out = m["kill"](30, "ettin", 90)
     check("fight ends dead", out, "dead")
     check("first four are arrows", casts[:4], ["Magic Arrow"] * 4)
     check("then bolts", set(casts[4:]), set(["Energy Bolt"]))
+
+
+class StubJournal(object):
+    """Lines with timestamps; Search/Clear/GetJournalEntry like Razor's."""
+
+    def __init__(self):
+        self.entries = []
+        self.clock = 100.0
+
+    def add(self, text):
+        self.clock += 1.0
+
+        class E(object):
+            pass
+        e = E()
+        e.Text = text
+        e.Timestamp = self.clock
+        self.entries.append(e)
+
+    def Search(self, text):
+        return any(text in e.Text for e in self.entries)
+
+    def Clear(self):
+        self.entries = []
+
+    def GetJournalEntry(self, after):
+        return [e for e in self.entries if e.Timestamp > after]
+
+
+class StubTarget(object):
+    def __init__(self):
+        self.cursor = True
+        self.executed = []
+
+    def WaitForTarget(self, ms, noshow):
+        return self.cursor
+
+    def HasTarget(self):
+        return False
+
+    def Cancel(self):
+        pass
+
+    def ClearQueue(self):
+        pass
+
+    def TargetExecute(self, serial):
+        self.executed.append(serial)
+
+
+def test_rechallenge_is_a_success(m):
+    """ServUO sends "That wasn't even challenging." INSTEAD of "It seems to
+    accept you as master" when you have owned the creature before - and makes
+    it your pet all the same. Filed under MSG_SKIP, the pet was written off
+    and left following you with no deed."""
+    check("502797 is a success", "That wasn't even challenging." in
+          m["MSG_SUCCESS"], True)
+    check("...and not a skip", "That wasn't even challenging." in
+          m["MSG_SKIP"], False)
+
+
+def test_tame_result_survives_a_fight(m):
+    """The tame keeps running on the server while defend() fights. Its
+    success message must be read BEFORE the journal is cleared."""
+    j = StubJournal()
+    m["Journal"] = j
+    mob = Mob(40, "a dire wolf", 3, 0x17)
+    m["Mobiles"].by_serial[40] = mob
+    m["Player"].DistanceTo = staticmethod(lambda target: 1)
+    saved = m["defend"]
+
+    def fight_then_tamed(exclude_serial=None):
+        j.add("It seems to accept you as master.")   # landed mid-fight
+        return True
+    m["defend"] = fight_then_tamed
+    try:
+        check("success not lost to the post-fight Clear",
+              m["watch_attempt"](40), "success")
+    finally:
+        m["defend"] = saved
+
+
+def test_interrupted_cast_is_recast_not_given_up(m):
+    """Five casts broken by hits, then one lands. Before: three of those read
+    as "check your reagents" and the creature hitting you was ignored."""
+    j = StubJournal()
+    t = StubTarget()
+    m["Journal"] = j
+    m["Target"] = t
+    m["clear_cursor"] = lambda: True
+    mob = Mob(41, "an ettin", 3, 0x12)
+    m["Mobiles"].by_serial[41] = mob
+    m["Player"].DistanceTo = staticmethod(lambda target: 9)
+    approached = []
+    m["approach"] = lambda *a, **k: approached.append(a) or True
+    m["Misc"].ignored = []
+    tries = [0]
+
+    class Spells(object):
+        def CastMagery(self, name):
+            tries[0] += 1
+            if tries[0] <= 5:
+                t.cursor = False
+                j.add("Your concentration is disturbed, thus ruining thy "
+                      "spell.")
+            else:
+                t.cursor = True
+                m["Mobiles"].by_serial.pop(41, None)   # the arrow kills it
+    m["Spells"] = Spells()
+    out = m["kill"](41, "ettin", 90)
+    check("ends dead", out, "dead")
+    check("six casts tried", tries[0], 6)
+    check("never ignored", 41 in m["Misc"].ignored, False)
+    check("cast from 9 tiles, never walked in", approached, [])
+    t.cursor = True
+
+
+def test_cast_at_reads_why(m):
+    j = StubJournal()
+    t = StubTarget()
+    m["Journal"] = j
+    m["Target"] = t
+    m["clear_cursor"] = lambda: True
+
+    def spells_saying(text, cursor):
+        class S(object):
+            def CastMagery(self, name):
+                t.cursor = cursor
+                if text:
+                    j.add(text)
+        return S()
+    for text, cursor, want in (
+            ("Your concentration is disturbed, thus ruining thy spell.",
+             False, "interrupted"),
+            ("You have not yet recovered from casting a spell.", False,
+             "recovering"),
+            ("More reagents are needed for this spell.", False, "reagents"),
+            ("Target can not be seen.", True, "unseen"),
+            (None, True, "cast"),
+            (None, False, "nocursor")):
+        m["Spells"] = spells_saying(text, cursor)
+        check("cast_at reads %r" % (text,), m["cast_at"](50, "Magic Arrow",
+                                                         "magery"), want)
+    t.cursor = True
+
+
+def test_spell_range_is_the_spells_own(m):
+    check("ServUO: both spells reach 10", m["SPELL_RANGE"], 10)
+    check("look further than you can shoot", m["KILL_RANGE"] > 10, True)
+    check("defend at full range", m["DEFEND_RANGE"], m["SPELL_RANGE"])
+
+
+def test_waits_for_something_coming(m):
+    """13 -> 12 -> 11 -> 10: it is walking in, so it is waited for and shot
+    at 10 - never walked to."""
+    seq = [13, 12, 11, 10]
+    m["Mobiles"].by_serial[42] = Mob(42, "a harpy", 3, 0x1E)
+
+    def dist(target):
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+    m["Player"].DistanceTo = staticmethod(dist)
+    approached = []
+    m["approach"] = lambda *a, **k: approached.append(a) or True
+    check("in range", m["get_in_range"](42, "harpy"), True)
+    check("never approached", approached, [])
+
+
+def test_stray_pet_gets_deeded(m):
+    hold_deeds(m, "dire wolf")
+    m["_our_tames"].clear()
+    pet = Mob(43, "a dire wolf", 1, 0x17, props=["a dire wolf", "(tame)"])
+    own = Mob(44, "a dire wolf", 1, 0x17, props=["a dire wolf", "(tame)"])
+    m["Mobiles"].by_serial[43] = pet
+    m["Mobiles"].by_serial[44] = own                # brought from home
+    m["Player"].Pets = [pet, own]
+    m["Player"].DistanceTo = staticmethod(lambda target: 1)
+    deeded = []
+    m["add_to_deed"] = lambda species, serial: deeded.append(serial) or True
+    m["remember_tame"](43, "dire wolf")
+    check("one stray deeded", m["sweep_strays"](), 1)
+    check("only the one we tamed", deeded, [43])
+    check("off the stray list", 43 in m["_our_tames"], False)
 
 
 def test_kill_escapes_when_hurt(m):

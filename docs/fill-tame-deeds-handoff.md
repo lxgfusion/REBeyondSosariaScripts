@@ -1,7 +1,7 @@
 # FillTameDeeds — handoff
 
 `Scripts/FillTameDeeds.py`, live at `E:\uoclients\RazorEnhanced\Scripts\`.
-Current version `2026-10-25.2`. **Not yet run in game.**
+Current version `2026-10-25.3`. **Not yet run in game.**
 
 ## What it is
 
@@ -39,9 +39,44 @@ Added:
   passive species is ignored. A paragon of a deed species is not quarry.
 - **Escape** below 35% health through `[ar RO RO`, then wait to heal to 90%.
 
+## 2026-10-25.3: fixes from the first runs
+
+**Tamed pets left following you instead of going into their deed.** There
+were two causes, both confirmed in ServUO source:
+
+- `"That wasn't even challenging."` (502797) is a **success** message. It
+  replaces 502799 when you have owned the creature before. It was in
+  `MSG_SKIP`, so the tame was written off. TameAndFill had the same bug, and
+  the post-fight journal clear below. Both are fixed there in `2026-10-25.1`,
+  with no stray sweep, live and repo.
+- `watch_attempt` ran `Journal.Clear()` after every `defend()`. The tame
+  keeps running on the server during the fight, so a success that landed
+  mid-fight was cleared away. It now checks for success before clearing,
+  and `cast_at` reads its own results by journal timestamp, never by
+  clearing.
+- Backstop: every creature the run tries to tame is remembered
+  (`_our_tames`). Any of those still following as a pet (`Player.Pets` or
+  `(tame)` in its tooltip) is deeded by `sweep_strays()`, which runs every
+  loop and always before leaving a spot, because pets do not recall with
+  you. Pets you brought are never touched.
+
+**Monsters got close enough to break casts.** `kill()` used to walk in to 8
+tiles before casting. Now:
+
+- It casts from `SPELL_RANGE = 10`, the ServUO range of both spells.
+- It looks out to `KILL_RANGE = 14`.
+- It waits for something walking in rather than walking to it.
+- It only approaches to 10.
+- Mid-tame defence range is 10, up from 6.
+- A cast broken by a hit (500641) is recast at once. That used to read as "no
+  cursor, check reagents", and three of them meant giving up on, and
+  ignoring, the monster hitting you.
+- After a landed cast it waits 700 ms (`KILL_LAND_MS`, was 2200) and sends
+  the second if the first did not kill.
+
 ## To check on the first run
 
-1. Banner `FillTameDeeds v2026-10-25.2`.
+1. Banner `FillTameDeeds v2026-10-25.3`.
 2. `N spot(s) in FillTameDeeds: ...`. If not found, read the folder list.
 3. First kill: is the spell right for the size?
 4. Whether `IsHuman` and `IgnorePets` behave on this shard (both are new

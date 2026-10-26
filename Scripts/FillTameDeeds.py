@@ -83,7 +83,7 @@ import time
 # loaded script even after the file on disk changes, and two debugging rounds
 # have already been spent on a bug that was fixed on disk but not in the folder
 # Razor reads. If this line does not say what you expect, hit Reload.
-SCRIPT_VERSION = "2026-10-25.2"
+SCRIPT_VERSION = "2026-10-25.3"
 
 
 # =============================================================================
@@ -238,7 +238,7 @@ THREAT_ATTACK = True
 # a spot (see CONFIG - KILLING). The old DEFEND_* spell picker, which chose
 # from the resistance table, is not used here - you asked for Magic Arrow and
 # Energy Bolt.
-DEFEND_RANGE = 6
+DEFEND_RANGE = 10                 # = SPELL_RANGE: shoot it before it arrives
 
 # Notorieties that can count as a threat.
 #   3 attackable/grey   4 criminal   5 enemy/orange   6 murderer/red
@@ -454,12 +454,22 @@ INSTRUMENT_IDS = [
 # "What gets killed" at the top for the full gate.
 KILL_ENABLED = True
 
-# How far to look for things to kill. Kept inside SCAN_RANGE deliberately:
-# clearing a whole screen is time not spent taming.
-KILL_RANGE = 10
+# How far to LOOK for things to kill - further than the spell reaches, so
+# something walking in is seen before it is in range and is shot the moment
+# it crosses SPELL_RANGE, not when it is already swinging at you.
+KILL_RANGE = 14
 
-# Walk to within this many tiles before casting. Both spells reach about 10.
-KILL_CAST_RANGE = 8
+# How far the spells reach. ServUO: Magic Arrow and Energy Bolt both target
+# at 10 tiles (Core.ML ? 10 : 12 in MagicArrow.cs / EnergyBolt.cs). Casting
+# happens from here and NEVER closer by choice: the old version walked in to
+# 8 tiles first, which is how monsters got close enough to hit you and break
+# the cast.
+SPELL_RANGE = 10
+
+# Something hostile outside SPELL_RANGE that is COMING is waited for rather
+# than walked to - it does the closing and you get the first shot. Up to this
+# long; after that it is approached, but only to SPELL_RANGE.
+KILL_WAIT_FOR_MS = 4000
 
 # The two spells. Magic Arrow is what UO calls "magic missile".
 SPELL_SMALL = "Magic Arrow"
@@ -489,7 +499,20 @@ SPELL_UPGRADE_AFTER = 4
 SPELL_UPGRADE_HEALTH_PCT = 60
 
 KILL_MAX_CASTS = 20               # per creature
-KILL_CAST_MS = 2200               # between casts: the cast plus recovery
+
+# After a spell is aimed, how long to let it land before deciding whether a
+# second is needed. The cast itself is already over by then - cast_at waits
+# for the target cursor - so this is only travel and damage. Short on
+# purpose: if the first arrow did not kill it, the second goes straight out.
+KILL_LAND_MS = 700
+
+# A cast BROKEN by a hit ("Your concentration is disturbed") is recast at
+# once and does not count as a failure. This many in a row and the creature
+# is left - something is beating on you and the escape is the better answer.
+KILL_MAX_INTERRUPTS = 6
+
+# "You have not yet recovered from casting a spell" - wait this long, recast.
+KILL_RECOVER_MS = 400
 KILL_TIMEOUT_MS = 60000           # give up on one creature after this long
 KILL_MANA_WAIT_MS = 30000         # longest to stand waiting for mana
 
@@ -1419,6 +1442,12 @@ def weakest_damage_type(name, among=None):
 
 MSG_SUCCESS = [
     "It seems to accept you as master.",              # 502799
+    # ALSO A SUCCESS. ServUO AnimalTaming.cs sends this INSTEAD of 502799
+    # when you have owned the creature before - and then makes it your pet
+    # exactly the same. It used to sit in MSG_SKIP, so a re-tamed creature
+    # was written off as "cannot be tamed by you", ignored, and left
+    # following you with no deed. Confirmed in source 2026-10-25.
+    "That wasn't even challenging.",                  # 502797
 ]
 
 MSG_RETRY = [
@@ -1435,8 +1464,9 @@ MSG_REPOSITION = [
 ]
 
 MSG_SKIP = [
+    # Not always a skip: if the tame landed while its message was missed,
+    # the creature IS ours. tame() checks is_our_pet before writing it off.
     "That animal looks tame already.",                # 502804
-    "That wasn't even challenging.",                  # 502797
     "That creature cannot be tamed.",                 # 1049655
     "You can't tame that!",                           # 502801
     "You have no chance of taming this creature.",    # 502806
@@ -1454,6 +1484,24 @@ MSG_ABORT = [
     "You have too many followers to tame that creature.",  # 1049611
     "You are dead, and cannot continue taming.",           # 502796
 ]
+
+
+# ---------------------------------------------------------------------------
+# Casting - ServUO Scripts/Spells/Base/Spell.cs and the two spells, verbatim.
+#
+# Read with a journal TIMESTAMP, never after Journal.Clear(): a cast happens
+# in the middle of a taming attempt, and clearing the journal there is
+# exactly how a tame's success message got thrown away.
+# ---------------------------------------------------------------------------
+
+SPELL_DISTURBED = ("Your concentration is disturbed, thus ruining thy "
+                   "spell.")                                   # 500641
+SPELL_NOT_RECOVERED = "You have not yet recovered from casting a spell."  # 502644
+SPELL_ALREADY_CASTING = "You are already casting a spell."    # 502642
+SPELL_NO_REAGENTS = "More reagents are needed for this spell."  # 502630
+SPELL_NO_MANA = "Insufficient mana"                           # 502625, prefix
+SPELL_NOT_SEEN = "Target can not be seen."                    # 500237
+SPELL_TOO_FAR = "That is too far away."                       # 500446
 
 
 # ---------------------------------------------------------------------------
@@ -2237,18 +2285,53 @@ def is_never_threat(name):
     return False
 
 
+def journal_mark():
+    """The newest journal timestamp now. Lines after it are "new"."""
+    newest = 0.0
+    try:
+        for entry in Journal.GetJournalEntry(0.0) or []:
+            if entry.Timestamp > newest:
+                newest = entry.Timestamp
+    except Exception:
+        pass
+    return newest
+
+
+def journal_since(mark):
+    """Text of every journal line newer than `mark`. Does not clear."""
+    try:
+        return [str(e.Text or "") for e in (Journal.GetJournalEntry(mark) or [])
+                if e.Timestamp > mark]
+    except Exception:
+        return []
+
+
+def _said(lines, message):
+    low = message.lower()
+    return any(low in (line or "").lower() for line in lines)
+
+
 def cast_at(serial, spell, school):
-    """One cast at one creature. False if the cursor never arrived.
+    """One cast at one creature. What happened, as a word:
+
+        "cast"         aimed and sent
+        "interrupted"  a hit broke it before the cursor came - recast now
+        "recovering"   too soon after the last spell - recast in a moment
+        "reagents" / "mana"   cannot cast it at all
+        "unseen" / "far"      aimed, refused: no line of sight / out of range
+        "nocursor"     no cursor and no reason given
 
     THE one cast helper - defending and clearing a spot both come through
     here. TameAndFill once had two copies and only one got the cursor fix.
 
     The manual sequence, and the cursor is cleared first: a leaked cursor is
-    silently answered by the next TargetExecute, so the cast goes nowhere and
-    nothing says so.
+    silently answered by the next TargetExecute. The result is read from the
+    journal by TIMESTAMP - this runs mid-tame, and clearing the journal here
+    would throw away the tame's own success message.
     """
     if not clear_cursor():
-        debug("Target cursor would not clear before defending.", HUE_WARN)
+        debug("Target cursor would not clear before casting.", HUE_WARN)
+    mark = journal_mark()
     try:
         if school == "magery":
             Spells.CastMagery(spell)
@@ -2259,21 +2342,27 @@ def cast_at(serial, spell, school):
         elif school == "mysticism":
             Spells.CastMysticism(spell)
         else:
-            log("Unknown spell school %r - not defending." % school, HUE_BAD)
-            return False
+            log("Unknown spell school %r - not casting." % school, HUE_BAD)
+            return "nocursor"
     except Exception as err:
         log("Casting %s failed: %r" % (spell, err), HUE_BAD)
-        return False
+        return "nocursor"
 
     # noshow is FALSE deliberately. True hides the cursor from the client, so
-    # a cursor the server refuses - which is what happens when the last cast
-    # lands as the creature dies - stays open where the player cannot see it,
+    # a cursor the server refuses stays open where the player cannot see it,
     # and every target they click afterwards is silently eaten by it.
     if not Target.WaitForTarget(3000, False):
-        log("No target cursor for %s - the cast did not go out. Check you can "
-            "cast it and have the reagents." % spell, HUE_BAD)
         Target.Cancel()
-        return False
+        said = journal_since(mark)
+        if _said(said, SPELL_DISTURBED):
+            return "interrupted"
+        if _said(said, SPELL_NOT_RECOVERED) or _said(said, SPELL_ALREADY_CASTING):
+            return "recovering"
+        if _said(said, SPELL_NO_REAGENTS):
+            return "reagents"
+        if _said(said, SPELL_NO_MANA):
+            return "mana"
+        return "nocursor"
     Misc.Pause(400)
     Target.TargetExecute(serial)
 
@@ -2284,7 +2373,12 @@ def cast_at(serial, spell, school):
         debug("Cast cursor was not consumed - cancelling it.", HUE_WARN)
         Target.Cancel()
         Target.ClearQueue()
-    return True
+    said = journal_since(mark)
+    if _said(said, SPELL_NOT_SEEN):
+        return "unseen"
+    if _said(said, SPELL_TOO_FAR):
+        return "far"
+    return "cast"
 
 
 def threat_is_dead(mob):
@@ -2607,6 +2701,12 @@ def watch_attempt(serial):
             # is not time the tame was failing, and charging it against the
             # attempt would abandon a tame that was going fine.
             if defend(exclude_serial=serial):
+                # The tame keeps running on the server while we fight, so
+                # its result may be sitting in the journal right now. Read it
+                # BEFORE clearing - clearing first is how a finished tame
+                # was lost and the pet left following you with no deed.
+                if journal_hit(MSG_SUCCESS):
+                    return "success"
                 deadline = time.time() + TAME_ATTEMPT_TIMEOUT / 1000.0
                 Journal.Clear()
 
@@ -2703,6 +2803,13 @@ def tame(serial, label):
             log("%s tamed." % label, HUE_GOOD)
             return "success"
         if result == "skip":
+            # "Looks tame already" is also what you hear when the tame went
+            # through and its own message was missed. If it is OURS, it is a
+            # success, and it must go in the deed before we move on.
+            if is_our_pet(serial):
+                log("%s is already your pet - counting it as tamed." % label,
+                    HUE_GOOD)
+                return "success"
             log("%s cannot be tamed by you - ignoring." % label, HUE_WARN)
             return "skip"
         if result == "abort":
@@ -3090,6 +3197,40 @@ def wait_for_mana(need, timeout_ms=None):
     return False
 
 
+def get_in_range(serial, label):
+    """Be within SPELL_RANGE of it, without walking in further. True if so.
+
+    Something coming at you is WAITED FOR - it closes the gap and you get the
+    first shot. Only something that is staying put is walked to, and only
+    until it is in range. Walking in to point blank is what let monsters
+    reach you and break casts with their first hit.
+    """
+    mob = Mobiles.FindBySerial(serial)
+    if mob is None:
+        return False
+    gap = Player.DistanceTo(mob)
+    if gap <= SPELL_RANGE:
+        return True
+
+    deadline = time.time() + KILL_WAIT_FOR_MS / 1000.0
+    last = gap
+    while time.time() < deadline:
+        Misc.Pause(POLL_MS)
+        mob = Mobiles.FindBySerial(serial)
+        if mob is None:
+            return False
+        gap = Player.DistanceTo(mob)
+        if gap <= SPELL_RANGE:
+            return True
+        if gap >= last:
+            break                   # not coming - go to it
+        last = gap
+
+    approach(serial, SPELL_RANGE, SPELL_RANGE)
+    mob = Mobiles.FindBySerial(serial)
+    return mob is not None and Player.DistanceTo(mob) <= SPELL_RANGE
+
+
 def kill(serial, label, hits):
     """Cast at one creature until it dies. What happened, as a word.
 
@@ -3098,8 +3239,14 @@ def kill(serial, label, hits):
         "gone"     it ran off out of reach
         "gave up"  out of casts, time, mana, or casts that would not go out
 
-    Bounded by casts AND by the clock, and every pass checks your own health
-    first - a tamer standing in a fight it is losing is the thing to avoid.
+    FROM FULL SPELL RANGE. get_in_range never walks in past SPELL_RANGE.
+
+    TWICE IF NEEDED, AND STRAIGHT AWAY. After a cast lands there is only
+    KILL_LAND_MS before the next decision, so a creature the first arrow did
+    not finish gets the second at once. A cast BROKEN by a hit is recast
+    immediately and is not counted against the creature - before this, three
+    broken casts read as "check your reagents" and the monster hitting you
+    was given up on and ignored.
     """
     spell, mana = pick_spell(hits)
     log("Killing %s (%s hits) with %s."
@@ -3115,6 +3262,7 @@ def kill(serial, label, hits):
     casts = 0
     small_casts = 0
     misses = 0
+    interrupts = 0
     while casts < KILL_MAX_CASTS and time.time() < deadline:
         if too_hurt():
             return "escape"
@@ -3126,15 +3274,16 @@ def kill(serial, label, hits):
             log("%s is down after %d cast(s)." % (label, casts), HUE_GOOD)
             return "dead"
 
-        if Player.DistanceTo(mob) > KILL_CAST_RANGE:
-            approach(serial, KILL_CAST_RANGE, KILL_RANGE)
-            mob = Mobiles.FindBySerial(serial)
-            if mob is None:
-                return "dead"
-            if Player.DistanceTo(mob) > KILL_RANGE:
+        if Player.DistanceTo(mob) > SPELL_RANGE:
+            if not get_in_range(serial, label):
+                if Mobiles.FindBySerial(serial) is None:
+                    return "dead"
                 log("%s is out of reach - leaving it." % label, HUE_WARN)
                 Misc.IgnoreObject(serial)
                 return "gone"
+            mob = Mobiles.FindBySerial(serial)
+            if mob is None:
+                return "dead"
 
         # It was bigger than the table said: four arrows in and still mostly
         # healthy. Up to the bolt for the rest of the fight.
@@ -3152,19 +3301,59 @@ def kill(serial, label, hits):
             Misc.IgnoreObject(serial)
             return "gave up"
 
-        if cast_at(serial, spell, SPELL_SCHOOL):
+        outcome = cast_at(serial, spell, SPELL_SCHOOL)
+        if outcome == "cast":
             casts += 1
             misses = 0
+            interrupts = 0
             if spell == SPELL_SMALL:
                 small_casts += 1
-        else:
+            Misc.Pause(KILL_LAND_MS)
+            continue
+        if outcome == "interrupted":
+            interrupts += 1
+            debug("%s: cast broken by a hit (%d) - again." % (label, interrupts),
+                  HUE_WARN)
+            if interrupts >= KILL_MAX_INTERRUPTS:
+                log("%d casts in a row broken by hits - leaving %s."
+                    % (interrupts, label), HUE_BAD)
+                return "gave up"
+            continue                        # no pause: recast now
+        if outcome == "recovering":
+            Misc.Pause(KILL_RECOVER_MS)
+            continue
+        if outcome in ("unseen", "far"):
+            # Aimed and refused. Step in a little - but no closer than the
+            # spell needs, so this cannot become walking into its reach.
+            debug("%s: %s - closing a little." % (
+                label, "no line of sight" if outcome == "unseen"
+                else "out of range"), HUE_WARN)
             misses += 1
             if misses >= 3:
-                log("Three casts in a row did not go out - stopping. Check "
-                    "your reagents.", HUE_BAD)
+                log("%s cannot be hit from here - leaving it." % label,
+                    HUE_WARN)
                 Misc.IgnoreObject(serial)
                 return "gave up"
-        Misc.Pause(KILL_CAST_MS)
+            mob = Mobiles.FindBySerial(serial)
+            if mob is not None:
+                for _ in range(2):
+                    step_toward(mob)
+                    Misc.Pause(MOVE_PAUSE)
+            continue
+        if outcome == "reagents":
+            log("Out of reagents for %s - stopping the fight." % spell,
+                HUE_BAD)
+            return "gave up"
+        if outcome == "mana":
+            continue                        # wait_for_mana handles it
+
+        misses += 1
+        if misses >= 3:
+            log("Three casts in a row did not go out and the server said "
+                "nothing - leaving %s." % label, HUE_BAD)
+            Misc.IgnoreObject(serial)
+            return "gave up"
+        Misc.Pause(KILL_RECOVER_MS)
 
     if Mobiles.FindBySerial(serial) is None:
         return "dead"
@@ -3602,6 +3791,79 @@ def escape_and_recover():
 
 
 # =============================================================================
+# STRAY PETS - tamed, but not in a deed
+# =============================================================================
+#
+# Every creature this run has tried to tame, by serial. A pet that is one of
+# these and is still following you was tamed and NOT deeded - its success
+# message was missed, or the deed would not take - and it is put in its deed
+# before anything else happens. Before the spot is left above all: pets do
+# not recall with you, so one left behind is a follower slot gone for good.
+#
+# ONLY these serials. A pet you brought with you is never touched, even if
+# you hold a deed for its species.
+_our_tames = {}          # serial -> {"species": name, "tries": int}
+
+# Deed attempts per stray before it is reported and left alone.
+STRAY_MAX_TRIES = 3
+
+
+def is_our_pet(serial):
+    """Is this creature our pet now? Player.Pets first, then the tooltip."""
+    try:
+        for pet in list(Player.Pets or []):
+            if int(pet.Serial) == int(serial):
+                return True
+    except Exception:
+        pass
+    mob = Mobiles.FindBySerial(serial)
+    if mob is None:
+        return False
+    # ServUO adds "(tame)" to a controlled creature's name properties. Only
+    # trusted for creatures WE tried to tame - see _our_tames.
+    return "(tame)" in mobile_tooltip(mob)
+
+
+def remember_tame(serial, species_name):
+    _our_tames.setdefault(int(serial), {"species": species_name, "tries": 0})
+
+
+def sweep_strays():
+    """Deed every pet we tamed that is still following. How many were deeded."""
+    deeded = 0
+    for serial, rec in list(_our_tames.items()):
+        mob = Mobiles.FindBySerial(serial)
+        if mob is None:
+            # Gone: deeded, died, or out of sight. If it was ours and is out
+            # of sight it is lost to this spot anyway.
+            del _our_tames[serial]
+            continue
+        if rec["tries"] >= STRAY_MAX_TRIES:
+            continue                # reported already; no tooltip churn
+        if not is_our_pet(serial):
+            continue
+        if rec["species"] not in _active:
+            rescan("stray %s" % rec["species"])
+            if rec["species"] not in _active:
+                continue            # no deed left for it - it stays a pet
+        rec["tries"] += 1
+        log("%s is following you but is NOT in its deed - adding it now "
+            "(try %d/%d)." % (rec["species"], rec["tries"], STRAY_MAX_TRIES),
+            HUE_WARN)
+        if Player.DistanceTo(mob) > 2:
+            approach(serial, 1, 2)
+        if add_to_deed(rec["species"], serial):
+            del _our_tames[serial]
+            deeded += 1
+        elif rec["tries"] >= STRAY_MAX_TRIES:
+            log("Could not get %s into its deed after %d tries. It is still "
+                "following you - deed it by hand." % (rec["species"],
+                                                       STRAY_MAX_TRIES),
+                HUE_BAD)
+    return deeded
+
+
+# =============================================================================
 # ONE SPOT
 # =============================================================================
 
@@ -3625,6 +3887,9 @@ def work_spot(rune_name):
         if Player.IsGhost:
             return "dead"
         if too_hurt():
+            if _our_tames:
+                log("Leaving with %d tamed pet(s) not yet deeded - they stay "
+                    "here." % len(_our_tames), HUE_WARN)
             escape_and_recover()
             return "fled"
 
@@ -3642,6 +3907,12 @@ def work_spot(rune_name):
                 return "fled"
             if outcome == "dead":
                 killed += 1
+            quiet_since = time.time()
+            continue
+
+        # A pet we tamed that never made it into its deed goes in now.
+        if _our_tames and sweep_strays():
+            rescan("stray deeded")
             quiet_since = time.time()
             continue
 
@@ -3669,17 +3940,34 @@ def work_spot(rune_name):
             if (time.time() - quiet_since) * 1000.0 >= SPOT_IDLE_MS:
                 log("%s: quiet - %d tamed, %d killed here."
                     % (rune_name, tamed, killed), HUE_INFO)
+                # Last look before recalling: pets do not come with you.
+                sweep_strays()
                 return "quiet"
             Misc.Pause(IDLE_PAUSE)
             continue
 
         label = species["name"]
         log("Found %s at %d tiles." % (label, Player.DistanceTo(mob)))
+        remember_tame(serial, label)
         result = tame(serial, label)
         quiet_since = time.time()
 
+        # Whatever tame() concluded, if the creature is our pet now the tame
+        # went through - its message was missed somewhere - and it is
+        # handled as the success it is. Anything else is dropped from the
+        # stray list, so sweep_strays never re-reads it.
+        if result in ("skip", "unreachable", "exhausted", "lost"):
+            if Mobiles.FindBySerial(serial) is not None and is_our_pet(serial):
+                log("%s turned out to be tamed after all." % label, HUE_GOOD)
+                result = "success"
+            else:
+                _our_tames.pop(int(serial), None)
+
         if result == "success":
-            add_to_deed(label, serial)
+            if add_to_deed(label, serial):
+                _our_tames.pop(int(serial), None)
+            # If it did not take, it stays in _our_tames and sweep_strays
+            # tries again before the spot is left.
             tamed += 1
             Misc.IgnoreObject(serial)
             rescan("after tame")
@@ -3695,6 +3983,7 @@ def work_spot(rune_name):
 
     log("%s: %d minute(s) up - %d tamed, %d killed here."
         % (rune_name, SPOT_MAX_MS / 60000, tamed, killed), HUE_INFO)
+    sweep_strays()
     return "timeout"
 
 

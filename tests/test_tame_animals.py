@@ -764,6 +764,45 @@ def test_unknown_creature_gets_no_spell_choice(m):
           m["best_spell_against"]("something imaginary"), None)
 
 
+def test_rechallenge_is_a_success(m):
+    """ServUO sends "That wasn't even challenging." INSTEAD of "It seems to
+    accept you as master" when you have owned the creature before, and makes
+    it your pet all the same. In MSG_SKIP it wrote the pet off and left it
+    following you with no deed (found in FillTameDeeds, 2026-10-25)."""
+    check("502797 is a success",
+          "That wasn't even challenging." in m["MSG_SUCCESS"], True)
+    check("502797 is not a skip",
+          "That wasn't even challenging." in m["MSG_SKIP"], False)
+
+
+def test_tame_success_survives_a_defence(m):
+    """The tame keeps running on the server while defend() fights. Its
+    success must be read BEFORE the post-fight Journal.Clear()."""
+    class Journal(object):
+        def __init__(self):
+            self.lines = []
+
+        def Search(self, text):
+            return any(text in line for line in self.lines)
+
+        def Clear(self):
+            self.lines = []
+
+    journal = Journal()
+    saved = (m["Journal"], m["defend"])
+    m["Journal"] = journal
+
+    def fight_then_tamed(exclude_serial=None):
+        journal.lines.append("It seems to accept you as master.")
+        return True
+    m["defend"] = fight_then_tamed
+    try:
+        check("success not lost to the post-fight Clear",
+              m["watch_attempt"](0x1234), "success")
+    finally:
+        m["Journal"], m["defend"] = saved
+
+
 def check(label, got, want):
     ok = got == want
     if not ok:
@@ -1224,6 +1263,8 @@ def main():
     test_name_decides_not_body(module)
     test_never_tame_words(module)
     test_catalogue_invariants(module)
+    test_rechallenge_is_a_success(module)
+    test_tame_success_survives_a_defence(module)
 
     print()
     if FAILURES:

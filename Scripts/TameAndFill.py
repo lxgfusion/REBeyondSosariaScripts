@@ -62,7 +62,7 @@ import time
 # loaded script even after the file on disk changes, and two debugging rounds
 # have already been spent on a bug that was fixed on disk but not in the folder
 # Razor reads. If this line does not say what you expect, hit Reload.
-SCRIPT_VERSION = "2026-09-04.1"
+SCRIPT_VERSION = "2026-10-25.1"
 
 
 # =============================================================================
@@ -975,6 +975,12 @@ def weakest_damage_type(name, among=None):
 
 MSG_SUCCESS = [
     "It seems to accept you as master.",              # 502799
+    # ALSO A SUCCESS. ServUO AnimalTaming.cs sends this INSTEAD of 502799
+    # when you have owned the creature before - and then makes it your pet
+    # exactly the same. It used to sit in MSG_SKIP, so a re-tamed creature
+    # was written off as "cannot be tamed by you", ignored, and left
+    # following you with no deed. Confirmed in source 2026-10-25.
+    "That wasn't even challenging.",                  # 502797
 ]
 
 MSG_RETRY = [
@@ -991,8 +997,9 @@ MSG_REPOSITION = [
 ]
 
 MSG_SKIP = [
+    # Not always a skip: if the tame landed while its message was missed,
+    # the creature IS ours. tame() checks is_our_pet before writing it off.
     "That animal looks tame already.",                # 502804
-    "That wasn't even challenging.",                  # 502797
     "That creature cannot be tamed.",                 # 1049655
     "You can't tame that!",                           # 502801
     "You have no chance of taming this creature.",    # 502806
@@ -2185,6 +2192,12 @@ def watch_attempt(serial):
             # is not time the tame was failing, and charging it against the
             # attempt would abandon a tame that was going fine.
             if defend(exclude_serial=serial):
+                # The tame keeps running on the server while we fight, so
+                # its result may be sitting in the journal right now. Read it
+                # BEFORE clearing - clearing first is how a finished tame
+                # was lost and the pet left following you with no deed.
+                if journal_hit(MSG_SUCCESS):
+                    return "success"
                 deadline = time.time() + TAME_ATTEMPT_TIMEOUT / 1000.0
                 Journal.Clear()
 
@@ -2216,6 +2229,30 @@ def watch_attempt(serial):
         Misc.Pause(POLL_MS)
 
     return "timeout"
+
+
+def is_our_pet(serial):
+    """Is this creature our pet now? Player.Pets first, then the tooltip.
+
+    Only ever asked about the creature tame() is working on, so a "(tame)"
+    in its tooltip - ServUO adds one to every controlled creature - means
+    the tame we just tried went through.
+    """
+    try:
+        for pet in list(Player.Pets or []):
+            if int(pet.Serial) == int(serial):
+                return True
+    except Exception:
+        pass
+    mob = Mobiles.FindBySerial(serial)
+    if mob is None:
+        return False
+    try:
+        Mobiles.WaitForProps(mob, PROPS_TIMEOUT)
+        lines = list(Mobiles.GetPropStringList(mob) or [])
+    except Exception:
+        lines = []
+    return any("(tame)" in str(line or "").lower() for line in lines)
 
 
 def tame(serial, label):
@@ -2277,6 +2314,13 @@ def tame(serial, label):
             log("%s tamed." % label, HUE_GOOD)
             return "success"
         if result == "skip":
+            # "Looks tame already" is also what you hear when the tame went
+            # through and its own message was missed. If it is OURS, it is a
+            # success, and it must go in the deed.
+            if is_our_pet(serial):
+                log("%s is already your pet - counting it as tamed." % label,
+                    HUE_GOOD)
+                return "success"
             log("%s cannot be tamed by you - ignoring." % label, HUE_WARN)
             return "skip"
         if result == "abort":
