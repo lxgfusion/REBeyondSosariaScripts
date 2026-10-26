@@ -1,7 +1,7 @@
 # FillTameDeeds — handoff
 
 `Scripts/FillTameDeeds.py`, live at `E:\uoclients\RazorEnhanced\Scripts\`.
-Current version `2026-10-25.3`. **Not yet run in game.**
+Current version `2026-10-25.4`. **Not yet run in game.**
 
 ## What it is
 
@@ -74,9 +74,31 @@ tiles before casting. Now:
 - After a landed cast it waits 700 ms (`KILL_LAND_MS`, was 2200) and sends
   the second if the first did not kill.
 
+## 2026-10-25.4: stuck at a house
+
+The run sat outside a house with mannequins. The mannequins were not the
+target: they are notoriety 7 on a human body, and nothing in the script
+looks at either. The likely cause, from ServUO source:
+
+- The taming cursor (`AnimalTaming.InternalTarget`, range 3, `checkLOS
+  false`) accepts a creature through a wall. The tick then stops it with
+  1049654 "no clear path". That was in `MSG_REPOSITION`, so the script
+  walked closer (already within 2), retried, and repeated up to 25 times.
+  It is now `MSG_BLOCKED`, and two of those (`TAME_MAX_BLOCKED`), or a
+  reposition that walking cannot improve, ends it as `unreachable`.
+  `TAME_CREATURE_MAX_MS` (3 min) is the backstop.
+- The creature in there was most likely somebody's pet, and `identify()`
+  never checked. Now quarry must be notoriety 3 or 6 (`TAME_NOTORIETY`).
+  ServUO `Notoriety.cs` makes a wild creature 3, or 6 if a murderer type, and
+  a pet takes its owner's colour. Quarry also must not show `(tame)`,
+  `(bonded)` or `(summoned)` in its tooltip.
+
+Not confirmed from a log. If it sticks again, the `Found X at N tiles` /
+`Taming X (attempt n)` lines will say what it was after.
+
 ## To check on the first run
 
-1. Banner `FillTameDeeds v2026-10-25.3`.
+1. Banner `FillTameDeeds v2026-10-25.4`.
 2. `N spot(s) in FillTameDeeds: ...`. If not found, read the folder list.
 3. First kill: is the spell right for the size?
 4. Whether `IsHuman` and `IgnorePets` behave on this shard (both are new

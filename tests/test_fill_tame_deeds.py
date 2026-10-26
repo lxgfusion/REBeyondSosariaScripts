@@ -451,6 +451,54 @@ def test_stray_pet_gets_deeded(m):
     check("off the stray list", 43 in m["_our_tames"], False)
 
 
+def test_somebodys_pet_is_not_quarry(m):
+    """A horse in someone's house is blue (its owner's colour, ServUO
+    Notoriety.cs); a mannequin is yellow (7). Neither is ever walked to."""
+    hold_deeds(m, "horse")
+    m["_body_owners"].clear()
+    m["_body_owners"][0xE2] = ["horse"]
+    ident = m["identify"]
+    check("wild grey horse is quarry",
+          (ident(Mob(60, "a horse", 3, 0xE2)) or {}).get("name"), "horse")
+    check("blue horse (an innocent's pet) is not",
+          ident(Mob(61, "a horse", 1, 0xE2)), None)
+    check("green (a guildmate's pet) is not",
+          ident(Mob(62, "a horse", 2, 0xE2)), None)
+    check("yellow (invulnerable) is not",
+          ident(Mob(63, "a horse", 7, 0xE2)), None)
+    check("red player's pet - red, but its tooltip says tame",
+          ident(Mob(64, "a horse", 6, 0xE2, props=["a horse", "(tame)"])),
+          None)
+
+
+def test_house_wall_is_given_up_on(m):
+    """ServUO's taming cursor accepts a target through a wall; the server
+    stops the tame with "no clear path" a few seconds in. Walking closer
+    cannot fix that. Before: 25 attempts on the same pet."""
+    check("no-clear-path is not a reposition",
+          any("clear path" in s for s in m["MSG_REPOSITION"]), False)
+    check("...it is its own outcome",
+          any("clear path" in s for s in m["MSG_BLOCKED"]), True)
+
+    m["Mobiles"].by_serial[65] = Mob(65, "a horse", 3, 0xE2)
+    m["Player"].DistanceTo = staticmethod(lambda target: 1)
+    m["Player"].UseSkill = staticmethod(lambda name: None)
+    m["Target"] = StubTarget()
+    m["Journal"] = StubJournal()
+    m["clear_cursor"] = lambda: True
+    m["approach"] = lambda *a, **k: True
+    m["calm_before_taming"] = lambda serial, label: False
+    attempts = []
+    saved = m["watch_attempt"]
+    m["watch_attempt"] = lambda serial: attempts.append(1) or "blocked"
+    try:
+        check("left as unreachable", m["tame"](65, "horse"), "unreachable")
+        check("after TAME_MAX_BLOCKED tries, not 25", len(attempts),
+              m["TAME_MAX_BLOCKED"])
+    finally:
+        m["watch_attempt"] = saved
+
+
 def test_kill_escapes_when_hurt(m):
     mob = Mob(31, "an ettin", 3, 0x12)
     m["Mobiles"].by_serial[31] = mob

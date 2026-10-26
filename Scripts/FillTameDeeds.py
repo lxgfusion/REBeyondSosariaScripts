@@ -83,7 +83,7 @@ import time
 # loaded script even after the file on disk changes, and two debugging rounds
 # have already been spent on a bug that was fixed on disk but not in the folder
 # Razor reads. If this line does not say what you expect, hit Reload.
-SCRIPT_VERSION = "2026-10-25.3"
+SCRIPT_VERSION = "2026-10-25.4"
 
 
 # =============================================================================
@@ -274,6 +274,23 @@ LEASH_DIST = 7           # server aborts the attempt past this (502795)
 PATHFIND_MIN_DIST = 8    # A* beyond this, single-steps inside it
 
 MAX_TAME_ATTEMPTS = 25   # attempts per creature before giving up on it
+
+# "You do not have a clear path to the animal you are taming" this many times
+# and the creature is left. ServUO's taming cursor does NOT check line of
+# sight, so a pet standing just inside a house wall is accepted as a target
+# from outside; the server only stops the tame a few seconds in. Walking
+# closer cannot fix a wall - before this, the script tried 25 times.
+TAME_MAX_BLOCKED = 2
+
+# Hard ceiling on one creature, whatever else happens.
+TAME_CREATURE_MAX_MS = 180000
+
+# Notorieties a WILD creature can have. ServUO Scripts/Misc/Notoriety.cs: a
+# wild non-human creature is CanBeAttacked (3), or Murderer (6) when it is
+# that kind of creature. A PET takes its owner's notoriety - innocent blue
+# (1) for most players - and a vendor or mannequin is Invulnerable (7). So
+# anything outside these is somebody's, or nobody's, and never quarry.
+TAME_NOTORIETY = [3, 6]
 TAME_ATTEMPT_TIMEOUT = 30000   # ms for one attempt to resolve
 TARGET_CURSOR_TIMEOUT = 3000   # ms to wait for the taming target cursor
 APPROACH_TIMEOUT = 30000       # ms to spend walking to a creature
@@ -1459,8 +1476,13 @@ MSG_RETRY = [
 
 MSG_REPOSITION = [
     "You are too far away to continue taming.",       # 502795
-    "You do not have a clear path to the animal you are taming",  # 1049654
     "That is too far away.",
+]
+
+# Its own outcome now, not a reposition: getting closer does not get you
+# round a wall. Counted against TAME_MAX_BLOCKED.
+MSG_BLOCKED = [
+    "You do not have a clear path to the animal you are taming",  # 1049654
 ]
 
 MSG_SKIP = [
@@ -1976,6 +1998,18 @@ def identify(mob):
     if not owners and not contenders:
         return None
 
+    # Somebody's pet, or a vendor or mannequin. Checked before the name -
+    # it costs nothing - so a stable full of horses behind a house wall is
+    # never walked to at all. See TAME_NOTORIETY.
+    try:
+        notoriety = int(mob.Notoriety)
+    except Exception:
+        notoriety = 0
+    if notoriety not in TAME_NOTORIETY:
+        debug("Body 0x%X at notoriety %d is somebody's pet or protected - "
+              "not quarry." % (mob.Body, notoriety))
+        return None
+
     name = mob_name(mob)
     if not name:
         if REQUIRE_NAME_MATCH:
@@ -2013,7 +2047,12 @@ def identify(mob):
 
     # Checked LAST, because it costs a tooltip read and only matters for a
     # creature that is otherwise exactly what we are after.
-    if is_paragon(mob):
+    text = mobile_tooltip(mob)
+    for word in ("(tame)", "(bonded)", "(summoned)"):
+        if word in text:
+            debug("'%s' is %s - somebody's already." % (name, word), HUE_INFO)
+            return None
+    if is_paragon(mob, text):
         log("'%s' is a PARAGON - it cannot be tamed. Leaving it." % name,
             HUE_WARN)
         return None
@@ -2021,8 +2060,9 @@ def identify(mob):
     return species
 
 
-def is_paragon(mob):
-    """Whether this creature spawned as a paragon.
+def is_paragon(mob, text=None):
+    """Whether this creature spawned as a paragon. `text`: its tooltip, if
+    already read.
 
     ServUO (Scripts/Mobiles/Special/Paragon.cs) marks one twice: its tooltip
     carries "(Paragon)" (cliloc 1049646) and it is hued PARAGON_HUE. Either
@@ -2037,7 +2077,9 @@ def is_paragon(mob):
             return True
     except Exception:
         pass
-    return "paragon" in mobile_tooltip(mob)
+    if text is None:
+        text = mobile_tooltip(mob)
+    return "paragon" in text
 
 
 # =============================================================================
@@ -2721,6 +2763,8 @@ def watch_attempt(serial):
             return "skip"
         if journal_hit(MSG_CONTESTED):
             return "contested"
+        if journal_hit(MSG_BLOCKED):
+            return "blocked"
         if journal_hit(MSG_REPOSITION):
             return "reposition"
         if journal_hit(MSG_RETRY):
@@ -2750,11 +2794,17 @@ def tame(serial, label):
     "abort" or "flee" (your health is low - leave).
     """
     attempts = 0
+    blocked = 0
+    started = time.time()
 
     calmed_at = [0.0]
     forget_threats()      # distances from the last creature mean nothing here
 
     while attempts < MAX_TAME_ATTEMPTS:
+        if (time.time() - started) * 1000.0 >= TAME_CREATURE_MAX_MS:
+            log("%s: %d minute(s) on one creature - leaving it."
+                % (label, TAME_CREATURE_MAX_MS / 60000), HUE_WARN)
+            return "exhausted"
         mob = Mobiles.FindBySerial(serial)
         if mob is None:
             return "lost"
@@ -2821,8 +2871,26 @@ def tame(serial, label):
         if result == "contested":
             log("%s is being tamed by someone else - backing off." % label, HUE_WARN)
             Misc.Pause(CONTESTED_BACKOFF)
-        elif result == "reposition":
+        elif result == "blocked":
+            blocked += 1
+            if blocked >= TAME_MAX_BLOCKED:
+                log("%s: no clear path, %d times - it is behind a wall or in "
+                    "a house. Leaving it." % (label, blocked), HUE_WARN)
+                return "unreachable"
             approach(serial, STAY_DIST, TAME_START_DIST)
+        elif result == "reposition":
+            before = Player.DistanceTo(mob)
+            approach(serial, STAY_DIST, TAME_START_DIST)
+            mob = Mobiles.FindBySerial(serial)
+            # Told to get closer while already as close as walking gets us:
+            # that is a wall too, just reported differently.
+            if mob is not None and Player.DistanceTo(mob) >= before \
+                    and before <= TAME_START_DIST:
+                blocked += 1
+                if blocked >= TAME_MAX_BLOCKED:
+                    log("%s: cannot get any closer - leaving it." % label,
+                        HUE_WARN)
+                    return "unreachable"
         elif result == "timeout":
             log("Attempt timed out, retrying.", HUE_WARN)
 
