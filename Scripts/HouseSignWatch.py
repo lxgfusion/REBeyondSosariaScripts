@@ -11,11 +11,14 @@ signs within range and reads each one's condition. A house that is
 
 gets an alert: a coloured line in your journal with the house's name,
 owner, coordinates and which way it is from you, a marker over the sign
-itself, and a beep. The same line is appended to ALERT_LOG_FILE next to this
-script, so you can find the house again after you have moved on - that is
-the list to add to your Account Runebook from.
+itself, and a beep. The same line is appended to HouseAlerts/house_alerts.txt
+next to this script, so you can find the house again after you have moved
+on - that is the list to add to your Account Runebook from.
 
-Each sign is alerted ONCE per run, and again only if it gets worse.
+THE FILE IS ALSO THE MEMORY. It is read at startup, and a house already in
+it - same sign location, same owner - is never alerted again, this run or
+any later one. A NEW OWNER at a known location alerts again: that is a
+house that changed hands and may be worth a fresh look.
 
 WHERE THE CONDITION COMES FROM - ServUO Scripts/Multis/HouseSign.cs:
 
@@ -39,7 +42,7 @@ import time
 # Printed as the first line at startup. Razor CACHES the loaded script even
 # after the file changes - if this is not the version you expect, hit Reload
 # in the Scripting tab.
-SCRIPT_VERSION = "2026-10-26.1"
+SCRIPT_VERSION = "2026-10-26.2"
 
 
 # =============================================================================
@@ -107,7 +110,16 @@ SINGLE_CLICK_WAIT_MS = 800
 # ---------------------------------------------------------------------------
 ALERT_BEEP = True
 ALERT_OVERHEAD = True                # a marker over the sign itself
-ALERT_LOG_FILE = "house_alerts.txt"  # next to this script; "" = no file
+# The alert log, in its own folder next to this script (created if
+# missing). "" for either turns the file - and the memory - off.
+ALERT_LOG_FOLDER = "HouseAlerts"
+ALERT_LOG_FILE = "house_alerts.txt"
+
+# A house already in the log (same location, same owner) is not alerted
+# again. True re-alerts it when its condition has got WORSE since it was
+# logged - slightly worn to in danger of collapse, say. Off: you asked for
+# "only a new owner".
+ALERT_IF_WORSE = False
 
 # Also print signs that are fine, once each - useful to confirm it is reading
 # signs at all. Off once you trust it.
@@ -293,7 +305,8 @@ def read_sign(item):
 # SCANNING
 # =============================================================================
 
-# serial -> {"read_at": time, "rank": worst rank alerted, or None}
+# serial -> {"read_at": time}. Only decides when a sign is read again; who
+# has already been alerted on lives in _known, which survives restarts.
 _seen = {}
 
 
@@ -324,29 +337,115 @@ def due(serial, now):
     return rec is None or (now - rec["read_at"]) * 1000.0 >= RECHECK_MS
 
 
-def should_alert(serial, rank):
-    """Alert on a sign at this rank? Once per sign, again only when worse."""
+def should_alert(key, owner, rank):
+    """Alert on this house? Not when the log already has it with the same
+    owner; yes when it is new, or the owner has changed. ALERT_IF_WORSE
+    also lets a worse condition through for the same owner."""
     if rank is None:
         return False
-    rec = _seen.get(serial)
-    if rec is None or rec.get("rank") is None:
+    old = _known.get(key)
+    if old is None:
         return True
-    return rank > rec["rank"]
+    if old["owner"] != (owner or "").strip().lower():
+        return True                     # changed hands
+    if ALERT_IF_WORSE and (old["rank"] is None or rank > old["rank"]):
+        return True
+    return False
+
+
+def sign_key(item):
+    try:
+        facet = int(Player.Map)
+    except Exception:
+        facet = -1
+    return (facet, int(item.Position.X), int(item.Position.Y))
+
+
+def log_path():
+    """Full path of the alert log, or "" when it is switched off."""
+    if not ALERT_LOG_FILE or not ALERT_LOG_FOLDER:
+        return ""
+    try:
+        base = Misc.CurrentScriptDirectory() or ""
+    except Exception:
+        base = ""
+    return os.path.join(base, ALERT_LOG_FOLDER, ALERT_LOG_FILE)
 
 
 def write_log_line(line):
-    if not ALERT_LOG_FILE:
+    path = log_path()
+    if not path:
         return
     try:
-        folder = Misc.CurrentScriptDirectory()
-    except Exception:
-        folder = ""
-    path = os.path.join(folder, ALERT_LOG_FILE) if folder else ALERT_LOG_FILE
-    try:
+        folder = os.path.dirname(path)
+        if folder and not os.path.isdir(folder):
+            os.makedirs(folder)
         with open(path, "a") as fh:
             fh.write(line + "\n")
     except Exception as err:
         log("could not write %s: %r" % (path, err), HUE_WARN)
+
+
+# (map, x, y) of a house sign -> {"owner": lowercased, "rank": int or None}.
+# Loaded from the log at startup and added to on every alert. THE dedupe:
+# the sign does not move, so its spot identifies the house, and the owner
+# says whether it is still the same household.
+_known = {}
+
+_LOG_LINE = re.compile(
+    r"^[^\t]*\t(?P<cond>[^\t]*)\t(?P<name>[^\t]*)\towner (?P<owner>[^\t]*)"
+    r"\t(?P<x>-?\d+),(?P<y>-?\d+)\tmap (?P<map>-?\d+)")
+
+
+def rank_of_label(label):
+    low = (label or "").strip().lower()
+    for rank, (_words, name, _cliloc) in enumerate(ALERT_CONDITIONS):
+        if name.lower() == low:
+            return rank
+    if low == "demolition pending":
+        return len(ALERT_CONDITIONS)
+    return None
+
+
+def remember(key, owner, rank):
+    """Record a house as alerted. A worse rank for the same owner wins."""
+    owner = (owner or "").strip().lower()
+    old = _known.get(key)
+    if old is not None and old["owner"] == owner and old["rank"] is not None \
+            and (rank is None or rank < old["rank"]):
+        rank = old["rank"]
+    _known[key] = {"owner": owner, "rank": rank}
+
+
+def load_known():
+    """Read the alert log into _known. How many houses it held."""
+    _known.clear()
+    path = log_path()
+    if not path or not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, "r") as fh:
+            lines = fh.read().splitlines()
+    except Exception as err:
+        log("could not read %s: %r" % (path, err), HUE_WARN)
+        return 0
+    skipped = 0
+    for line in lines:
+        found = _LOG_LINE.match(line)
+        if not found:
+            if line.strip():
+                skipped += 1
+            continue
+        key = (int(found.group("map")), int(found.group("x")),
+               int(found.group("y")))
+        # Later lines win - the file is in time order, so the last owner
+        # recorded at a spot is the current one as far as we know.
+        _known[key] = {"owner": found.group("owner").strip().lower(),
+                       "rank": rank_of_label(found.group("cond"))}
+    if skipped:
+        log("  %d line(s) in the log were not understood and were ignored."
+            % skipped, HUE_WARN)
+    return len(_known)
 
 
 def alert(item, info):
@@ -362,9 +461,13 @@ def alert(item, info):
     except Exception:
         facet = -1
 
-    log("*** %s *** '%s' (owner %s) at %d,%d map %d - %d tiles %s of you."
+    old = _known.get((facet, x, y))
+    why = ""
+    if old is not None and old["owner"] != info["owner"].strip().lower():
+        why = " NEW OWNER (was %s)." % old["owner"]
+    log("*** %s *** '%s' (owner %s) at %d,%d map %d - %d tiles %s of you.%s"
         % (info["condition"].upper(), info["name"], info["owner"], x, y,
-           facet, gap, compass(dx, dy)), HUE_ALERT)
+           facet, gap, compass(dx, dy), why), HUE_ALERT)
     if ALERT_OVERHEAD:
         try:
             Items.Message(item, HUE_ALERT, info["condition"])
@@ -378,6 +481,7 @@ def alert(item, info):
     write_log_line("%s\t%s\t%s\towner %s\t%d,%d\tmap %d"
                    % (time.strftime("%Y-%m-%d %H:%M"), info["condition"],
                       info["name"], info["owner"], x, y, facet))
+    remember((facet, x, y), info["owner"], info["rank"])
 
 
 def scan_once():
@@ -400,23 +504,22 @@ def scan_once():
         if info is None:
             # A shop sign, or a tooltip that would not load. Remember it so
             # it is not re-read every scan.
-            _seen[serial] = {"read_at": now,
-                             "rank": (_seen.get(serial) or {}).get("rank")}
+            _seen[serial] = {"read_at": now}
             debug("0x%X is not a house sign." % serial)
             continue
 
-        if should_alert(serial, info["rank"]):
+        key = sign_key(item)
+        if should_alert(key, info["owner"], info["rank"]):
             alert(item, info)
             raised += 1
+        elif info["rank"] is not None and serial not in _seen:
+            debug("'%s' (owner %s) is %s - already in the log."
+                  % (info["name"], info["owner"], info["condition"]))
         elif info["rank"] is None and REPORT_EVERY_SIGN \
                 and serial not in _seen:
             log("  '%s' (owner %s) is fine." % (info["name"], info["owner"]),
                 HUE_GOOD)
-
-        prev = (_seen.get(serial) or {}).get("rank")
-        worst = info["rank"] if prev is None else max(
-            prev, info["rank"] if info["rank"] is not None else prev)
-        _seen[serial] = {"read_at": now, "rank": worst}
+        _seen[serial] = {"read_at": now}
     return raised
 
 
@@ -431,9 +534,11 @@ def main():
         wanted.append("Demolition Pending")
     log("Watching house signs within %d tiles for: %s"
         % (SCAN_RANGE, ", ".join(wanted)), HUE_GOOD)
-    if ALERT_LOG_FILE:
-        log("Alerts are also written to %s next to this script."
-            % ALERT_LOG_FILE)
+    path = log_path()
+    if path:
+        known = load_known()
+        log("Alert log: %s - %d house(s) already in it will not alert again "
+            "unless the owner has changed." % (path, known))
 
     total = 0
     while True:

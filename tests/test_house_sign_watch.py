@@ -12,7 +12,9 @@ trailing main() stripped and stub Razor globals injected.
 
 import os
 import re
+import shutil
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, os.pardir, "Scripts", "HouseSignWatch.py")
@@ -55,8 +57,10 @@ class StubMisc(object):
     def Beep(self):
         self.beeps += 1
 
+    script_dir = ""
+
     def CurrentScriptDirectory(self):
-        return ""
+        return self.script_dir
 
 
 class StubItems(object):
@@ -126,7 +130,7 @@ class StubPlayer(object):
         return max(abs(item.Position.X - 100), abs(item.Position.Y - 100))
 
 
-def load_script():
+def load_script(script_dir=""):
     with open(SCRIPT, encoding="utf-8") as fh:
         source = fh.read()
     source = re.sub(r"^main\(\)\s*$", "", source, flags=re.M)
@@ -140,13 +144,16 @@ def load_script():
         "Journal": journal,
         "Player": StubPlayer(),
     }
+    env["Misc"].script_dir = script_dir
     exec(compile(source, SCRIPT, "exec"), env)
-    env["ALERT_LOG_FILE"] = ""          # no files from tests
+    if not script_dir:
+        env["ALERT_LOG_FILE"] = ""      # no files unless a test asks
     return env
 
 
 def fresh(m):
     m["_seen"].clear()
+    m["_known"].clear()
     m["Misc"].messages = []
     m["Misc"].beeps = 0
     m["Items"].overhead = []
@@ -214,7 +221,7 @@ def test_single_click_fallback(m):
     check("label read", info and info["condition"], "In Danger Of Collapse")
 
 
-def test_alert_once_then_only_when_worse(m):
+def test_alert_once_not_again_for_same_owner(m):
     fresh(m)
     sign = Sign(4, ["A House Sign", "Name: Hut", "Owner: Cy",
                     "Condition: This structure is slightly worn."])
@@ -231,9 +238,25 @@ def test_alert_once_then_only_when_worse(m):
     m["_seen"][4]["read_at"] = 0          # due again, same condition
     check("same condition again: silent", m["scan_once"](), 0)
 
+    # Same owner, worse condition: you asked for "only a new owner".
     sign._props[-1] = "Condition: This structure is greatly worn."
     m["_seen"][4]["read_at"] = 0
-    check("worse: alerts again", m["scan_once"](), 1)
+    check("worse, same owner: silent by default", m["scan_once"](), 0)
+    m["ALERT_IF_WORSE"] = True
+    m["_seen"][4]["read_at"] = 0
+    try:
+        check("...unless ALERT_IF_WORSE", m["scan_once"](), 1)
+    finally:
+        m["ALERT_IF_WORSE"] = False
+
+    # New owner at the same spot: alerts, and says so.
+    sign._props[2] = "Owner: Someone Else"
+    m["_seen"][4]["read_at"] = 0
+    m["Misc"].messages = []
+    check("new owner: alerts again", m["scan_once"](), 1)
+    check("...and says it changed hands",
+          any("NEW OWNER" in t and "was cy" in t
+              for t in m["Misc"].messages), True)
 
 
 def test_fine_houses_are_quiet(m):
@@ -242,6 +265,47 @@ def test_fine_houses_are_quiet(m):
                                  "Condition: This structure is like new."])]
     check("no alert", m["scan_once"](), 0)
     check("no beep", m["Misc"].beeps, 0)
+
+
+def test_log_lives_in_its_own_folder_and_survives_a_restart(m):
+    """The log goes in HouseAlerts/ beside the script, and a fresh run reads
+    it back: a house already logged with the same owner stays quiet."""
+    tmp = tempfile.mkdtemp()
+    try:
+        first = load_script(tmp)
+        first["Items"].signs = [Sign(9, [
+            "A House Sign", "Name: Tower", "Owner: Eve",
+            "Condition: This structure is in danger of collapsing."],
+            x=120, y=80)]
+        first["main_known"] = first["load_known"]()
+        check("first run alerts", first["scan_once"](), 1)
+        path = os.path.join(tmp, "HouseAlerts", "house_alerts.txt")
+        check("log written in HouseAlerts/", os.path.isfile(path), True)
+        check("nothing loose beside the script",
+              os.path.isfile(os.path.join(tmp, "house_alerts.txt")), False)
+
+        # A NEW run - new serial even, as after a server restart.
+        second = load_script(tmp)
+        check("the log is read back", second["load_known"](), 1)
+        second["Items"].signs = [Sign(77, [
+            "A House Sign", "Name: Tower", "Owner: Eve",
+            "Condition: This structure is in danger of collapsing."],
+            x=120, y=80)]
+        check("same spot, same owner: silent", second["scan_once"](), 0)
+
+        third = load_script(tmp)
+        third["load_known"]()
+        third["Items"].signs = [Sign(78, [
+            "A House Sign", "Name: Tower", "Owner: Frank",
+            "Condition: This structure is slightly worn."], x=120, y=80)]
+        check("same spot, new owner: alerts", third["scan_once"](), 1)
+
+        fourth = load_script(tmp)
+        check("both owners logged, latest wins",
+              fourth["load_known"]() == 1
+              and fourth["_known"][(1, 120, 80)]["owner"], "frank")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_compass(m):

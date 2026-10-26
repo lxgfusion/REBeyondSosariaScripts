@@ -57,7 +57,7 @@ two must be kept in step.
 | `harvest_runner.py` | `E:\uoclients\UOAlive_Package\razor\Scripts\` |
 | `TameAndFill.py` | `E:\uoclients\RazorEnhanced\Scripts\` |
 | `FillTameDeeds.py` (TameAndFill minus harvest, plus `[ar` round and kill list — **untested in game**, see `docs/fill-tame-deeds-handoff.md`) | `E:\uoclients\RazorEnhanced\Scripts\` |
-| `HouseSignWatch.py` (alerts on slightly/greatly worn and IDOC house signs in range; writes `house_alerts.txt` beside itself — **untested in game**) | `E:\uoclients\RazorEnhanced\Scripts\` |
+| `HouseSignWatch.py` (alerts on slightly/greatly worn and IDOC house signs in range; writes and re-reads `HouseAlerts/house_alerts.txt` beside itself, so a logged house only alerts again for a new owner — **untested in game**) | `E:\uoclients\RazorEnhanced\Scripts\` |
 | `Leatherman.py` | `E:\uoclients\RazorEnhanced\Scripts\` |
 | `sandmaker.py` (lower-case live, `Sandmaker.py` in the repo) | `E:\uoclients\RazorEnhanced\Scripts\` |
 
