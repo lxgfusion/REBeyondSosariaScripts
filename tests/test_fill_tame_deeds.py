@@ -46,12 +46,20 @@ class StubMisc(object):
         self.ignored.append(serial)
 
 
+class Point(object):
+    def __init__(self, x, y):
+        self.X = x
+        self.Y = y
+
+
 class StubPlayer(object):
     Serial = 0x0001A2B3
     Backpack = None
     Hits = 100
     HitsMax = 100
     Mana = 100
+    IsGhost = False
+    Position = Point(100, 100)
 
 
 class Mob(object):
@@ -66,6 +74,7 @@ class Mob(object):
         self.Color = color
         self.Hits = hits
         self.HitsMax = hits_max
+        self.Position = Point(109, 100)
         self._props = props or []
 
 
@@ -255,7 +264,7 @@ def test_kill_upgrades_a_stubborn_arrow_fight(m):
     m["Mobiles"].by_serial[30] = mob
     m["approach"] = lambda *a, **k: True
     m["clear_cursor"] = lambda: True
-    m["Player"].DistanceTo = staticmethod(lambda target: 3)
+    m["Player"].DistanceTo = staticmethod(lambda target: 9)   # KITE_HOLD
 
     def fake_cast(serial, spell, school):
         casts.append(spell)
@@ -495,6 +504,101 @@ def test_wild_unicorn_and_kirin_are_blue_and_still_quarry(m):
           None)
     for name in m["INNOCENT_WILD_SPECIES"]:
         check("%s is a catalogue species" % name, name in m["_species"], True)
+
+
+def test_red_name_is_an_enemy(m):
+    """Savages are human-bodied with random names ("Kuruk") and showed red
+    names in game, and were left alone - no table can place them. A red
+    name (notoriety 6) is now an enemy whatever it is called."""
+    hold_deeds(m, "dragon")
+    v = m["hostile_verdict"]
+    got = v(Mob(80, "Kuruk", 6, 0x190, human=True))
+    check("red-named savage is killed", got is not None, True)
+    check("...size unknown, so the big spell",
+          got and m["pick_spell"](got[1])[0], m["SPELL_BIG"])
+    check("same savage, blue -> left", v(Mob(81, "Kuruk", 1, 0x190,
+                                             human=True)), None)
+    check("red wild dragon we hold a deed for is quarry, not a kill",
+          v(Mob(82, "a dragon", 6, 0x3B)), None)
+    check("red but tagged tame (a murderer's pet) -> left",
+          v(Mob(83, "a horse", 6, 0xE2, props=["a horse", "(tame)"])), None)
+    check("the switch exists and is on", m["KILL_ALL_RED"], True)
+
+
+class Walker(object):
+    """A player who moves one tile per accepted step, with walls."""
+
+    def __init__(self, m, x=100, y=100, blocked=()):
+        self.m = m
+        self.pos = Point(x, y)
+        self.blocked = set(blocked)
+        self.steps = []
+        m["Player"].Position = self.pos
+
+    DELTA = {"North": (0, -1), "Right": (1, -1), "East": (1, 0),
+             "Down": (1, 1), "South": (0, 1), "Left": (-1, 1),
+             "West": (-1, 0), "Up": (-1, -1)}
+
+    def run(self, direction, *rest):
+        dx, dy = self.DELTA[direction]
+        nx, ny = self.pos.X + dx, self.pos.Y + dy
+        self.steps.append(direction)
+        if (nx, ny) in self.blocked:
+            return False
+        self.pos.X, self.pos.Y = nx, ny
+        return True
+
+
+def chebyshev(a, b):
+    return max(abs(a.X - b.X), abs(a.Y - b.Y))
+
+
+def test_never_pathfinds_into_a_hostile(m):
+    """approach() pathfinds to the tile BESIDE the creature and does not stop
+    on the way - that ran the tamer into what it meant to shoot. Closing in
+    on something standing still now goes a step at a time and stops at
+    KITE_HOLD."""
+    w = Walker(m, 100, 100)
+    mob = Mob(84, "an ettin", 3, 0x12)
+    mob.Position = Point(114, 100)                # 14 tiles east, standing
+    m["Mobiles"].by_serial[84] = mob
+    m["Player"].Run = staticmethod(w.run)
+    m["Player"].DistanceTo = staticmethod(
+        lambda target: chebyshev(w.pos, target.Position))
+
+    def no_pathfinder(*a, **k):
+        raise AssertionError("pathfinder used to reach a hostile")
+    m["approach"] = no_pathfinder
+    check("got into range", m["get_in_range"](84, "ettin"), True)
+    check("stopped at KITE_HOLD, not beside it",
+          chebyshev(w.pos, mob.Position), m["KITE_HOLD"])
+
+
+def test_backs_off_when_too_close(m):
+    """Something 3 tiles off: step away first, and if straight back is a
+    wall, step to either side of straight back."""
+    w = Walker(m, 100, 100, blocked=[(99, 100)])   # wall directly west
+    mob = Mob(85, "an ettin", 3, 0x12)
+    mob.Position = Point(103, 100)                 # 3 tiles east
+    m["Player"].Run = staticmethod(w.run)
+    check("found a way back", m["step_away_from"](mob), True)
+    check("tried straight back first", w.steps[0], "West")
+    check("...then a side step, still further away",
+          chebyshev(w.pos, mob.Position) > 3, True)
+
+    # enforce_distance holds the far edge: at 9 nothing moves.
+    w2 = Walker(m, 100, 100)
+    mob2 = Mob(86, "an ettin", 3, 0x12)
+    mob2.Position = Point(109, 100)
+    m["Mobiles"].by_serial[86] = mob2
+    m["Player"].Run = staticmethod(w2.run)
+    m["Player"].DistanceTo = staticmethod(
+        lambda target: chebyshev(w2.pos, target.Position))
+    m["enforce_distance"](86)
+    check("at KITE_HOLD it stands still", w2.steps, [])
+    mob2.Position = Point(105, 100)                # it closed to 5
+    m["enforce_distance"](86)
+    check("closer than KITE_HOLD -> one step away", w2.steps, ["West"])
 
 
 def test_house_wall_is_given_up_on(m):

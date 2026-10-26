@@ -1,7 +1,7 @@
 # FillTameDeeds — handoff
 
 `Scripts/FillTameDeeds.py`, live at `E:\uoclients\RazorEnhanced\Scripts\`.
-Current version `2026-10-25.5`. **Not yet run in game.**
+Current version `2026-10-25.6`. **Not yet run in game.**
 
 ## What it is
 
@@ -112,9 +112,34 @@ makes them blue (1) while wild. Colour cannot tell a pet from those.
   `INNOCENT_WILD_SPECIES = ["ki-rin", "unicorn"]`. A blue horse whose tooltip
   has not loaded is still left alone.
 
+## 2026-10-25.6: keep distance, and red names are enemies
+
+**It ran straight into what it meant to shoot.** `get_in_range()` called
+`approach()`, whose pathfinder (`PathFinding.Go` to `approach_tile`) walks
+to the tile beside the creature and does not stop on the way. Now it uses
+COVFarm's positioning, moved out to spell range:
+
+- `KITE_HOLD = 9`, one tile inside `SPELL_RANGE`, is where it stands.
+  `enforce_distance` steps away when closer and toward when further.
+- Under `KITE_MIN = 6` it backs off before casting anything.
+  `step_away_from` tries straight back, then either side, so a wall behind
+  you does not end the kite.
+- The distance is held in `KITE_TICK_MS = 150` slices while the cursor is
+  coming (`wait_for_cursor`), during the 400 ms settle, after a cast lands,
+  while recovering, and while waiting for mana.
+- Closing in on something standing still is `close_in()`, one step at a
+  time, stopping at `KITE_HOLD`. The pathfinder is never used on a hostile.
+
+**Red-named savages were ignored.** They are human-bodied with random names,
+so no table could place them. `KILL_ALL_RED = True` makes any red name
+(notoriety 6, the name colour, not the creature's hue) an enemy. Spared: deed
+species (a wild dragon is red and is quarry), tame/bonded/summoned tags and
+`KILL_NEVER_WORDS`. This includes red players (murderers). Size is unknown,
+so they get Energy Bolt.
+
 ## To check on the first run
 
-1. Banner `FillTameDeeds v2026-10-25.5`.
+1. Banner `FillTameDeeds v2026-10-25.6`.
 2. `N spot(s) in FillTameDeeds: ...`. If not found, read the folder list.
 3. First kill: is the spell right for the size?
 4. Whether `IsHuman` and `IgnorePets` behave on this shard (both are new

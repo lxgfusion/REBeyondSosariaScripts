@@ -83,7 +83,7 @@ import time
 # loaded script even after the file on disk changes, and two debugging rounds
 # have already been spent on a bug that was fixed on disk but not in the folder
 # Razor reads. If this line does not say what you expect, hit Reload.
-SCRIPT_VERSION = "2026-10-25.5"
+SCRIPT_VERSION = "2026-10-25.6"
 
 
 # =============================================================================
@@ -506,8 +506,31 @@ SPELL_RANGE = 10
 
 # Something hostile outside SPELL_RANGE that is COMING is waited for rather
 # than walked to - it does the closing and you get the first shot. Up to this
-# long; after that it is approached, but only to SPELL_RANGE.
+# long; after that it is approached, a step at a time, only to KITE_HOLD.
 KILL_WAIT_FOR_MS = 4000
+
+# ---------------------------------------------------------------------------
+# KEEPING YOUR DISTANCE - the band COVFarm holds, at spell range
+#
+# The same scheme as COVFarm.py's POSITIONING section, with the band moved
+# out to where these spells reach:
+#
+#   closer than KITE_MIN  -> step AWAY before anything else, no casting
+#   further than KITE_HOLD -> step TOWARD it, one step at a time
+#   KITE_HOLD is where you STAND: the far edge, one tile inside SPELL_RANGE
+#
+# Holding the far edge rather than reacting at the floor is COVFarm's lesson:
+# against something as fast as you, waiting until the floor is breached
+# leaves the gap a tile inside it for the whole fight. And it is held all the
+# time - while the cast's cursor is coming, during the settle, between casts,
+# waiting for mana - in KITE_TICK_MS slices, never one long blocking wait.
+#
+# NEVER the pathfinder. PathFinding.Go walks to the tile NEXT TO the creature
+# and does not stop on the way; that is what ran the tamer straight into
+# whatever it was meant to be shooting (2026-10-25.5 and before).
+KITE_HOLD = 9
+KITE_MIN = 6
+KITE_TICK_MS = 150
 
 # The two spells. Magic Arrow is what UO calls "magic missile".
 SPELL_SMALL = "Magic Arrow"
@@ -564,6 +587,18 @@ KILL_NOTORIETY = [3, 4, 5, 6]
 # lizardmen, daemons) are acted on only at these notorieties. Their name
 # cannot be checked, so the red flag has to agree with the body.
 KILL_BODY_NOTORIETY = [6]
+
+# A RED NAME IS AN ENEMY - killed whatever it is called. Your rule,
+# 2026-10-25: savages showed red names and were left alone, because they
+# are human-bodied with random personal names ("Kuruk"), so neither the name
+# tables nor the body table can place them.
+#
+# "Red" is the NAME colour - notoriety 6, murderer - not the creature's hue.
+# Still spared: a species you hold an unfilled deed for (a wild dragon is red
+# too, and it is quarry), anything tagged tame/bonded/summoned, and
+# KILL_NEVER_WORDS. NOTE this includes red PLAYERS - murderers - who are
+# fair game under the rules; set False if you would rather they were not.
+KILL_ALL_RED = True
 
 # PARAGONS ARE NEVER TAMED - they cannot be. Some spawns roll one now and
 # then; recognised by "(Paragon)" in the tooltip or the paragon hue.
@@ -2423,7 +2458,9 @@ def cast_at(serial, spell, school):
     # noshow is FALSE deliberately. True hides the cursor from the client, so
     # a cursor the server refuses stays open where the player cannot see it,
     # and every target they click afterwards is silently eaten by it.
-    if not Target.WaitForTarget(3000, False):
+    # Sliced, holding the distance between slices - the creature keeps
+    # walking while the spell is being cast.
+    if not wait_for_cursor(serial, 3000):
         Target.Cancel()
         said = journal_since(mark)
         if _said(said, SPELL_DISTURBED):
@@ -2435,7 +2472,9 @@ def cast_at(serial, spell, school):
         if _said(said, SPELL_NO_MANA):
             return "mana"
         return "nocursor"
-    Misc.Pause(400)
+    # The settle the deed and cast sequences both need (CLAUDE.md), kept -
+    # but held at distance rather than stood still for.
+    kite_pause(serial, 400)
     Target.TargetExecute(serial)
 
     # The creature can die between the cursor arriving and this landing, in
@@ -3169,6 +3208,10 @@ def hostile_verdict(mob):
                     entry = HOSTILE_BODIES.get(int(mob.Body))
                     if entry is not None and notoriety in KILL_BODY_NOTORIETY:
                         verdict = (entry[0], entry[1])
+                if verdict is None and KILL_ALL_RED and notoriety == 6:
+                    # Red name, nothing else known about it. Size unknown,
+                    # so SPELL_UNKNOWN_IS_BIG picks the spell.
+                    verdict = (name or "red 0x%X" % int(mob.Body), None)
                 if verdict is not None and is_paragon(mob):
                     # Hostile AND a paragon: still killed, but sized up first
                     # so the spell is picked for what it really is.
@@ -3273,8 +3316,108 @@ def too_hurt():
     return ESCAPE_ENABLED and player_health_pct() < ESCAPE_HITS_PCT
 
 
-def wait_for_mana(need, timeout_ms=None):
-    """Stand until there is mana for one cast. False if it never comes."""
+_DIRECTIONS = ["North", "Right", "East", "Down", "South", "Left", "West",
+               "Up"]
+
+
+def step_away_from(mob):
+    """One step directly away from it - or, if that is blocked, either side of
+    directly away. True if we moved.
+
+    The side steps matter: backing straight into a wall or a tree is the
+    usual way a kite stops working, and the tile at 45 degrees is nearly as
+    good for distance.
+    """
+    dx = Player.Position.X - mob.Position.X
+    dy = Player.Position.Y - mob.Position.Y
+    if dx == 0 and dy == 0:
+        dx = 1                          # standing on it; any way out will do
+    first = direction_to(dx, dy)
+    i = _DIRECTIONS.index(first)
+    for direction in (first, _DIRECTIONS[(i + 1) % 8],
+                      _DIRECTIONS[(i - 1) % 8]):
+        before = (Player.Position.X, Player.Position.Y)
+        move(direction)
+        if (Player.Position.X, Player.Position.Y) != before:
+            return True
+    return False
+
+
+def enforce_distance(serial):
+    """One correction step towards KITE_HOLD. False if it is gone or we died.
+
+    COVFarm's enforce_distance: safe to call in the middle of anything - it
+    only ever takes a single step, and does nothing once the gap is right.
+    """
+    if Player.IsGhost:
+        return False
+    mob = Mobiles.FindBySerial(serial)
+    if mob is None:
+        return False
+    gap = Player.DistanceTo(mob)
+    if gap < KITE_HOLD:
+        step_away_from(mob)
+    elif gap > KITE_HOLD:
+        step_toward(mob)
+    return True
+
+
+def kite_pause(serial, milliseconds):
+    """Wait, holding the distance the whole time. False if it is gone."""
+    deadline = time.time() + max(0, milliseconds) / 1000.0
+    while time.time() < deadline:
+        if not enforce_distance(serial):
+            return False
+        Misc.Pause(KITE_TICK_MS)
+    return True
+
+
+def wait_for_cursor(serial, timeout_ms):
+    """Wait for the target cursor WITHOUT standing still for it.
+
+    Target.WaitForTarget blocks, so asking it for the whole timeout at once
+    leaves the distance unmanaged for seconds. Short slices, a correction
+    between each - straight from COVFarm.
+    """
+    deadline = time.time() + max(0, timeout_ms) / 1000.0
+    while time.time() < deadline:
+        if Target.WaitForTarget(KITE_TICK_MS, False):
+            return True
+        enforce_distance(serial)
+    return bool(Target.HasTarget())
+
+
+def close_in(serial, timeout_ms=None):
+    """Step towards it until it is within KITE_HOLD. One step at a time, so
+    it stops the moment it is close enough - never the pathfinder."""
+    if timeout_ms is None:
+        timeout_ms = APPROACH_TIMEOUT
+    deadline = time.time() + timeout_ms / 1000.0
+    stuck = 0
+    while time.time() < deadline:
+        mob = Mobiles.FindBySerial(serial)
+        if mob is None:
+            return False
+        if Player.DistanceTo(mob) <= KITE_HOLD:
+            return True
+        before = (Player.Position.X, Player.Position.Y)
+        step_toward(mob)
+        Misc.Pause(MOVE_PAUSE)
+        if (Player.Position.X, Player.Position.Y) == before:
+            stuck += 1
+            if stuck >= STUCK_LIMIT:
+                return False
+        else:
+            stuck = 0
+    return False
+
+
+def wait_for_mana(need, timeout_ms=None, serial=None):
+    """Wait until there is mana for one cast. False if it never comes.
+
+    With `serial`, the distance to that creature is held while waiting -
+    standing still for mana is exactly when something walks up and hits you.
+    """
     if timeout_ms is None:
         timeout_ms = KILL_MANA_WAIT_MS
     deadline = time.time() + timeout_ms / 1000.0
@@ -3290,7 +3433,10 @@ def wait_for_mana(need, timeout_ms=None):
         if not said:
             said = True
             log("Waiting for mana (%s of %s needed)." % (Player.Mana, need))
-        Misc.Pause(500)
+        if serial is not None:
+            kite_pause(serial, 500)
+        else:
+            Misc.Pause(500)
     log("Still no mana after %ds." % (timeout_ms / 1000), HUE_WARN)
     return False
 
@@ -3299,9 +3445,10 @@ def get_in_range(serial, label):
     """Be within SPELL_RANGE of it, without walking in further. True if so.
 
     Something coming at you is WAITED FOR - it closes the gap and you get the
-    first shot. Only something that is staying put is walked to, and only
-    until it is in range. Walking in to point blank is what let monsters
-    reach you and break casts with their first hit.
+    first shot. Only something that is staying put is walked to, a step at a
+    time and only to KITE_HOLD (close_in). This used to call approach(),
+    whose pathfinder walks to the tile beside the creature: the tamer ran
+    straight into what it was meant to shoot.
     """
     mob = Mobiles.FindBySerial(serial)
     if mob is None:
@@ -3324,7 +3471,7 @@ def get_in_range(serial, label):
             break                   # not coming - go to it
         last = gap
 
-    approach(serial, SPELL_RANGE, SPELL_RANGE)
+    close_in(serial)
     mob = Mobiles.FindBySerial(serial)
     return mob is not None and Player.DistanceTo(mob) <= SPELL_RANGE
 
@@ -3372,6 +3519,16 @@ def kill(serial, label, hits):
             log("%s is down after %d cast(s)." % (label, casts), HUE_GOOD)
             return "dead"
 
+        # TOO CLOSE: back off before anything else. A cast started with it
+        # beside you is a cast its first swing breaks.
+        if Player.DistanceTo(mob) < KITE_MIN:
+            if not step_away_from(mob):
+                debug("%s is close and there is nowhere to back off to - "
+                      "casting anyway." % label, HUE_WARN)
+            else:
+                Misc.Pause(MOVE_PAUSE)
+                continue
+
         if Player.DistanceTo(mob) > SPELL_RANGE:
             if not get_in_range(serial, label):
                 if Mobiles.FindBySerial(serial) is None:
@@ -3393,7 +3550,7 @@ def kill(serial, label, hits):
                     HUE_WARN)
                 spell, mana = SPELL_BIG, SPELL_BIG_MANA
 
-        if not wait_for_mana(mana):
+        if not wait_for_mana(mana, serial=serial):
             if too_hurt():
                 return "escape"
             Misc.IgnoreObject(serial)
@@ -3406,7 +3563,7 @@ def kill(serial, label, hits):
             interrupts = 0
             if spell == SPELL_SMALL:
                 small_casts += 1
-            Misc.Pause(KILL_LAND_MS)
+            kite_pause(serial, KILL_LAND_MS)
             continue
         if outcome == "interrupted":
             interrupts += 1
@@ -3418,7 +3575,7 @@ def kill(serial, label, hits):
                 return "gave up"
             continue                        # no pause: recast now
         if outcome == "recovering":
-            Misc.Pause(KILL_RECOVER_MS)
+            kite_pause(serial, KILL_RECOVER_MS)
             continue
         if outcome in ("unseen", "far"):
             # Aimed and refused. Step in a little - but no closer than the
