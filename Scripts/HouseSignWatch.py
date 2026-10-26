@@ -7,7 +7,7 @@ For Razor Enhanced (IronPython 3.4). Target: RunUO/ServUO-derived freeshard.
 Run it and go about your business. Every few seconds it looks at the house
 signs within range and reads each one's condition. A house that is
 
-    Slightly Worn  /  Greatly Worn  /  In Danger Of Collapse
+    Slightly Worn  /  Somewhat Worn  /  Greatly Worn  /  In Danger Of Collapse
 
 gets an alert: a coloured line in your journal with the house's name,
 owner, coordinates and which way it is from you, a marker over the sign
@@ -42,7 +42,7 @@ import time
 # Printed as the first line at startup. Razor CACHES the loaded script even
 # after the file changes - if this is not the version you expect, hit Reload
 # in the Scripting tab.
-SCRIPT_VERSION = "2026-10-26.2"
+SCRIPT_VERSION = "2026-10-26.3"
 
 
 # =============================================================================
@@ -60,8 +60,13 @@ SCRIPT_VERSION = "2026-10-26.2"
 #
 # "danger of collaps" catches both the tooltip's "in danger of collapsing"
 # and anything a shard rewords to "collapse".
+#
+# KEEP THEM IN DECAY ORDER, mildest first - the row's position is how "worse"
+# is judged (ALERT_IF_WORSE). Fairly Worn (1043013) sits between Somewhat
+# and Greatly and is not on the list; add it here, in order, if wanted.
 ALERT_CONDITIONS = [
     ("slightly worn",     "Slightly Worn",          1043011),
+    ("somewhat worn",     "Somewhat Worn",          1043012),
     ("greatly worn",      "Greatly Worn",           1043014),
     ("danger of collaps", "In Danger Of Collapse",  1043015),
 ]

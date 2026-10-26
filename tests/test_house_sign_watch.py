@@ -167,15 +167,17 @@ def test_conditions_from_the_tooltip(m):
     t = m["tidy"]
     check("slightly", c(t("Condition: This structure is slightly worn.")),
           ("Slightly Worn", 0))
+    check("somewhat", c(t("Condition: This structure is somewhat worn.")),
+          ("Somewhat Worn", 1))
     check("greatly", c(t("Condition: This structure is greatly worn.")),
-          ("Greatly Worn", 1))
+          ("Greatly Worn", 2))
     check("collapsing",
           c(t("Condition: This structure is in danger of collapsing.")),
-          ("In Danger Of Collapse", 2))
+          ("In Danger Of Collapse", 3))
     check("unresolved cliloc argument",
           c(t("Condition: This structure is #1043015")),
-          ("In Danger Of Collapse", 2))
-    for fine in ("like new", "somewhat worn", "fairly worn", "ageless"):
+          ("In Danger Of Collapse", 3))
+    for fine in ("like new", "fairly worn", "ageless"):
         check("%s does not alert" % fine,
               c(t("Condition: This structure is %s." % fine)), None)
     check("demolition pending is off by default",
@@ -186,7 +188,7 @@ def test_run_together_tooltip(m):
     """Properties can arrive concatenated: "Owner: BobCondition: ..."."""
     t = m["tidy"]("Name: Bob's PlaceOwner: BobCondition: This structure is "
                   "greatly worn.")
-    check("still found", m["condition_of"](t), ("Greatly Worn", 1))
+    check("still found", m["condition_of"](t), ("Greatly Worn", 2))
 
 
 def test_shop_signs_are_not_houses(m):
@@ -199,6 +201,15 @@ def test_shop_signs_are_not_houses(m):
     check("house read", info and info["condition"], "Slightly Worn")
     check("name", info and info["name"], "seaside villa")
     check("owner", info and info["owner"], "bob")
+
+
+def test_conditions_are_in_decay_order(m):
+    """The row's position is how "worse" is judged, so the list must run
+    mildest to worst - checked against ServUO's DecayLevel clilocs."""
+    clilocs = [c for _w, _l, c in m["ALERT_CONDITIONS"]]
+    check("ascending clilocs", clilocs, sorted(clilocs))
+    check("somewhat worn is on the list",
+          "Somewhat Worn" in [l for _w, l, _c in m["ALERT_CONDITIONS"]], True)
 
 
 def test_sign_graphics(m):
