@@ -57,6 +57,7 @@ two must be kept in step.
 | `harvest_runner.py` | `E:\uoclients\UOAlive_Package\razor\Scripts\` |
 | `TameAndFill.py` | `E:\uoclients\RazorEnhanced\Scripts\` |
 | `FillTameDeeds.py` (TameAndFill minus harvest, plus `[ar` round and kill list — **untested in game**, see `docs/fill-tame-deeds-handoff.md`) | `E:\uoclients\RazorEnhanced\Scripts\` |
+| `HouseSignWatch.py` (alerts on slightly/greatly worn and IDOC house signs in range; writes `house_alerts.txt` beside itself — **untested in game**) | `E:\uoclients\RazorEnhanced\Scripts\` |
 | `Leatherman.py` | `E:\uoclients\RazorEnhanced\Scripts\` |
 | `sandmaker.py` (lower-case live, `Sandmaker.py` in the repo) | `E:\uoclients\RazorEnhanced\Scripts\` |
 
@@ -483,6 +484,10 @@ python tests/test_extract_re_api.py
 
 ```bash
 python tests/test_fill_tame_deeds.py
+```
+
+```bash
+python tests/test_house_sign_watch.py
 ```
 
 No Razor runtime needed. `tests/test_tame_animals.py` reads the script, strips
