@@ -302,6 +302,15 @@ it is shown to be in a part neither fork touched.
   pre-startup lines are ignored, matching can be case-insensitive, and other
   features' journal state is left alone. Reserve `Search`/`Clear` for
   "I just did X, what happened".
+- **To act on something the PLAYER did, require the server's word for it, and
+  spend it.** Client state alone is not evidence: `Player.Pets` says an animal
+  is yours, not that you have just tamed it, so a script that fills taming deeds
+  off that list will eventually eat the pet which was out of range at startup
+  and wandered back. `ManualTameAndFill.py` banks one **credit** per
+  taming-success line in the journal and spends it on one fill — so a pet
+  whose message was spoken and spent long ago cannot be touched, and a snapshot
+  of what was already yours at startup is the belt to that braces. Spend the
+  credit **after** the action succeeds, never before, or a retry is stranded.
 - **Player-typed trigger phrases must match case-insensitively.** A phrase a human
   types into chat will vary in capitalisation and punctuation every time.
 - **Chat lines carry the speaker inside the text.** Global chat arrives as
@@ -671,10 +680,25 @@ Keep a regression assertion for every bug found in-game (e.g. "concatenated
 tooltip text does not match", "old `RootContainer == Player.Serial` test fails").
 Those two were silent failures — the script reported no deeds and looked healthy.
 
-Beyond the tests, before handing a script over, re-read it for: unbounded loops,
-missing `Misc.Pause`, journal reads without a preceding `Journal.Clear()`, and any
-hardcoded serial or item ID.
+Where a script's promise is that it does **not** do something, test the absence
+rather than the presence. `tests/test_manualtameandfill.py` holds
+`ManualTameAndFill.py` to an **allowlist of Razor API calls** read off the
+shipped source: it may say `Items.UseItem` exactly once and
+`Target.TargetExecute` exactly once, both inside `deed_attempt`, and anything
+outside the list fails the suite by name. The parent's hunting and combat
+functions are checked **absent**, not merely unreachable — a fork that keeps
+a dead `approach()` is one edit from calling it — and a reachability sweep
+from `main()` fails on any function nothing calls, so dead code cannot sit there
+waiting to be revived.
 
-There is no offline harness — scripts are verified in-client. Before handing a
-script over, re-read it for: unbounded loops, missing `Misc.Pause`, journal
-reads without a preceding `Journal.Clear()`, and any hardcoded serial or item ID.
+Prove the suite bites before trusting it: break each claim in turn, run the
+tests, restore the file and compare its SHA-256. **And wrap each test so one
+exception cannot abort the run.** A mutation that put a `Player.Run` into
+`ManualTameAndFill.py` was "caught" only because an unrelated stub raised first
+and killed the suite before the allowlist check ran. The exit code was 1 either
+way, which is exactly how that goes unnoticed.
+
+The tests do not replace running it. Nothing here drives a Razor client, so a
+script is only ever confirmed in-client; before handing one over, re-read it
+for: unbounded loops, missing `Misc.Pause`, journal reads without a preceding
+`Journal.Clear()`, and any hardcoded serial or item ID.

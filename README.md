@@ -9,6 +9,7 @@ at a RunUO/ServUO-derived freeshard.
 | Script | What it does |
 |---|---|
 | [`Scripts/TameAndFill.py`](Scripts/TameAndFill.py) | Reads the taming order deeds in your pack and hunts only those species. Walks to each one, tames it, and puts it in the deed for its species. |
+| [`Scripts/ManualTameAndFill.py`](Scripts/ManualTameAndFill.py) | **You tame, it fills.** A fork of `TameAndFill` with everything that moves your character or targets a creature taken out: no hunting, no walking, no casting, no recall, no butchering. It stands still, reads your journal, and when *you* tame something it works out which species it was and puts it in that species' deed. Nothing is filled without an unspent taming-success line from the journal, so a pet you have had for a year cannot be fed to a deed by walking back into range — and everything already yours at startup is snapshotted out of reach regardless. |
 | [`Scripts/COVFarm.py`](Scripts/COVFarm.py) | **Camps the Slasher of Veils, kills it from range, and loots it.** Waits for the spawn, opens with Wildfire, then holds 4-5 tiles while spamming Nether Blast — the standoff is enforced mid-cast, not just between casts. Confirms the kill with a *corpse* rather than the monster vanishing, walks onto it, says `[grab`, and returns to the starting spot for the next spawn. Breaks off below a configurable health percentage. |
 | [`Scripts/petcommandcenter2.py`](Scripts/petcommandcenter2.py) | **Deploy and shrink your pets by speaking a phrase.** Say one phrase to release every pet statue in your pack and issue the guard command; say another to shrink the nearest pets back in. Set `SETUP_MODE = True` and it walks you through targeting your statues and shrink tool, then prints a finished config block to paste in — no reading item IDs out of the inspector. |
 | [`Scripts/harvest_runner.py`](Scripts/harvest_runner.py) | **Mining + lumberjacking on one script.** Account-runebook travel, per-job rune routes, smelting, drop-off runs, vendor rounds, meditation-backed mana, and the Greyskull call-out. |
@@ -176,6 +177,68 @@ and journal at each step.
 - It does not fight. Creatures that need to be subdued first are skipped.
 - Ruled-out creatures go on Razor's global ignore list. `Misc.ClearIgnore()` or a
   restart resets it.
+
+## `ManualTameAndFill.py`
+
+A fork of `TameAndFill.py` for taming by hand. **You tame. It fills.** That is
+the whole script: it does not hunt, walk, chase, cast, recall, peacemake,
+attack, loot or butcher, and it never targets a wild animal.
+
+### How a fill happens
+
+1. A taming-success line arrives in your journal — *"It seems to accept you
+   as master."*, or *"That wasn't even challenging."* for something you have
+   owned before. That banks one **credit**.
+2. The animal is found: from the client's own pet list, or, when that has not
+   caught up yet, by reading the tooltips of controlled creatures within
+   `TAME_SCAN_RANGE`. The tooltip scan only runs while a credit is waiting, so
+   it costs nothing when you are not taming.
+3. Its **name** is matched against the same catalogue of 112 species the parent
+   uses, and its body value has to agree with the name.
+4. That species' deed is read out of your pack, double-clicked, and the animal
+   targeted. The credit is spent — but only once the fill has gone through,
+   so an attempt that misses can be retried.
+
+### What it will never touch
+
+- **Anything already yours** when it started. Your pets, and anything already
+  tame standing near you, are snapshotted out of reach before it reads a single
+  journal line.
+- **Your mount.**
+- Anything named in `KEEP_NAME_WORDS`, or listed in `NEVER_FILL_SERIALS`.
+  Renaming a keeper is the only guard that survives a restart, so it is the one
+  to use for animals you would be upset to lose.
+- Anything whose name does not match a species you hold a deed for.
+- Anything whose name and body value disagree.
+
+**Nothing is filled without a credit**, which is what stops an old pet of yours
+being deeded: its taming line was spoken and spent long ago. That includes the
+case a simple "is this new in the client's pet list?" test gets wrong — the
+pet that was out of range at startup and wanders back an hour later. See
+`REQUIRE_TAME_CREDIT`; turning it off is reported in red at startup.
+
+If it hears the tame and then does nothing, it says why, once per animal and per
+reason: no deed for that species, too far away, the name will not load, or a
+keep-word matched.
+
+### Differences from the parent
+
+- `SKIP_ABOVE_SKILL` is **False** here. The parent skips species it has not the
+  skill to tame, because it is the one doing the taming; you are, and an animal
+  standing in front of you already tamed settles the question.
+- No body-value index is built. Nothing is searched for, so there is nothing to
+  index.
+- It puts nothing on Razor's ignore list, for the same reason.
+- It still clears your journal on each fill — that is how the deed's result
+  is read — but it drains new lines immediately beforehand, so a tame that
+  lands mid-fill is still counted.
+
+The file is assembled from the parent by a builder rather than hand-copied, so
+the animal catalogue, the deed tooltip parser and the confirmed-working deed
+target sequence are carried over byte-for-byte.
+`tests/test_manualtameandfill.py` holds the suite, including a check that the
+script only ever calls a fixed allowlist of Razor methods — adding a
+`Player.Run` to it fails the tests.
 
 ## `harvest_runner.py`
 
