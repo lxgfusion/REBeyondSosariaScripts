@@ -1211,8 +1211,16 @@ def consider(serial):
     spend_credit()
     _filled[0] += 1
     rescan("after a fill")
-    log("%s is in its taming order%s. %d filled this run."
-        % (name, deed_status(name), _filled[0]), HUE_GOOD)
+    # add_to_deed() has already said the animal went in. This says only what
+    # that line does not: where the deed has got to, and the running count.
+    if name in _active:
+        log("%s deed%s -- %d filled this run."
+            % (name, deed_status(name), _filled[0]), HUE_GOOD)
+    else:
+        # It dropped out of the list in that rescan, so it is full now or the
+        # shard consumed it. Worth saying, rather than showing as a blank.
+        log("The %s deed is done -- %d filled this run."
+            % (name, _filled[0]), HUE_GOOD)
     return "filled"
 
 # =============================================================================
