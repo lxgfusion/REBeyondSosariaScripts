@@ -15,7 +15,7 @@ at a RunUO/ServUO-derived freeshard.
 | [`Scripts/harvest_runner.py`](Scripts/harvest_runner.py) | **Mining + lumberjacking on one script.** Account-runebook travel, per-job rune routes, smelting, drop-off runs, vendor rounds, meditation-backed mana, and the Greyskull call-out. |
 | [`Scripts/mining_runner.py`](Scripts/mining_runner.py) | Superseded by `harvest_runner.py`. Kept as a working fallback until the integrated script is confirmed in-game — delete it once it is. |
 | [`Scripts/resource_order_runner.py`](Scripts/resource_order_runner.py) | **Fills resource orders.** Counts the chest's ingots by hue, takes orders it can afford out of the book, fills them, then recalls to `RO > RO` and drags the completed deeds to the Resource Gatherer. Keeps 100 of each metal behind. Confirmed end-to-end in game. |
-| [`Scripts/RuneCraftAndStore.py`](Scripts/RuneCraftAndStore.py) | **Crafts rune-crafting runes and stores them. Applies nothing.** A modified version of [Omniwrath's Omni Runecrafting](https://github.com/Omniwrath/beyond-sosaria-runecrafting) cut down to one job: stocking the storage key. Pick an equipment slot, type the properties and target values you want on that kind of item, and it sizes the batch for **fifty** of them — the count is assumed, not read off your backpack, so you do not need to own the gear you are stocking for. It crafts that many runes, puts them in the `Runecrafting Storage` key, and stops; no item of yours is ever at risk, and no Perk Deed is spent. Runes already in the key are counted first, so running it twice does not craft the batch twice. **GPL-3.0 like its upstream** — see the file header. |
+| [`Scripts/RuneCraftAndStore.py`](Scripts/RuneCraftAndStore.py) | **Crafts rune-crafting runes and stores them. Applies nothing.** A modified version of [Omniwrath's Omni Runecrafting](https://github.com/Omniwrath/beyond-sosaria-runecrafting) cut down to one job: stocking the storage key. Pick an equipment slot, type the properties and target values you want on that kind of item, and it sizes the batch for **as many of them as you say** — type the number into the box under the slot picker's grid, 50 to start with — and that one number covers every piece on that screen. The count is assumed, not read off your backpack, so you do not need to own the gear you are stocking for. It crafts that many runes, puts them in the `Runecrafting Storage` key, and stops; no item of yours is ever at risk, and no Perk Deed is spent. Runes already in the key are counted first, so running it twice does not craft the batch twice. **GPL-3.0 like its upstream** — see the file header. |
 
 ## A note on the diagnostics
 
@@ -732,11 +732,27 @@ runs upstream's own simulation to work out how many runes that gear would
 consume — then crafts them, puts them in the `Runecrafting Storage` key,
 and stops.
 
-### The fifty is an assumption
+### How many items — you type it, on the slot picker
 
-The batch is sized for **50 items** of the slot you picked, each starting
-with none of the properties you asked for. That number is `ASSUMED_ITEM_COUNT`
-near the bottom of the file.
+The batch is sized for a **number of pieces you set**, each starting with
+none of the properties you asked for. Type it in the box under the slot
+picker's grid:
+
+```
+Stocking for [ 200 ] of every piece above
+```
+
+**One number, every piece.** It is not per slot — the same figure sizes
+Head, Weapon, Cloak and the rest, and each cell's own `x200` label reads it
+too, so the screen cannot disagree with itself. It is **remembered between
+runs**, in `RuneCraftAndStore/Setup.txt` beside the script, and saved the
+moment you press anything — a cell, Settings or Close — so 200 one
+day and 50 the next costs two keystrokes instead of a file edit.
+
+A fresh copy starts at 50 (`ASSUMED_ITEM_COUNT`). The box takes 1 to
+`STOCK_ITEM_COUNT_MAX` (1000) and **refuses anything else out loud** rather
+than rounding it into range, because the whole bill is linear in this number
+and a silently-honoured typo is the expensive way to find that out.
 
 Nothing searches your backpack. That is deliberate and it is the point of the
 script: you are stocking runes for gear you have not got yet, and sizing the
@@ -747,7 +763,7 @@ screen is the count you asked for, whatever you own.
 The cost is exactly linear in it. Measured against the script's own
 simulation (target 100, a 3—9 gain property): 14.8 runes per item at
 every pool size from 1 to 100. So this is a batch-size dial, not a tuning
-parameter — 50 makes 2.5x what 20 did, for 2.5x the stone.
+parameter — 200 makes four times what 50 does, for four times the stone.
 
 Runes already in the key, and any in your pack, are **subtracted before
 anything is crafted**, so running it twice against the same gear does not

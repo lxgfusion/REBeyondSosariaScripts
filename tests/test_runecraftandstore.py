@@ -254,9 +254,16 @@ def main():
         # SUPPOSED to differ.
         check("nothing of the fork's was lost",
               sorted(set(fork_funcs) - set(funcs)), [])
-        check("and it adds exactly the two store functions",
+        # FOUR NOW (2026-11-09). stock_item_count() and
+        # remember_typed_item_count() are the typed item count, which the
+        # fork has no use for: it works on gear you really own, so the
+        # number of pieces is however many it found. Listed here rather
+        # than loosened to a subset check, so the next thing that appears
+        # on one side and not the other still has to be acknowledged.
+        check("and it adds exactly the store and dial functions",
               sorted(set(funcs) - set(fork_funcs)),
-              ["prepare_and_store_one_stat", "runes_already_held"])
+              ["prepare_and_store_one_stat", "remember_typed_item_count",
+               "runes_already_held", "stock_item_count"])
         check("which is nearly all of it shared", len(shared),
               len(fork_funcs))
     else:
@@ -276,7 +283,7 @@ def main():
 
     print()
     print("=" * 96)
-    print("5. IT DOES NOT NEED THE GEAR - 50 assumed items, always")
+    print("5. IT DOES NOT NEED THE GEAR - as many stand-ins as you asked for")
     print("=" * 96)
 
     # SHADOWING IS THE MECHANISM, so the order of definition IS the
@@ -285,8 +292,8 @@ def main():
     for node in load(SCRIPT).body:
         if isinstance(node, ast.FunctionDef):
             at.setdefault(node.name, []).append(node.lineno)
-    for name in ("find_slot_items", "snapshot_property_values",
-                 "ensure_slot_source"):
+    for name in ("find_slot_items", "partition_slot_items",
+                 "snapshot_property_values", "ensure_slot_source"):
         lines = at.get(name, [])
         check("%s is overridden once" % name, len(lines), 2)
         check("  ...and the override comes last", lines[1] > lines[0], True)
@@ -295,22 +302,42 @@ def main():
     # rather than pinning a number the file is allowed to change. What IS
     # pinned is that everything downstream agrees with it.
     count = conf.get("ASSUMED_ITEM_COUNT")
-    check("the count is set and sane", isinstance(count, int) and count > 0,
-          True)
-    check("and it is the fifty that was asked for", count, 50)
+    check("the default count is set and sane",
+          isinstance(count, int) and count > 0, True)
+    check("and it is the fifty a fresh copy starts at", count, 50)
     check("each starting from nothing", conf.get("ASSUMED_START_VALUE"), 0)
+    check("with a ceiling on what can be typed",
+          conf.get("STOCK_ITEM_COUNT_MAX") > count, True)
 
-    # Run the real overrides. They are pure apart from clear_slot_source().
+    # Run the real overrides and the real dial. Pure apart from the four
+    # stubs below, so the behaviour under test is the file's own.
+    #
+    # THE SETUP STORE IS A DICT, which is what Setup.txt is once loaded --
+    # setup_get()/setup_set() are the whole of the real interface and
+    # save_setup() only decides whether it survives the session.
+    store, said = {}, []
     env = {"__name__": "assumed_under_test",
-           "clear_slot_source": lambda: None}
-    wanted = {"AssumedItem", "find_slot_items", "snapshot_property_values",
-              "ensure_slot_source"}
+           "clear_slot_source": lambda: None,
+           "log": lambda text, *rest: said.append(text),
+           "setup_get": lambda key, default="": store.get(key) or default,
+           "setup_set": lambda key, value: store.__setitem__(key, str(value)),
+           "save_setup": lambda: True,
+           "SETUP_KEY_ITEM_COUNT": conf["SETUP_KEY_ITEM_COUNT"]}
+    wanted = {"AssumedItem", "find_slot_items", "partition_slot_items",
+              "snapshot_property_values", "ensure_slot_source",
+              "stock_item_count", "remember_typed_item_count"}
+    # NAMED, NOT PREFIXED (2026-11-09). This matched ASSUMED_* and the
+    # ceiling is not one, so a prefix test would have silently left
+    # STOCK_ITEM_COUNT_MAX undefined inside the band and the clamp would
+    # have raised instead of clamping.
+    constants = {"ASSUMED_ITEM_COUNT", "ASSUMED_START_VALUE",
+                 "STOCK_ITEM_COUNT_MAX"}
     body = [n for n in load(SCRIPT).body
             if (isinstance(n, ast.FunctionDef) and n.name in wanted
                 and n.lineno > 9000)
             or (isinstance(n, ast.ClassDef) and n.name in wanted)
             or (isinstance(n, ast.Assign) and len(n.targets) == 1
-                and getattr(n.targets[0], "id", "").startswith("ASSUMED_"))]
+                and getattr(n.targets[0], "id", None) in constants)]
     exec(compile(ast.Module(body=body, type_ignores=[]), SCRIPT, "exec"), env)
 
     items = env["find_slot_items"]({"label": "Neck"})
@@ -337,6 +364,129 @@ def main():
     slot = {"label": "Neck"}
     check("the slot is returned as-is, with no chest prompt",
           env["ensure_slot_source"](slot) is slot, True)
+
+    # THE VOTE IS SKIPPED, NOT ANSWERED DIFFERENTLY. Stand-ins carry no
+    # properties, so upstream's vote would put every one of them in
+    # `undecided`, form no group and take its "nothing decidable" exit --
+    # (all the items, nothing excluded, no categories). That is what this
+    # has to equal, or the rune menu would narrow on a category nothing
+    # ever detected.
+    _winners, _excluded, _cats = env["partition_slot_items"]({"label": "Neck"})
+    check("the whole pool wins", len(_winners), count)
+    check("nothing is excluded", _excluded, [])
+    check("and no category is claimed", _cats, ())
+    # The Weapon and Ranged cells name their categories outright, which is
+    # the entire reason they are separate cells -- so an override that
+    # dropped the override would merge them.
+    _w2, _e2, _c2 = env["partition_slot_items"](
+        {"label": "Weapon", "categories": ["weapon"]})
+    check("an explicit category still wins", _c2, ("weapon",))
+    check("and it keeps the whole pool too", len(_w2), count)
+
+    print()
+    print("=" * 96)
+    print("6. THE NUMBER IS A DIAL - typed on the slot picker, kept in Setup")
+    print("=" * 96)
+
+    # WIRED TO THE SCREEN. The dial is worth nothing if the picker does not
+    # show it and does not read it back, and both are plain calls, so the
+    # call graph answers it exactly.
+    picker = calls(funcs, "_ask_which_slot_visual_once")
+    check("the slot picker shows the number in force",
+          "stock_item_count" in picker, True)
+    check("and reads back what was typed",
+          "remember_typed_item_count" in picker, True)
+    check("on the picker, not buried in the settings screen",
+          "remember_typed_item_count" in calls(funcs, "show_setup_gump"),
+          False)
+    # The band has to be inside the panel. Its y and the panel height are
+    # built from the same constants, so both naming them is the check that
+    # one cannot be moved without the other.
+    _picker_src = ast.dump(funcs["_ask_which_slot_visual_once"])
+    for _const in ("SLOT_GRID_COUNT_ENTRY_ID", "SLOT_GRID_COUNT_BAND_H",
+                   "SLOT_GRID_COUNT_BAND_PAD", "SLOT_GRID_COUNT_TOOLTIP"):
+        check("the picker uses %s" % _const, _const in _picker_src, True)
+
+    ceiling = conf["STOCK_ITEM_COUNT_MAX"]
+    dial, remember = env["stock_item_count"], env["remember_typed_item_count"]
+
+    store.clear()
+    check("unset means the default", dial(), count)
+
+    # THE NUMBER THE USER ASKED FOR, both of them -- 200 from a fresh copy,
+    # then 50 back from there, which is the round trip they described.
+    store.clear()
+    check("typing 200 is what gets saved", remember("200"), 200)
+    check("  ...and is what every estimate then reads", dial(), 200)
+    check("  ...and it is written, not just returned",
+          store.get(conf["SETUP_KEY_ITEM_COUNT"]), "200")
+    check("and 50 again goes back the other way", remember("50"), 50)
+    check("  ...written over the 200",
+          store.get(conf["SETUP_KEY_ITEM_COUNT"]), "50")
+
+    # RE-TYPING WHAT IS ALREADY IN FORCE IS SILENT AND WRITES NOTHING. Not an
+    # omission: the picker submits this field on every button it has, cells
+    # included, so a confirmation per press would be a confirmation per click.
+    said[:] = []
+    check("re-typing the same number changes nothing", remember("50"), 50)
+    check("  ...and says nothing about it", said, [])
+    store.clear()
+    said[:] = []
+    check("nor does typing the default while it IS the default",
+          remember(str(count)), count)
+    check("  ...which writes no setting at all",
+          store.get(conf["SETUP_KEY_ITEM_COUNT"]), None)
+
+    store.clear()
+    check("a typed 200 reaches the stand-in pool",
+          (remember("200"), len(env["find_slot_items"]({})))[1], 200)
+    check("and the starting values with it",
+          len(env["snapshot_property_values"]([], {})), 200)
+
+    # A BAD VALUE IS REFUSED AND NOTHING IS WRITTEN. The whole bill is
+    # linear in this number, so honouring a typo is the expensive failure.
+    for bad in ("abc", "", "0", "-5", str(ceiling + 1), "12x"):
+        store.clear()
+        remember("200")
+        said[:] = []
+        check("%-10r is refused" % bad, remember(bad), 200)
+        check("  ...and leaves the saved value alone",
+              store.get(conf["SETUP_KEY_ITEM_COUNT"]), "200")
+    # ...and said so, for everything except a cleared box, which is nobody
+    # deciding anything rather than a mistake worth a line.
+    store.clear()
+    remember("200")
+    said[:] = []
+    remember("notanumber")
+    check("a refusal says so out loud", len(said), 1)
+    said[:] = []
+    remember("")
+    check("an empty box says nothing and keeps the number", said, [])
+
+    # COMMAS, because a four-digit box invites them.
+    store.clear()
+    check("1,000 is read as a thousand", remember("1,000"), 1000)
+    store.clear()
+    check("and whitespace is trimmed", remember("  200  "), 200)
+
+    # A VALUE THAT GOT PAST THE FIELD -- a hand-edited Setup.txt, or a file
+    # from a copy with a different ceiling -- is clamped, never obeyed.
+    store[conf["SETUP_KEY_ITEM_COUNT"]] = "500000"
+    check("a hand-edited monster is clamped", dial(), ceiling)
+    store[conf["SETUP_KEY_ITEM_COUNT"]] = "0"
+    check("and a hand-edited zero still gives one item", dial(), 1)
+    store[conf["SETUP_KEY_ITEM_COUNT"]] = "fifty"
+    check("and nonsense falls back to the default", dial(), count)
+
+    # SAVING CAN FAIL, and then the run still uses the number -- setup_set()
+    # has already changed what the dial reads -- but must not claim it stuck.
+    store.clear()
+    env["save_setup"] = lambda: False
+    said[:] = []
+    check("an unsaved change still applies this run", remember("200"), 200)
+    check("and says it will not last",
+          any("could not be saved" in t for t in said), True)
+    env["save_setup"] = lambda: True
 
     print()
     print("=" * 96)

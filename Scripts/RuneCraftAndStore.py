@@ -6,14 +6,21 @@
 #
 #   A modified version of Omniwrath's "Omni Runecrafting" that only MAKES
 #   AND STORES runes. Pick an equipment slot, fill in the properties and the
-#   target values you want on that kind of item, and it works out what FIFTY
-#   of them would consume, crafts exactly that many runes, and puts them in
-#   the Runecrafting Storage key. Nothing is ever applied to anything you own.
+#   target values you want on that kind of item, and it works out what the
+#   NUMBER OF PIECES YOU ASKED FOR would consume, crafts exactly that many
+#   runes, and puts them in the Runecrafting Storage key. Nothing is ever
+#   applied to anything you own.
 #
-#   THE FIFTY IS AN ASSUMPTION, not a search of your backpack. You do not
+#   THAT NUMBER IS AN ASSUMPTION, not a search of your backpack. You do not
 #   need to own the gear - that is the whole point, you are stocking runes
-#   for gear you have not got yet. Change the number at
-#   ASSUMED_ITEM_COUNT; the cost is exactly linear in it.
+#   for gear you have not got yet.
+#
+#   YOU TYPE IT ON THE SLOT PICKER, in the "Stocking for __ of every piece
+#   above" box under the grid: 200 one day and 50 the next, without editing
+#   this file. It is ONE number for every piece on that screen, it is
+#   remembered between runs, and the cost is exactly linear in it. A fresh
+#   copy starts at ASSUMED_ITEM_COUNT (50) and the field will not take more
+#   than STOCK_ITEM_COUNT_MAX.
 #
 # WHOSE WORK THIS IS
 #
@@ -982,6 +989,14 @@ RUNE_STONES_EACH = 1           # one rune's weight -- the step craft_n_runes() m
 # Setup so it is per-player and survives a restart, like every other answer this script keeps.
 CHISEL_CHARGE_TARGET_DEFAULT = 10000
 SETUP_KEY_CHISEL_TARGET = "chisel_charge_target"
+# HOW MANY PIECES OF GEAR TO STOCK FOR (2026-11-09), per the user: "we need to
+# make it where i can set the number of items, as i need to make sometimes 200
+# items and sometimes 50, so i need them configurable where i can put in a
+# number and it applies to all the pieces in the menu that are selectable for
+# armor clothing and weapons." Typed at the bottom of the slot picker, which
+# IS that menu. Kept in Setup for the same reason the chisel target above is:
+# per-player, and still set next session. Read through stock_item_count().
+SETUP_KEY_ITEM_COUNT = "assumed_item_count"
 # "0" SKIPS THE CALCULATE PREVIEW ENTIRELY (2026-09-17). Absent/anything else means on, so an
 # existing Setup.txt written before this setting existed keeps the old behaviour.
 SETUP_KEY_CALCULATIONS = "calculations_enabled"
@@ -7061,6 +7076,25 @@ SLOT_GRID_BOTTOM_PAD = 25       # Gap under the last caption. Matches SLOT_GRID_
                                 # because one is a horizontal origin and one a vertical margin.
 SLOT_GRID_ORIGIN_X = 25
 SLOT_GRID_ORIGIN_Y = 45
+# THE "Stocking for __ of every piece above" BAND (2026-11-09). The one number this fork sizes
+# every estimate against, typed on the screen whose cells it applies to -- see stock_item_count().
+#
+# THE GRID'S ONLY TEXT ENTRY, so id 1 and response.text[0], exactly as the settings screen's
+# chisel field is its only one. Entry ids are their own namespace and have nothing to do with
+# SLOT_GRID_BUTTON_BASE or SLOT_GRID_SETTINGS_BUTTON above.
+SLOT_GRID_COUNT_ENTRY_ID = 1
+SLOT_GRID_COUNT_ENTRY_W = 60     # STOCK_ITEM_COUNT_MAX is four digits wide; this holds four at
+                                 # this font with room to spare.
+SLOT_GRID_COUNT_BAND_PAD = 10    # Gap between the last row's caption and the band.
+SLOT_GRID_COUNT_BAND_H = 20      # The field itself -- one AddTextEntry tall.
+# SAYS WHAT THE NUMBER IS AND WHAT IT IS NOT, because "200" on its own does not distinguish "200
+# items" from "200 runes", and the second reading would be wrong by whatever the simulation says.
+SLOT_GRID_COUNT_TOOLTIP = (
+    "How many pieces of gear to stock runes for -- ONE number for every cell on this screen, not "
+    "a count per slot, and not a number of runes. You do not have to own them: nothing here reads "
+    "your backpack, so this is simply the number every estimate is sized against. The cost is "
+    "exactly linear in it, and running twice does not double the bill -- what the storage key "
+    "already holds is counted first. Saved as you type, on any button.")
 SLOT_RUNES_BACK_BUTTON = 1       # Page 2 -> back to the grid. 0 is "closed the gump".
 SLOT_RUNES_CLEAR_BUTTON = SLOT_RUNES_BACK_BUTTON + 2   # Page 2 -> zero every field and redraw.
                                  # +1 is Calculate (added inline at its own AddButton), so this
@@ -7712,8 +7746,12 @@ def _ask_which_slot_visual_once():
     # margin. The value of this is not the 31px it saves -- it is that raising SLOT_GRID_LABEL_
     # DY (the escape hatch if a tall item art ever meets a caption) now grows the panel to
     # match instead of quietly eating the margin again.
+    # THE COUNT BAND IS PART OF THE PANEL (2026-11-09), never drawn into the bottom margin: the
+    # band's own y below is this same sum less its last two terms, so raising either constant
+    # moves the field and grows the panel by the same amount.
     height = (SLOT_GRID_ORIGIN_Y + (rows - 1) * cell + SLOT_GRID_LABEL_DY
-              + SLOT_GRID_CAPTION_H + SLOT_GRID_BOTTOM_PAD)
+              + SLOT_GRID_CAPTION_H + SLOT_GRID_COUNT_BAND_PAD
+              + SLOT_GRID_COUNT_BAND_H + SLOT_GRID_BOTTOM_PAD)
 
     Gumps.AddPage(gd, 0)
     Gumps.AddBackground(gd, 0, 0, width, height, 30546)
@@ -7773,7 +7811,12 @@ def _ask_which_slot_visual_once():
             # still showing on every cell that HAD items. Name and count only -- the redundant
             # tooltip the user asked for on every button ("even if it's just the same text
             # already labeling the button").
-            _cell_tip = "%s (%d in pack)" % (name, count)
+            # FORK -- NOT "in pack" (2026-11-09). find_slot_items() is overridden in this
+            # file to hand back stock_item_count() stand-ins named "assumed item 1", so
+            # upstream's wording reported a backpack nothing had read, under a name that is
+            # not an item. The honest reading of that number is the dial under the grid.
+            _cell_tip = ("Stocking for %d of these -- one number for every cell, typed at "
+                         "the bottom of this screen." % count)
         else:
             # WHAT CLICKING AN EMPTY CELL ACTUALLY DOES (2026-09-16), per the user: "We're not
             # setting a threshold, it should say -- click to set a storage container if it's
@@ -7817,6 +7860,42 @@ def _ask_which_slot_visual_once():
         Gumps.AddLabel(gd, x, y + SLOT_GRID_LABEL_DY, 68 if count else 33,
                        "%s%s" % (tile_label, (" x%d" % count) if count > 1 else ""))
 
+    # HOW MANY OF EACH PIECE, TYPED HERE (2026-11-09), per the user: "i need them configurable
+    # where i can put in a number and it applies to all the pieces in the menu that are
+    # selectable for armor clothing and weapons."
+    #
+    # ON THIS SCREEN BECAUSE THIS SCREEN IS THAT MENU. One number for every cell above, and the
+    # cells already read it -- their "x200" counts and this field both come from
+    # stock_item_count() -- so the relationship is visible rather than described. The settings
+    # screen was the other candidate and is deliberately not used: a number changed between runs
+    # belongs on the path walked every run, not behind a corner button.
+    #
+    # THE BACKING TILE IS REQUIRED, not decoration. This file already established that "an
+    # AddTextEntry field has no background of its own" (see APPLY_REQUEST_ENTRY_BACKING_TEXTURE);
+    # without it the box is invisible and the number appears to float.
+    #
+    # ~8px/char here, not SLOT_GRID_CAPTION_CHAR_PX: these two labels are laid out LEFT to right,
+    # so over-estimating the font only widens the gap before the field. The 6px figure exists for
+    # right-aligning the Settings caption, where under-estimating would overhang the margin.
+    _count_y = (SLOT_GRID_ORIGIN_Y + (rows - 1) * cell + SLOT_GRID_LABEL_DY
+                + SLOT_GRID_CAPTION_H + SLOT_GRID_COUNT_BAND_PAD)
+    _count_lead = "Stocking for"
+    _count_x = SLOT_GRID_ORIGIN_X + len(_count_lead) * 8 + 8
+    Gumps.AddLabel(gd, SLOT_GRID_ORIGIN_X, _count_y + 2, 68, _count_lead)
+    Gumps.AddTooltip(gd, SLOT_GRID_COUNT_TOOLTIP)
+    Gumps.AddImageTiled(gd, _count_x, _count_y, SLOT_GRID_COUNT_ENTRY_W, 20,
+                        APPLY_REQUEST_ENTRY_BACKING_TEXTURE)
+    # PRE-FILLED WITH WHAT IS IN FORCE, so the screen can be read as a statement of fact rather
+    # than an empty box that might mean anything.
+    Gumps.AddTextEntry(gd, _count_x, _count_y, SLOT_GRID_COUNT_ENTRY_W, 20, 68,
+                       SLOT_GRID_COUNT_ENTRY_ID, str(stock_item_count()))
+    Gumps.AddTooltip(gd, SLOT_GRID_COUNT_TOOLTIP)
+    # "above", because the band sits under the grid and the number is about the cells, not the
+    # button that is about to be pressed.
+    Gumps.AddLabel(gd, _count_x + SLOT_GRID_COUNT_ENTRY_W + 8, _count_y + 2, 68,
+                   "of every piece above")
+    Gumps.AddTooltip(gd, SLOT_GRID_COUNT_TOOLTIP)
+
     Gumps.SendGump(SLOT_GRID_GUMP_ID, Player.Serial, 300, 200, gd.gumpDefinition, gd.gumpStrings)
     log("Pick the equipment slot you want to rune.")
     if not Gumps.WaitForGump(SLOT_GRID_GUMP_ID, REQUEST_GUMP_WAIT_MS):
@@ -7825,6 +7904,15 @@ def _ask_which_slot_visual_once():
     response = Gumps.GetGumpData(SLOT_GRID_GUMP_ID)
     if response is None:
         return None
+    # BEFORE THE BUTTON IS ACTED ON, and on every response -- a cell, Settings and Close all
+    # submit the field, so a number typed and then clicked away would otherwise be thrown away.
+    # The same reason the settings screen reads its chisel field inline rather than at Continue.
+    #
+    # A PRESSED CELL THEREFORE RUNS AT THE NUMBER JUST TYPED: this is saved first, and everything
+    # downstream sizes itself through stock_item_count(), which reads it back.
+    _typed = list(response.text or [])
+    if len(_typed) >= SLOT_GRID_COUNT_ENTRY_ID:
+        remember_typed_item_count(_typed[SLOT_GRID_COUNT_ENTRY_ID - 1])
     # Checked BEFORE the index arithmetic, so the reserved id never reaches it.
     if response.buttonid == SLOT_GRID_SETTINGS_BUTTON:
         return SLOT_GRID_SETTINGS_CHOSEN
@@ -8909,11 +8997,15 @@ def prepare_and_store_one_stat(property_def, slot_def, target_stat,
     have = in_pack + in_store
     to_craft = max(0, runes_needed - have)
 
+    # len(eligible), NOT the setting (2026-11-09). The pool above IS what the
+    # estimate was sized against, so counting it cannot disagree with the
+    # estimate beside it -- which re-reading the setting could, if anything
+    # ever changed it between the two lines.
     log("Stocking for an ASSUMED {} '{}' item(s) at {} {} -- none of them "
         "has to be in your pack. The simulation says ~{} rune(s), counting "
         "the ~{:.1f} expected to break on the way. You already hold {} ({} "
         "in the pack, {} in the key)."
-        .format(ASSUMED_ITEM_COUNT, slot_def["label"], target_stat,
+        .format(len(eligible), slot_def["label"], target_stat,
                 property_def["label"], runes_needed, expected_broken,
                 have, in_pack, in_store))
 
@@ -9590,9 +9682,93 @@ def snapshot_property_values(eligible, property_def):
 # RUNNING IT TWICE IS THE SAME AS DOUBLING IT, because the store flow
 # subtracts what the key already holds before crafting. So this number is
 # "how deep a surplus in one run", not a ceiling.
+#
+# NOW ONLY THE STARTING VALUE (2026-11-09), per the user: "i need to make
+# sometimes 200 items and sometimes 50, so i need them configurable where i
+# can put in a number". The number is typed on the slot picker and kept in
+# Setup, so this constant is what a fresh copy stocks for until somebody
+# types something else. stock_item_count() is what everything else reads.
 ASSUMED_ITEM_COUNT = 50
 ASSUMED_START_VALUE = 0       # a fresh item has none of the property yet,
                               # which is also the costliest case to stock for
+# THE CEILING ON WHAT THE FIELD WILL TAKE. Not an opinion about what is
+# sensible - 200 is ordinary, and is the number the dial was asked for - but a
+# guard on a box a human types into, where one stray keypress turns 200 into
+# 2000 and the run quietly sizes itself for ten times the stone. The cost is
+# exactly linear, so a slip of a digit costs exactly its own factor.
+STOCK_ITEM_COUNT_MAX = 1000
+
+
+def stock_item_count():
+    """How many pieces of gear to stock for: the typed number, else the default.
+
+    THE ONE PLACE THAT NUMBER COMES FROM. All three assumed-gear overrides
+    below read it, the slot picker's own cells read it, and the line the store
+    flow prints counts the pool it was handed -- so what the screen says and
+    what the simulation sized itself against cannot drift apart.
+
+    CLAMPED, NOT TRUSTED. The field refuses anything out of range and says so
+    (see remember_typed_item_count()), so a value that needs clamping here got
+    into Setup.txt some other way - a hand edit, or a file from a copy with a
+    different ceiling. Returning the nearest legal number beats either
+    crashing a run or honouring a 500,000-item batch.
+    """
+    try:
+        value = int(setup_get(SETUP_KEY_ITEM_COUNT, "") or ASSUMED_ITEM_COUNT)
+    except (TypeError, ValueError):
+        return ASSUMED_ITEM_COUNT
+    return max(1, min(STOCK_ITEM_COUNT_MAX, value))
+
+
+def remember_typed_item_count(raw):
+    """Save a number typed into the slot picker's field. The count in force after.
+
+    TAKES THE STRING, NOT THE RESPONSE, so the whole of this decision can be
+    exercised offline. The rule that a bad value is REFUSED rather than
+    written is the only part of a typed field that can really go wrong, and it
+    is the part a live client cannot be asked to demonstrate repeatedly.
+
+    A BAD VALUE IS REFUSED AND NAMED, never quietly rounded into range: this
+    number multiplies the whole bill, so "it used 500 because you typed 5OO"
+    is a worse outcome than being told to type it again. An EMPTY field is not
+    a bad value - it is somebody who cleared the box without deciding - and
+    keeps what is already set rather than resetting to the default.
+
+    THE NUMBER ALREADY IN FORCE IS SILENT, and writes nothing. That is the
+    point rather than an omission: the picker submits this field on EVERY
+    button it has, every slot cell included, so a confirmation line per press
+    would be a line per click - and a line that appears on every click is
+    scrolled past, which is the same as not saying anything. The field itself
+    already shows the number, and so do the cells above it.
+    """
+    current = stock_item_count()
+    text = (raw or "").strip().replace(",", "")
+    if not text:
+        return current
+    try:
+        wanted = int(text)
+    except ValueError:
+        log("'{}' is not a number of pieces -- still stocking for {}."
+            .format(raw, current), 33)
+        return current
+    if wanted < 1 or wanted > STOCK_ITEM_COUNT_MAX:
+        log("{} is outside 1-{} pieces -- still stocking for {}."
+            .format(wanted, STOCK_ITEM_COUNT_MAX, current), 33)
+        return current
+    if wanted == current:
+        return current
+    setup_set(SETUP_KEY_ITEM_COUNT, str(wanted))
+    if save_setup():
+        log("Stocking for {} of every piece from now on, was {}."
+            .format(wanted, current))
+    else:
+        # setup_set() has already changed what stock_item_count() returns, so
+        # this run really does use the new number. save_setup() logs its own
+        # reason; what is left to say is that the change is not permanent.
+        log("Stocking for {} this run, but it could not be saved -- see the "
+            "line above, and expect {} again next time."
+            .format(wanted, current), 33)
+    return wanted
 
 
 class AssumedItem(object):
@@ -9619,17 +9795,18 @@ class AssumedItem(object):
 
 
 def find_slot_items(slot_def, restrict_serials=None, in_pack_only=False):
-    """OVERRIDDEN: always ASSUMED_ITEM_COUNT stand-ins, never a real search.
+    """OVERRIDDEN: always stock_item_count() stand-ins, never a real search.
 
-    Every count on the preview then reads ASSUMED_ITEM_COUNT and agrees with
-    the costs beside it, which a real search would not: with an empty pack
-    the screen would have said "0 items" over a bill for fifty.
+    Every count on the preview then reads the same number the slot picker
+    showed, and agrees with the costs beside it, which a real search would
+    not: with an empty pack the screen would have said "0 items" over a bill
+    for fifty.
 
     restrict_serials IS IGNORED, and it has to be. It is the preview's
     "Work 3 -- 95%" feature, which picks out particular items of yours by
     serial; there are no particular items here, so narrowing to a few of
-    identical assumptions would mean nothing. Stock for the whole
-    ASSUMED_ITEM_COUNT or change it.
+    identical assumptions would mean nothing. Stock for the whole count or
+    type a smaller one.
 
     THE RUNE MENU STILL SHOWS EVERYTHING THE SLOT CAN TAKE. The stand-ins
     carry no properties, so vote_winning_category() finds nothing to decide
@@ -9637,7 +9814,37 @@ def find_slot_items(slot_def, restrict_serials=None, in_pack_only=False):
     takes upstream, and the right one here: stocking is choosing what you
     want, not discovering what you own.
     """
-    return [AssumedItem(i) for i in range(max(1, ASSUMED_ITEM_COUNT))]
+    return [AssumedItem(i) for i in range(stock_item_count())]
+
+
+def partition_slot_items(slot_def):
+    """OVERRIDDEN: stand-ins have nothing to vote with, so they are not asked.
+
+    SAME ANSWER, WITHOUT THE ROUND TRIPS. Upstream groups a slot's items by
+    classify_item() and keeps the largest group; every item here is a stand-in
+    carrying no properties, so classify_item() returns () for all of them,
+    every one lands in `undecided`, no group forms, and vote_winning_category()
+    takes its "nothing decidable" exit -- `return undecided, excluded_books,
+    ()`, which is exactly (all the items, nothing excluded, no categories).
+    find_slot_items()' own docstring above already relied on that outcome.
+
+    SO WHY OVERRIDE IT. The vote pays Items.WaitForProps(it, 1000) PER ITEM,
+    and this file already names that cost as a thing to keep out of a redraw
+    path (see ask_apply_requests_and_slot(), on why the Clear loop sits where
+    it does). The slot picker calls this once per cell, and PAPERDOLL_LAYOUT
+    has 18 of them, every one naming a slot SLOT_CATALOG offers -- so the
+    futile sweep was 900 calls per draw at fifty pieces and would have been
+    3,600 at two hundred, asking the server about items that do not exist.
+    Nothing in this fork ever hands it a real one: the only pool comes from
+    find_slot_items() above.
+
+    AN EXPLICIT slot_def["categories"] STILL WINS, exactly as upstream: the
+    Weapon and Ranged cells share a layer and name their categories outright,
+    which is the whole reason they are separate cells.
+    """
+    items = find_slot_items(slot_def)
+    override = slot_def.get("categories")
+    return items, [], tuple(override) if override else ()
 
 
 def snapshot_property_values(eligible, property_def):
@@ -9649,10 +9856,10 @@ def snapshot_property_values(eligible, property_def):
     rows included, size itself against assumed gear instead of real gear.
 
     It ignores `eligible` deliberately rather than reading its length: the
-    answer must be ASSUMED_ITEM_COUNT even if some other caller hands it a
+    answer must be the count that is set even if some other caller hands it a
     pool from somewhere else.
     """
-    return [ASSUMED_START_VALUE] * max(1, ASSUMED_ITEM_COUNT)
+    return [ASSUMED_START_VALUE] * stock_item_count()
 
 
 def ensure_slot_source(slot_def):

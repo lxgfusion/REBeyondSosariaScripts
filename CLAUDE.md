@@ -218,7 +218,7 @@ only.
 |---|---|
 | `omnirunecraft.py` | Upstream's own, untouched. The reference copy — diff against it to see what the forks changed. |
 | `OmniRuneCraftFork.py` | The apply half plus local changes (Master Key perk deed, all pages of the `[AR` book, updater off). Not published. |
-| `RuneCraftAndStore.py` | Make-and-store only, sized off `ASSUMED_ITEM_COUNT = 50` assumed items. **Published**, with the GPL notice in its header. |
+| `RuneCraftAndStore.py` | Make-and-store only, sized off a typed count of assumed items (`stock_item_count()`, 50 by default). **Published**, with the GPL notice in its header. |
 
 All three share roughly 11,000 lines of Omniwrath's work
 (github.com/Omniwrath/beyond-sosaria-runecrafting).
@@ -238,12 +238,22 @@ on drift. Those three announce themselves as **skipped** when the fork file
 is absent, which is what happens on a clone — so a green run elsewhere
 does not mean the forks agree.
 
-**`ASSUMED_ITEM_COUNT = 50`, and nothing reads the backpack.** Three
-functions are deliberately re-defined *after* their originals to make that
-true (`find_slot_items`, `snapshot_property_values`, `ensure_slot_source`).
-Shadowing is the mechanism, so **the order of definition is the behaviour**:
-an override moved above its original is simply dead code. The test checks the
-order, not just the presence.
+**The item count is typed, and nothing reads the backpack.**
+`stock_item_count()` is the single place that number comes from: the slot
+picker's *"Stocking for \_\_ of every piece above"* field, kept in
+`Setup.txt`, falling back to `ASSUMED_ITEM_COUNT = 50`. **Four** functions
+are deliberately re-defined *after* their originals to make that true
+(`find_slot_items`, `partition_slot_items`, `snapshot_property_values`,
+`ensure_slot_source`). Shadowing is the mechanism, so **the order of
+definition is the behaviour**: an override moved above its original is simply
+dead code. The test checks the order, not just the presence.
+
+`partition_slot_items` is the fourth and newest. It returns what upstream's
+vote would return for property-less stand-ins — all of them, nothing
+excluded, no category — without paying `Items.WaitForProps(it, 1000)`
+per item to find that out. The slot picker calls it once per cell and
+`PAPERDOLL_LAYOUT` has 18, so the futile sweep was 900 server questions per
+draw at fifty pieces, and would have been 3,600 at two hundred.
 
 **The updater must stay off.** Upstream signs its releases and the script can
 replace itself; letting it would overwrite the fork with upstream's file.
@@ -317,6 +327,17 @@ it is shown to be in a part neither fork touched.
   names the species it was nearly mistaken for is the difference between a fix
   and a mystery. Add the shard's own species to the EXTRA list, never to a table
   that says it was extracted from source.
+- **A field that every button submits must stay silent when nothing
+  changed.** A gump text entry is read back from the *response*, so it
+  arrives on every press that screen has — in `RuneCraftAndStore.py`'s
+  slot picker that is eighteen slot cells, Settings and Close. Confirming
+  the value each time is a line per click, and a line that appears on every
+  click is scrolled past, which is the same as not saying it (the same defect
+  as the unknown-deed warning in `ManualTameAndFill.py`). So compare against
+  what is already in force and return early: write nothing, say nothing. Do
+  still read it on every press — a number typed and then clicked away
+  would otherwise be thrown out — and refuse a bad value *loudly*, since
+  that is the one case the player has to act on.
 - **To act on something the PLAYER did, require the server's word for it, and
   spend it.** Client state alone is not evidence: `Player.Pets` says an animal
   is yours, not that you have just tamed it, so a script that fills taming deeds
