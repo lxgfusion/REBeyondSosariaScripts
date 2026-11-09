@@ -6788,6 +6788,15 @@ def run_slot_application(property_def, slot_def, target_stat, restrict_serials=N
             return
 
         runes = count_runes(property_def)
+        # THE PROGRESS SCREEN'S FIGURES (2026-11-09), from numbers this pass is already holding.
+        # total_amount(runes) rather than count_rune_amount(), which would walk the backpack a
+        # SECOND time for the same answer; `values` was built from the same `eligible` walk just
+        # above. This loop turns over 150-odd times a minute at best and the walks are the
+        # expensive part of it, so a readout that added one per pass would be paid for in
+        # throughput.
+        apply_progress_pass(len(values),
+                            sum(1 for _it, _v in values if _v >= target_stat),
+                            total_amount(runes), len(refused_items))
         if not runes:
             log("Out of '{} Rune' -- checking whether more should be crafted.".format(
                 property_def["syllable"].capitalize()))
@@ -6908,6 +6917,7 @@ def run_slot_application(property_def, slot_def, target_stat, restrict_serials=N
                 "cannot enhance that.\"). No rune was consumed. Skipping it and continuing with "
                 "the rest of the {}(s).".format(
                     item_name, target_item.Serial, property_def["label"], slot_def["label"]), 33)
+            apply_progress_event("refused")
             report_exclusions("So far")
             continue
         if not ok:
@@ -6929,6 +6939,7 @@ def run_slot_application(property_def, slot_def, target_stat, restrict_serials=N
         still_present = _now is not None and _now.Container == Player.Backpack.Serial
         if not still_present:
             log("'{}' (Serial={}) is gone -- it broke.".format(slot_def["label"], hex(target_item.Serial)), 33)
+            apply_progress_event("broke")
             _value_cache.pop(target_item.Serial, None)
             continue
 
@@ -6987,6 +6998,7 @@ def run_slot_application(property_def, slot_def, target_stat, restrict_serials=N
         detect_fail_retries = 0
         _value_cache[target_item.Serial] = after_value   # the one item that changed (2026-09-24)
         log("Survived: now {} (was {}).".format(after_value, before_value))
+        apply_progress_event("applied")
 
 
 # =============================================================================
@@ -9132,6 +9144,273 @@ def preview_progress_end():
         pass                        # already gone, or the player closed it -- nothing to do
 
 
+# =============================================================================
+# THE APPLY PROGRESS SCREEN
+# =============================================================================
+#
+# WHY IT EXISTS, per the owner (2026-11-09): "a small gump that stays open on the screen during
+# application of the runes to the items, it will keep a count of broken items and how many items
+# remain, i think it would be easier to keep track and determine if 50 is the best option or not
+# or if we need to try more items. It would be nice just to see that information while it's
+# processing the runes."
+#
+# SO THE FIGURES ARE NOT DECORATION. "Is fifty enough" is a question about two numbers moving
+# against each other - how many runes are left to spend, and how many items are left to spend
+# them on - and the thing that converts one into the other is the break rate, because breaking
+# is how items are consumed. apply_progress_projection() does that conversion and states the
+# comparison, so the screen answers the question instead of handing over the inputs to it.
+#
+# NOTHING ON IT IS CLICKABLE and nothing waits for it. Every function here is a no-op while the
+# screen is not armed, so run_slot_application() calls them unconditionally: a craft-only run,
+# or this file's own dead apply path, is completely unaffected.
+
+APPLY_PROGRESS_GUMP_ID = 0x52554E41   # "RUNA" -- Applying. Same ASCII-tag convention as
+                                      # RUNC/RUNG/RUNM/RUNP/RUNQ/RUNR/RUNS/RUNU, and distinct
+                                      # from every one of them, so closing this one cannot close
+                                      # a screen the player is using.
+APPLY_PROGRESS_GUMP_X = 40            # WHERE IT OPENS, which is not necessarily where it stays
+APPLY_PROGRESS_GUMP_Y = 40            # -- see _apply_progress_where().
+APPLY_PROGRESS_ROW_HEIGHT = 26
+APPLY_PROGRESS_MIN_WIDTH = 300
+APPLY_PROGRESS_SIDE_MARGIN = 20       # Labels start at x=20, same as every other gump here.
+APPLY_PROGRESS_REDRAW_MS = 1200       # A CEILING ON REDRAWS, AND A COMPROMISE. Re-sending a gump
+                                      # puts it back at the position it is sent to, so every
+                                      # redraw drags it out of wherever the player moved it (see
+                                      # _apply_progress_where() for the half-fix). An application
+                                      # lands roughly every 400ms, so redrawing per event would
+                                      # make the screen impossible to pick up; 1200ms is slow
+                                      # enough to grab and fast enough to read.
+
+_apply_progress = None                # None = OFF. A dict while the apply phase is running.
+
+
+def _apply_progress_where():
+    """Where to send the screen: the player's own position if the client will say, else the corner.
+
+    UNVERIFIED, AND WRITTEN SO THAT DOES NOT MATTER. Razor Enhanced's gump data object is read
+    here for `x`/`y`, which nothing else in this file has ever used, so whether it carries the
+    position the player DRAGGED the screen to is an open question - this file's own rule is that
+    an unverified gump feature must fail invisibly rather than loudly. Every way it can
+    disappoint lands on the constants: no gump data at all raises and is caught, a build without
+    the fields hits the getattr default, and a meaningless zero fails the positive test. If it
+    works the screen stays where it was put; if it does not, the screen is the one this file
+    would have drawn anyway."""
+    try:
+        data = Gumps.GetGumpData(APPLY_PROGRESS_GUMP_ID)
+        x = int(getattr(data, "x", -1))
+        y = int(getattr(data, "y", -1))
+        if x > 0 and y > 0:
+            return x, y
+    except Exception:
+        pass
+    return APPLY_PROGRESS_GUMP_X, APPLY_PROGRESS_GUMP_Y
+
+
+def apply_progress_clock(seconds):
+    """A duration somebody can read off a screen. A batch runs for hours, and "7384s" is not it."""
+    seconds = max(0, int(seconds))
+    if seconds >= 3600:
+        return "{}h {:02d}m".format(seconds // 3600, (seconds % 3600) // 60)
+    return "{}m {:02d}s".format(seconds // 60, seconds % 60)
+
+
+def apply_progress_projection(p):
+    """The line that answers "is fifty enough", as (text, hue).
+
+    THE ARITHMETIC. Items are consumed by breaking, so the measured break rate converts the rune
+    supply into items: runes_left * broken / applied is roughly how many more items this supply
+    will eat. Set that against the items actually in the pack and the result is a comparison
+    rather than another figure to interpret.
+
+    IT NEEDS A BREAK TO MEASURE FROM, and says so until it has one. Reporting a rate of zero
+    would be worse than reporting nothing: nothing broken in forty applications genuinely means
+    "too early to say", and this screen is going to be read as evidence for a decision about how
+    many items to bring."""
+    if not p["applied"]:
+        return "Supply: waiting for the first application", 43
+    if not p["broken"]:
+        return ("Supply: {} runes left, nothing broken yet -- no rate to project from".format(
+            p["runes"]), 43)
+    will_break = float(p["runes"]) * float(p["broken"]) / float(p["applied"])
+    if p["pool"] and will_break > p["pool"]:
+        return ("Supply: {} runes left -> ~{:.1f} more breaks, MORE THAN THE {} in the "
+                "pack".format(p["runes"], will_break, p["pool"]), 33)
+    return ("Supply: {} runes left -> ~{:.1f} more breaks, of {} in the pack".format(
+        p["runes"], will_break, p["pool"]), 68)
+
+
+def apply_progress_lines(p):
+    """The whole screen as (text, hue) rows, built from a progress state dict.
+
+    TAKES ITS STATE AS AN ARGUMENT rather than reading the global, so every figure on it can be
+    checked offline against a hand-built dict. A progress readout is exactly the kind of code
+    that never gets tested because it only exists mid-run, and every number on this one is one
+    somebody will make a decision with."""
+    to_go = max(0, p["pool"] - p["at_target"])
+    rows = [("Applying to {}{}".format(p["slot"] or "?", "." * (1 + (p["tick"] % 3))), 68)]
+    if p["stat"]:
+        rows.append(("{} -> {}    (stat {} of {})".format(
+            p["stat"], p["target"], p["stat_i"], p["stat_n"]), 68))
+    else:
+        rows.append(("working out what to do first...", 43))
+    rows.append(("Items: {} in the pack -- {} at target, {} to go".format(
+        p["pool"], p["at_target"], to_go), 68))
+    if p["broken"]:
+        rows.append(("Broken: {}  (1 per {} applied)".format(
+            p["broken"], int(round(float(p["applied"]) / p["broken"])) if p["applied"] else "?"),
+            33))
+    else:
+        rows.append(("Broken: none yet", 68))
+    refused = ",  {} refused".format(p["refused"]) if p["refused"] else ""
+    rows.append(("Runes: {} left -- {} applied{}".format(
+        p["runes"], p["applied"], refused), 68))
+    rows.append(apply_progress_projection(p))
+    elapsed = max(0.0, time.time() - p["started"])
+    rate = (60.0 * p["applied"] / elapsed) if elapsed > 0.0 else 0.0
+    rows.append(("{} elapsed -- {:.0f} applied/min".format(
+        apply_progress_clock(elapsed), rate), 68))
+    return rows
+
+
+def _draw_apply_progress():
+    """Redraw the screen from the current state. SIZED FROM ITS OWN TEXT, via the same label_px()
+    glyph table the Apply Preview panel uses, so a five-digit rune count widens the box instead
+    of running off the end of it.
+
+    TEXT, NOT GUMP ART, for the reason the Calculating screen gives: an unverified art draws
+    nothing at all with no error, and an invisible progress readout is worse than none. Hues
+    68/33/43 only - those three are the ones confirmed live in this file."""
+    p = _apply_progress
+    if p is None:
+        return
+    rows = apply_progress_lines(p)
+    width = APPLY_PROGRESS_MIN_WIDTH
+    for text, _hue in rows:
+        width = max(width, APPLY_PROGRESS_SIDE_MARGIN + label_px(text)
+                    + APPLY_PROGRESS_SIDE_MARGIN)
+    height = 18 + len(rows) * APPLY_PROGRESS_ROW_HEIGHT
+    x, y = _apply_progress_where()
+    gd = Gumps.CreateGump(movable=True)
+    Gumps.AddPage(gd, 0)
+    Gumps.AddBackground(gd, 0, 0, width, height, 30546)
+    Gumps.AddAlphaRegion(gd, 0, 0, width, height)
+    for index, (text, hue) in enumerate(rows):
+        Gumps.AddLabel(gd, APPLY_PROGRESS_SIDE_MARGIN,
+                       14 + index * APPLY_PROGRESS_ROW_HEIGHT, hue, text)
+    Gumps.SendGump(APPLY_PROGRESS_GUMP_ID, Player.Serial, x, y,
+                   gd.gumpDefinition, gd.gumpStrings)
+
+
+def _apply_progress_redraw(force=False):
+    """Redraw if the screen is live and the ceiling allows it, advancing the liveness dots.
+
+    NOT LIVE UNTIL apply_progress_pass() SAYS SO. Being armed only means a run that applies runes
+    has started; it does not mean anything true is known yet. See apply_progress_begin()."""
+    p = _apply_progress
+    if p is None or not p["live"]:
+        return
+    now = time.time()
+    if not force and (now - p["last"]) * 1000.0 < APPLY_PROGRESS_REDRAW_MS:
+        return                      # counted, just not drawn yet
+    p["last"] = now
+    p["tick"] += 1
+    _draw_apply_progress()
+
+
+def apply_progress_begin(slot_label, stat_count):
+    """ARM the screen - which is not the same as showing it. Called from run_application_flow()
+    once the job is known (the slot and the stat list) and NOT from main(), because until the
+    preview is accepted the player is still working through picker screens this would sit on.
+
+    IT DRAWS NOTHING HERE, and that is load-bearing rather than tidiness. BOTH forks reach this
+    line: this one goes on to run_slot_application(), but RuneCraftAndStore.py calls
+    prepare_and_store_one_stat() instead and never applies a rune to anything. Drawing on arrival
+    would put "Applying to Shoes -- Items: 0 in the pack" on screen for the whole of a store-only
+    craft and leave it there, which is not a progress screen but a false statement about what the
+    script is doing. The screen goes live in apply_progress_pass(), called from exactly one place
+    - run_slot_application(), the only code in either file that applies anything - so the
+    store-only fork never shows it and neither file needs a special case. Keeping the two
+    identical is what tests/test_runecraftandstore.py's parity checks are for.
+
+    THE RUN-WIDE COUNTERS LIVE HERE rather than in run_slot_application(), which is called once
+    per requested stat: a break is attrition on the run, not on one stat, and the projection is
+    only honest measured across everything spent."""
+    global _apply_progress
+    _apply_progress = {"slot": slot_label, "stat": "", "target": 0,
+                       "stat_i": 0, "stat_n": max(1, stat_count),
+                       "pool": 0, "at_target": 0, "runes": 0,
+                       "applied": 0, "broken": 0, "refused": 0,
+                       "started": time.time(), "tick": 0, "last": 0.0,
+                       "live": False}
+
+
+def apply_progress_stat(stat_label, target_stat, index):
+    """A new requested stat is starting. `refused` resets with it -- a refusal is a fact about
+    one rune on one item, exactly as run_slot_application()'s own refused_items dict is
+    loop-scoped for the same reason."""
+    p = _apply_progress
+    if p is None:
+        return
+    p["stat"] = stat_label
+    p["target"] = target_stat
+    p["stat_i"] = index
+    p["refused"] = 0
+    _apply_progress_redraw(force=True)
+
+
+def apply_progress_pass(pool, at_target, runes, refused):
+    """The per-pass figures, handed in from numbers the pass already has in hand. Nothing here
+    reads the backpack: run_slot_application() has just walked it for both the item pool and the
+    rune stacks, and walking it again for the same answers is the one cost this screen could
+    plausibly add to a loop that runs 150-odd times a minute."""
+    p = _apply_progress
+    if p is None:
+        return
+    p["pool"] = pool
+    p["at_target"] = at_target
+    p["runes"] = runes
+    p["refused"] = refused
+    # THE MOMENT IT BECOMES TRUE, so this is the moment it may be shown -- and the first one is
+    # forced past the redraw ceiling, or the screen would be up to a second late appearing.
+    first = not p["live"]
+    p["live"] = True
+    _apply_progress_redraw(force=first)
+
+
+def apply_progress_event(kind):
+    """One application resolved: "applied", "broke" or "refused".
+
+    FORCED REDRAW ON A BREAK. The throttle exists so the screen can be picked up and moved, and
+    a break is the one event worth interrupting that for -- it is the number the owner asked for
+    first, and it is what every projection on the screen moves on."""
+    p = _apply_progress
+    if p is None:
+        return
+    if kind == "applied":
+        p["applied"] += 1
+    elif kind == "broke":
+        p["broken"] += 1
+    elif kind == "refused":
+        p["refused"] += 1
+    _apply_progress_redraw(force=(kind == "broke"))
+
+
+def apply_progress_end():
+    """Close the screen and disarm. A NO-OP WHEN NOT ARMED, which is what makes it safe to call
+    from main()'s finally regardless of which mode ran or how it ended."""
+    global _apply_progress
+    if _apply_progress is None:
+        return
+    was_live = _apply_progress["live"]
+    _apply_progress = None
+    if not was_live:
+        return                      # never shown -- a store-only run, so there is nothing to close
+    try:
+        Gumps.CloseGump(APPLY_PROGRESS_GUMP_ID)
+    except Exception:
+        pass                        # already gone, or the player closed it -- nothing to do
+
+
 APPLY_PREVIEW_GUMP_ID = 0x52554E50  # "RUNP" -- distinct tag from this project's other custom
                                        # gumps (RUNR/RUNQ/RUNS/RUNM), same ASCII-tag convention.
 APPLY_PREVIEW_ROW_HEIGHT = 22
@@ -10552,8 +10831,18 @@ def run_application_flow():
         len(requests), slot_def["label"], ", ".join(
             "{} -> {}".format(p["label"], ts) for p, ts in requests)))
     RUN_HALT[0] = None
+    # THE PROGRESS SCREEN OPENS HERE AND CLOSES IN main() (2026-11-09). Here, because this is the
+    # first point where there is anything true to put on it: the slot and the stat list are
+    # settled, the preview has been accepted, and the player is no longer working through picker
+    # screens this would sit on top of. In main(), because this function has six separate
+    # `return False` paths and run_slot_application() below it has more again -- a finally around
+    # the one call site closes the screen on every one of them, and on an exception, without
+    # re-indenting this whole request loop to get a try block around it.
+    apply_progress_begin(slot_def["label"], len(requests))
     for property_def, target_stat in requests:
         log("=== {} (target {}) ===".format(property_def["label"], target_stat))
+        apply_progress_stat(property_def["label"], target_stat,
+                            requests.index((property_def, target_stat)) + 1)
         this_restrict = restrict_serials if property_def is restrict_property_def else None
         stat_ok = prepare_and_store_one_stat(
             property_def, slot_def, target_stat, restrict_serials=this_restrict)
@@ -11808,7 +12097,13 @@ def main():
     if mode == "craft":
         _finished = bool(run_crafting_flow())
     elif mode == "apply":
-        _finished = bool(run_application_flow())
+        # CLOSED IN A FINALLY -- see apply_progress_begin()'s own note for why the open and the
+        # close live in different functions. apply_progress_end() is a no-op when the screen was
+        # never armed, so this is safe however the flow ended and whatever it did first.
+        try:
+            _finished = bool(run_application_flow())
+        finally:
+            apply_progress_end()
     else:
         log("No valid mode chosen -- stopping.", 33)
 

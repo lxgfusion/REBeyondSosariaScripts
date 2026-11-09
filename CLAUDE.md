@@ -250,6 +250,20 @@ replace itself; letting it would overwrite the fork with upstream's file.
 `update_offer_at_start()` returns immediately, and the test asserts that its
 first real statement is a `return`.
 
+**The apply progress screen is shared, and must stay dark in the published
+file.** It counts breaks and items remaining during an apply run, and the
+figure it exists for is the projection: the measured break rate turns "runes
+left" into "items this supply will still eat", which is the answer to whether
+fifty items is the right number to bring. The arming call sits in
+`run_application_flow()`, which **both** forks run — so arming is deliberately
+*not* drawing. The screen goes live only in `apply_progress_pass()`, called
+from `run_slot_application()` alone, which `RuneCraftAndStore.py` never
+reaches. **Do not "fix" the arming call to draw on arrival**: that is the bug
+this shape was written to avoid, and it would give the published script a
+window reading "Applying to Shoes — Items: 0 in the pack" for the length of a
+craft that applies nothing to anything. Section 1 of
+`tests/test_runecraftandstore.py` proves the chain by reachability.
+
 **No serial in the published file.** It has no serial config at all — it
 resolves the keys by name — so it is not registered in
 `tools/sync_serials.py`. One real Master Keys serial did travel in a comment
@@ -431,6 +445,24 @@ it is shown to be in a part neither fork touched.
   before the action that should open it, or a leftover window from the previous
   interaction gets answered instead. Symptom: an interaction that works most of
   the time and fails "randomly".
+- **Re-sending a gump puts it back where `SendGump` says, not where the player
+  dragged it.** So a window that redraws to show live figures fights whoever
+  tries to move it, and the redraw interval *is* the usability of the thing: at
+  one redraw per event an apply run (roughly one every 400 ms) makes its own
+  progress screen impossible to pick up. Throttle to about a second, redraw
+  immediately only for the events worth interrupting that for, and keep the
+  position in a constant. `Gumps.GetGumpData(id).x`/`.y` *may* report where it
+  was moved to — **unverified**, so read it defensively and fall back to the
+  constant (`_apply_progress_where()` in the rune fork is the pattern: missing
+  data, a build without the fields, and a meaningless `0` all land on the
+  default).
+- **No two gump ids may hold the same number.** Sending a button to the wrong
+  window disconnects the client, and closing the wrong one takes down a screen
+  the player is using — both start as two constants sharing a value.
+  `OmniRuneCraftFork.py` has already shipped that bug once: `PREFLIGHT_GUMP_ID`
+  was `0x52554E50`, the same as `APPLY_PREVIEW_GUMP_ID`. Section 5 of
+  `tests/test_omnirunecraftfork.py` now parses every `*GUMP_ID = 0x…` in the
+  file and fails on a repeat, so a new screen cannot reintroduce it.
 - **An interruption that the caller resumes from must not reset the callee's
   progress.** `run_job()` reset its waypoint on entry so a fresh lap started
   clean — but the main loop re-enters it after a vendor round or a Greyskull

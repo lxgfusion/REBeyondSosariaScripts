@@ -122,6 +122,46 @@ def main():
     check("the apply code is still in the file, just orphaned",
           "run_slot_application" in funcs, True)
 
+    # AND THE PROGRESS SCREEN STAYS DARK (2026-11-09). The screen that counts
+    # breaks and items during an apply run is shared code, and this fork's own
+    # run_application_flow() arms it - so "it is never armed" is NOT the
+    # guarantee. The guarantee is that arming is not showing, and it rests on
+    # a chain of three facts, one per check:
+    #
+    #   only _apply_progress_redraw() draws,
+    #   it refuses unless the state is live,
+    #   only apply_progress_pass() sets live,
+    #   and only run_slot_application() calls that - which is unreachable
+    #   from main(), per the checks above.
+    #
+    # Checked rather than trusted because the first version of this screen drew
+    # on arming, which would have given this script a window reading "Applying
+    # to Shoes -- Items: 0 in the pack" for the length of a craft that applies
+    # nothing to anything. That is not a progress screen, it is a false
+    # statement about what the script is doing.
+    check("nothing draws the progress screen but the throttle",
+          sorted(f for f in funcs
+                 if "_draw_apply_progress" in calls(funcs, f)),
+          ["_apply_progress_redraw"])
+    check("and only the apply loop can make it live",
+          sorted(f for f in funcs
+                 if "apply_progress_pass" in calls(funcs, f)),
+          ["run_slot_application"])
+    check("so the call that would show it is unreachable from main()",
+          "apply_progress_pass" in from_main, False)
+    # THE GATE ITSELF, not the call graph. A mutation run on 2026-11-09 deleted
+    # the `live` test from _apply_progress_redraw() and all three checks above
+    # still passed: it changes nobody's callers, it just lets
+    # apply_progress_stat() - which IS reachable from main() in this fork -
+    # draw. The fork's own suite caught it; this one is the only suite a clone
+    # gets, so it has to catch it too.
+    _guard = [s for s in funcs["_apply_progress_redraw"].body
+              if isinstance(s, ast.If)]
+    check("the throttle has a guard at all", bool(_guard), True)
+    check("and it refuses to draw unless the screen is live",
+          any(isinstance(n, ast.Constant) and n.value == "live"
+              for n in ast.walk(_guard[0].test)) if _guard else False, True)
+
     print()
     print("=" * 96)
     print("2. THE FLOW STORES INSTEAD")
