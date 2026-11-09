@@ -440,13 +440,13 @@ def test_a_master_key_is_pressed_ONCE(m):
     """
     misc = FakeMisc(menu=["Open", "Add", "Refill from stock"])
     mod = load(misc=misc)
-    mod["storage"] = 0x4335A205
+    mod["storage"] = 0x4000ABCD
     mod["treasure"] = 0
     mod["masterKey"] = True
     mod["storeFish"]()
     check("one reply, not two", len(misc.replies), 1)
     check("and it went to the master key",
-          [s for s, _l in misc.replies], [0x4335A205])
+          [s for s, _l in misc.replies], [0x4000ABCD])
 
 
 def test_the_same_key_in_both_slots_is_pressed_once_without_the_flag(m):
@@ -455,8 +455,8 @@ def test_the_same_key_in_both_slots_is_pressed_once_without_the_flag(m):
     copy was already in."""
     misc = FakeMisc(menu=["Open", "Add", "Refill from stock"])
     mod = load(misc=misc)
-    mod["storage"] = 0x4335A205
-    mod["treasure"] = 0x4335A205        # the same key in both slots
+    mod["storage"] = 0x4000ABCD
+    mod["treasure"] = 0x4000ABCD        # the same key in both slots
     mod["masterKey"] = False            # NOT set, deliberately
     check("it works it out on its own", mod["usingOneKey"](), True)
     mod["storeFish"]()
@@ -496,13 +496,13 @@ def test_the_startup_line_says_which_way_it_will_store(m):
     misc = FakeMisc(menu=["Open", "Add", "Refill from stock"])
     mod = load(misc=misc)
     mod["player"] = 0x003A0836
-    mod["storage"] = 0x4335A205
+    mod["storage"] = 0x4000ABCD
     mod["treasure"] = 0
     mod["masterKey"] = True
     mod["checkConfig"]()
     said = " ".join(misc.messages)
     check("it says ONE press", "ONE press" in said, True)
-    check("and names the key", "0x4335A205" in said, True)
+    check("and names the key", "0x4000ABCD" in said, True)
     check("and it does NOT nag about treasure being 0",
           "treasure is 0" in said, False)
 
@@ -525,7 +525,7 @@ def test_a_treasure_key_ignored_by_masterKey_is_called_out(m):
     misc = FakeMisc(menu=["Open", "Add", "Refill from stock"])
     mod = load(misc=misc)
     mod["player"] = 0x003A0836
-    mod["storage"] = 0x4335A205
+    mod["storage"] = 0x4000ABCD
     mod["treasure"] = 0x07BE5A00
     mod["masterKey"] = True
     mod["checkConfig"]()

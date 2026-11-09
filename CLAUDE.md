@@ -30,6 +30,88 @@ touching `resource_order_runner.py`. It carries the version history, what is in
 `.snapshots/`, the open Copper Ingots issue and its one-line fix, and the config
 values the user tunes and that must not be overwritten.
 
+## Serials: the live copy keeps them, the shared copy does not
+
+A serial belongs to one item on one shard. Nobody else's would work, and a
+real one left in a file that gets passed around is worse than a blank: it
+makes the script *look* configured, so the new user's first experience is it
+skipping books that were never theirs.
+
+So for any script that has adopted the split:
+
+| copy | holds |
+|---|---|
+| `Scripts/<name>.py` — the shared one, the one that goes to GitHub | `0x00000000` placeholders |
+| `E:\uoclients\...\Scripts\<name>.py` — live | the real serials |
+| `.local/<name>.serials.py` — gitignored, never leaves this machine | the real serials, as a block |
+
+A script opts in by putting `# >>> SERIALS` and `# <<< SERIALS` **at column 0**
+around its serial assignments. Everything between them is swapped wholesale,
+so the block can hold comments and multi-line structures.
+
+```bash
+python tools/sync_serials.py --check                      # verify the split
+python tools/sync_serials.py --deploy combine_ro_books.py # repo code + local serials -> live
+python tools/sync_serials.py --capture <script>.py        # adopt the split for a script
+```
+
+**Do not `cp` in either direction for a script that has adopted this.**
+Repo → live would overwrite the user's serials with zeros; live → repo would
+publish them. The old rule in "Where the scripts actually run" — diff first,
+mirror live → repo if only config differs — still holds for every script that
+has *not* adopted the split.
+
+`--check` also fails on a real serial written into a worked example, which is
+how it earned its keep: the first version of `combine_ro_books.py` had one in
+its docstring's sample journal output. Placeholders used in documentation go
+in `EXAMPLE_SERIALS` in the tool.
+
+### When the markers do not fit: scrub in place
+
+`Sandmaker.py` and `ReagentBuyer.py` are split the other way, and will stay
+that way. Their serials are not together: each sits under its own paragraph of
+Item Inspector evidence, a hundred lines from the next, inside a config band
+the owner reads top to bottom. One marker block would have moved six
+explanations away from the things they explain, in a 61 KB script that works.
+
+So those two are scrubbed **where the constants stand** — comments
+untouched — and `.local/<name>.serials.py` holds the real values by name,
+to be pasted back rather than deployed. `tools/sync_serials.py` does not know
+about them and should not be pointed at them: it would report the missing
+markers as a failure.
+
+**A number quoted as evidence is not configuration.** An Item Inspector dump
+in a comment, or a row in a handoff table, is the record of why a constant
+holds what it holds, and scrubbing it breaks the record for nothing once the
+number is public. A serial in an *assignment* is what must not travel. Where
+the serials in a file were scrubbed, the file says so once, near the first
+dump, so the project is not left quoting a reading nobody took.
+
+### Before a push: `tools/check_serials.py`
+
+```bash
+python tools/check_serials.py        # would a push publish a NEW serial?
+python tools/check_serials.py --all  # every one in the repo, published or not
+```
+
+It parses every tracked file and reports module-level constants whose value
+looks like a serial, which is what tells configuration from evidence. **Run it
+before pushing.** On 2026-11-08 it caught four serials heading for GitHub for
+the first time — the Master Keys among them — in two scripts nobody
+had thought about, with thirty-three unpushed commits behind them.
+
+`--all` currently fails on **26 files** and that is not a bug. The repo has
+carried real serials since before the split existed: `.snapshots/`, the test
+fixtures built from live dumps, `resource_order_runner.py`,
+`harvest_runner.py`, `COVFarm.py`, `mining_runner.py`. All of them are already
+public, so that list is the retrofit worklist, not a gate.
+
+**Where each script stands:** `combine_ro_books.py` has the markers.
+`Sandmaker.py` and `ReagentBuyer.py` are scrubbed in place.
+`RuneCraftAndStore.py` needs neither — it has no serial config at all and
+resolves its keys by name. Everything else still carries real serials in its
+repo copy, and they are already published.
+
 ## Where the scripts actually run
 
 **Live folder: `E:\uoclients\RazorEnhanced\Scripts\`** — that is what Razor

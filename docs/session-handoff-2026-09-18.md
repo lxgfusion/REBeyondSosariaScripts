@@ -61,7 +61,7 @@ live values are the user's. **Never blind-copy repo → live here.**
 | | repo | live |
 |---|---|---|
 | `CAMP_POINT` | `(752, 475)` | `(752, 475)` — mirrored into the repo 2026-10-05 |
-| `MASTER_KEY_SERIAL` | `0` | `0x4335A205` |
+| `MASTER_KEY_SERIAL` | `0` | `0x4000ABCD` |
 
 The `0` in the repo is deliberate: with no serial the key is found by graphic
 and hue, so the script works for whoever is carrying one. The live copy names

@@ -174,6 +174,16 @@ def load(stub):
            "Misc": stub, "Items": stub, "Gumps": stub, "Mobiles": stub,
            "Player": stub, "Target": stub, "BuyAgent": stub, "Journal": stub}
     exec(compile(source, SCRIPT, "exec"), env)
+
+    # CONFIGURE THE KEY SERIAL, because the shared copy does not
+    # (2026-11-08). Scripts/ReagentBuyer.py ships 0x00000000 so no real item
+    # serial travels to GitHub; the real one is in
+    # .local/ReagentBuyer.serials.py. Tests that care about the value still
+    # set it themselves afterwards; this is what the rest need to work at all.
+    if "STORAGE_KEY_SERIAL" in env:
+        env["STORAGE_KEY_SERIAL"] = 0x4000ABCD
+    if "REAGENT_KEY_SERIAL" in env:
+        env["REAGENT_KEY_SERIAL"] = 0x4000ABCE
     return env
 
 
@@ -1078,7 +1088,7 @@ def key_world(where):
 
     def find(serial):
         serial = int(serial)
-        if serial == 0x4335A205 and where not in opened and where != "pack":
+        if serial == 0x4000ABCD and where not in opened and where != "pack":
             return None
         for bag in (pack, outer, inner):
             if int(bag.Serial) == serial:
@@ -1095,7 +1105,7 @@ def test_the_key_is_found_loose_in_the_pack():
     something already in sight."""
     stub, opened = key_world("pack")
     m = load(stub)
-    m["STORAGE_KEY_SERIAL"] = 0x4335A205
+    m["STORAGE_KEY_SERIAL"] = 0x4000ABCD
     check("found straight away", m["find_storage_key"]() is not None, True)
     check("and no bag was opened for it", opened, [])
 
@@ -1105,7 +1115,7 @@ def test_the_key_is_found_in_a_bag_without_being_told_which():
     KEY_BAG_SERIAL is 0, so the bags get turned out until it appears."""
     stub, opened = key_world(0x42385515)
     m = load(stub)
-    m["STORAGE_KEY_SERIAL"] = 0x4335A205
+    m["STORAGE_KEY_SERIAL"] = 0x4000ABCD
     check("found in the end", m["find_storage_key"]() is not None, True)
     check("by opening the pack and then that bag",
           opened, [0x41D40F58, 0x42385515])
@@ -1114,7 +1124,7 @@ def test_the_key_is_found_in_a_bag_without_being_told_which():
 def test_the_key_is_found_in_a_bag_inside_a_bag():
     stub, opened = key_world(0x42385516)
     m = load(stub)
-    m["STORAGE_KEY_SERIAL"] = 0x4335A205
+    m["STORAGE_KEY_SERIAL"] = 0x4000ABCD
     check("found two deep", m["find_storage_key"]() is not None, True)
     check("having opened both bags on the way",
           opened, [0x41D40F58, 0x42385515, 0x42385516])
@@ -1125,7 +1135,7 @@ def test_the_bags_are_turned_out_once_not_before_every_deposit():
     opener flap windows open all run."""
     stub, opened = key_world("nowhere")
     m = load(stub)
-    m["STORAGE_KEY_SERIAL"] = 0x4335A205
+    m["STORAGE_KEY_SERIAL"] = 0x4000ABCD
     check("not found", m["find_storage_key"](), None)
     first = len(opened)
     check("it did look", first > 1, True)
@@ -1142,7 +1152,7 @@ def test_the_bags_are_turned_out_once_not_before_every_deposit():
 def test_a_configured_bag_skips_the_search():
     stub, opened = key_world(0x42385515)
     m = load(stub)
-    m["STORAGE_KEY_SERIAL"] = 0x4335A205
+    m["STORAGE_KEY_SERIAL"] = 0x4000ABCD
     m["KEY_BAG_SERIAL"] = 0x42385515
     check("found", m["find_storage_key"]() is not None, True)
     check("straight to the bag, no walking", opened, [0x42385515])
@@ -1154,7 +1164,7 @@ def test_either_kind_of_key_works():
     stub = Stub(menu=["Open", "Add", "Refill from stock"])
     m = load(stub)
     m["pack_count"] = lambda: 5 if not stub.replied else 1
-    for serial in (0x4335A205, 0x404D69CE):
+    for serial in (0x4000ABCD, 0x4000ABCE):
         del stub.replied[:]
         m["STORAGE_KEY_SERIAL"] = serial
         call("0x%X stores" % serial, m["store_haul"], True)

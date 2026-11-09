@@ -78,7 +78,7 @@ SCRIPT_VERSION = "2026-09-30.4"
 
 # The Stone Storage. From the recording; it is locked down, so the serial is
 # stable in a way the stones inside it are not.
-STONE_STORAGE_SERIAL = 0x4017817A
+STONE_STORAGE_SERIAL = 0x00000000    # the real one is in .local/Sandmaker.serials.py
 
 # The shared stash window every storage key on this shard opens.
 # resource_order_runner.py calls it BOOK_GUMP, harvest_runner.py calls it
@@ -124,7 +124,7 @@ WITHDRAW_AMOUNT = 1
 #     "Granite Crate", 0x402452BA, ItemID 0x0E3D, hue 0x0000
 #     at (2071, 2506, 2), locked down, Container: YES
 # A granite dropped IN here becomes sand immediately.
-BOX_SERIAL = 0x402452BA
+BOX_SERIAL = 0x00000000    # the real one is in .local/Sandmaker.serials.py
 BOX_ID = 0x0E3D
 BOX_SPOT = (2071, 2506)
 
@@ -136,7 +136,7 @@ BOX_SPOT = (2071, 2506)
 # roughly the platform's tile - so it is found by looking at the ground, not
 # by opening anything. Two tiles from the crate, so one ground snapshot taken
 # beside the crate already covers it.
-PLATFORM_SERIAL = 0x402452B1
+PLATFORM_SERIAL = 0x00000000    # the real one is in .local/Sandmaker.serials.py
 PLATFORM_ID = 0x07BD
 PLATFORM_SPOT = (2073, 2504)
 
@@ -171,7 +171,10 @@ GRAB_STEADY_POLLS = 3
 
 # THE REAGENT KEYS - where the sand is stored. From the Item Inspector,
 # 2026-09-30:
-#     Name "Reagent Keys", 0x404D69CE, ItemID 0x18DE, hue 0x0021
+# THE SERIALS IN THE DUMPS BELOW ARE EXAMPLES. 0x4000ABxx is a
+# placeholder; the real ones are in .local/Sandmaker.serials.py, which
+# is gitignored. Item ids, hues and positions are as inspected.
+#     Name "Reagent Keys", 0x4000ABCE, ItemID 0x18DE, hue 0x0021
 #     Blessed, Weight 1 Stone, in the backpack
 #     Container: NO
 #
@@ -183,7 +186,7 @@ GRAB_STEADY_POLLS = 3
 # THAT ENTRY DEPOSITS EVERY REAGENT IN THE PACK, not only the sand. If you are
 # carrying reagents you want to keep, take them out first.
 # WHERE THE SAND LANDS. From the Item Inspector, 2026-09-30:
-#     "a loot bag", 0x407D25FC, ItemID 0x0E76, hue 0x04F2
+#     "a loot bag", 0x4000ABCF, ItemID 0x0E76, hue 0x04F2
 #     Container: YES, inside the backpack (0x41D40F58)
 #
 # "[grab" does NOT put the sand in the backpack itself - it goes in this bag,
@@ -195,12 +198,12 @@ GRAB_STEADY_POLLS = 3
 # your backpack. Then SAND_BAG_SERIAL is ignored, the pack is what gets
 # counted, and nothing is dragged before the deposit.
 SAND_IN_SEPARATE_BAG = True
-SAND_BAG_SERIAL = 0x407D25FC
+SAND_BAG_SERIAL = 0x00000000    # the real one is in .local/Sandmaker.serials.py
 SAND_BAG_ID = 0x0E76
 SAND_BAG_HUE = 0x04F2
 
 # WHERE THE REAGENT KEYS LIVE. Inspected the same day:
-#     "pouch", 0x4133A297, ItemID 0x0E79, hue 0x0000
+#     "pouch", 0x4000ABD0, ItemID 0x0E79, hue 0x0000
 #     Container: YES, inside the backpack (0x41D40F58)
 #
 # The keys are NOT carried loose in the pack here, so a top-level search
@@ -211,7 +214,7 @@ SAND_BAG_HUE = 0x04F2
 # Then KEY_BAG_SERIAL is ignored and nothing opens a pouch. The serial search
 # runs either way, so a key that Razor can already see is found regardless.
 KEY_IN_SEPARATE_BAG = True
-KEY_BAG_SERIAL = 0x4133A297
+KEY_BAG_SERIAL = 0x00000000    # the real one is in .local/Sandmaker.serials.py
 KEY_BAG_ID = 0x0E79
 KEY_BAG_HUE = 0x0000
 
@@ -225,7 +228,7 @@ KEY_BAG_HUE = 0x0000
 # because then it is already in the pack.
 SAND_TO_PACK_BEFORE_STORE = True
 
-REAGENT_KEY_SERIAL = 0x404D69CE
+REAGENT_KEY_SERIAL = 0x00000000    # the real one is in .local/Sandmaker.serials.py
 REAGENT_KEY_ID = 0x18DE
 REAGENT_KEY_HUE = 0x0021
 REAGENT_KEY_NAMES = ["reagent keys", "reagent key"]

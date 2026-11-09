@@ -26,8 +26,12 @@ that spot. `STAND_STILL = False` restores the old walking behaviour.
 
 | | |
 |---|---|
-| `[grab` fills | **a loot bag** `0x407D25FC`, ItemID `0x0E76`, hue `0x04F2`, inside the pack |
-| the keys live in | **a pouch** `0x4133A297`, ItemID `0x0E79`, inside the pack |
+<!-- The serials in this document are examples (0x4000ABxx). The real
+ones are in .local/Sandmaker.serials.py, which is gitignored; item ids,
+hues and positions are as inspected. -->
+
+| `[grab` fills | **a loot bag** `0x4000ABCF`, ItemID `0x0E76`, hue `0x04F2`, inside the pack |
+| the keys live in | **a pouch** `0x4000ABD0`, ItemID `0x0E79`, inside the pack |
 
 **The grab does not fill the backpack.** The first version counted the pack's
 top level and saw nothing, every time. Counting now re-opens the loot bag and
@@ -54,7 +58,7 @@ stack — and sand stacks, so it is normally one drag however big the batch.
 ### The Reagent Keys — `Container: No`
 
 ```
-Name "Reagent Keys", 0x404D69CE, ItemID 0x18DE, hue 0x0021, Blessed, 1 stone
+Name "Reagent Keys", 0x4000ABCE, ItemID 0x18DE, hue 0x0021, Blessed, 1 stone
 Container: NO      Movable: Yes      in the backpack
 ```
 

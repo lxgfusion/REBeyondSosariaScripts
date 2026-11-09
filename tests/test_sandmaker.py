@@ -66,7 +66,42 @@ def load():
            "Misc": _Stub(), "Player": _Stub(), "Items": _Stub(),
            "Gumps": _Stub(), "PathFinding": _Stub(), "Target": _Stub()}
     exec(compile(source, SCRIPT, "exec"), env)
+
+    # CONFIGURE THE SERIALS, because the shared copy does not (2026-11-08).
+    # Scripts/Sandmaker.py ships 0x00000000 for every one of these so no real
+    # item serial travels to GitHub; the real ones are in
+    # .local/Sandmaker.serials.py. A test that inherited the placeholders got
+    # two different containers with the same serial, and the script's own
+    # "this is not set" guard then refused them both - so the values are set
+    # HERE, distinct and obviously fake, and every test below builds its
+    # world out of these rather than out of whatever the file happens to say.
+    for name, value in [("STONE_STORAGE_SERIAL", 0x4000ABD3),
+                        ("BOX_SERIAL", 0x4000ABD1),
+                        ("PLATFORM_SERIAL", 0x4000ABD2),
+                        ("SAND_BAG_SERIAL", 0x4000ABCF),
+                        ("KEY_BAG_SERIAL", 0x4000ABD0),
+                        ("REAGENT_KEY_SERIAL", 0x4000ABCE)]:
+        if name not in env:
+            raise SystemExit("Sandmaker.py no longer defines %s" % name)
+        env[name] = value
     return env
+
+
+def shipped_value(name):
+    """What the FILE says, not what load() then set.
+
+    The point of the scrub is a property of the file on disk, so asserting it
+    against the loaded module would be asserting against the fixture.
+    """
+    import ast
+    with open(SCRIPT, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    return ast.literal_eval(node.value)
+    return None
 
 
 # The live dump of the Stone Storage, 2026-09-18.
@@ -752,9 +787,16 @@ def test_the_sand_is_counted_where_grab_actually_puts_it(m):
     first version counted the pack and saw nothing. Both are counted now,
     because a stack dragged out by hand would be loose in the pack.
     """
-    check("the loot bag is the one the inspector showed",
-          m["SAND_BAG_SERIAL"], 0x407D25FC)
-    check("and the pouch holds the keys", m["KEY_BAG_SERIAL"], 0x4133A297)
+    # THESE PINNED THE REAL SERIALS until 2026-11-08, when the shared copy
+    # was scrubbed for publication. A number is no longer the thing worth
+    # asserting - the RULE is, because a real serial creeping back into the
+    # shared copy is the fault this now guards. Read off the FILE, not off
+    # the module, because load() configures the module on purpose.
+    # The real values are in .local/Sandmaker.serials.py.
+    for name in ("SAND_BAG_SERIAL", "KEY_BAG_SERIAL", "REAGENT_KEY_SERIAL",
+                 "STONE_STORAGE_SERIAL", "BOX_SERIAL", "PLATFORM_SERIAL"):
+        check("the shared copy ships a placeholder for %s" % name,
+              shipped_value(name), 0x00000000)
 
     opened = []
 

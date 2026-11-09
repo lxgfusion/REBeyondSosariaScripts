@@ -94,7 +94,7 @@ DEPOSIT_KEYS = [
     {
         "enabled": True,
         "label": "Master Key",
-        "serial": 0,            # e.g. 0x4335A205
+        "serial": 0,            # e.g. 0x4000ABCD
         "id": 0x176B,
         "hue": 0x0481,
     },

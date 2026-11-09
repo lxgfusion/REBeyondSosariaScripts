@@ -4,3 +4,9 @@ __pycache__/
 # Local Claude Code settings: personal permission rules, carries the local
 # Windows username and machine paths. The shared conventions live in CLAUDE.md.
 .claude/settings.local.json
+
+# Real item serials for the scripts, one file per script. A serial belongs to
+# one item on one shard, so the shared copy of a script carries examples and
+# these never leave this machine. tools/sync_serials.py puts them together
+# when it deploys; see CLAUDE.md.
+.local/

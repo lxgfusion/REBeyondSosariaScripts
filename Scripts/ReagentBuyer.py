@@ -93,9 +93,13 @@ SCRIPT_VERSION = "2026-10-24.16"
 # the same for both: single-click the key and answer "Refill from stock". All
 # that has to be right is the serial. Inspected 2026-10-24:
 #
-#     Master Keys, 0x4335A205, ItemID 0x176B, hue 0x0481, Blessed, 5 stones
+#     (THE SERIAL BELOW IS AN EXAMPLE. The shared copy of this script
+#     carries 0x4000ABxx placeholders; the real ones live in
+#     .local/ReagentBuyer.serials.py, which never leaves the owner's
+#     machine. Everything else in this dump is as inspected.)
+#     Master Keys, 0x4000ABCD, ItemID 0x176B, hue 0x0481, Blessed, 5 stones
 #
-STORAGE_KEY_SERIAL = 0x4335A205
+STORAGE_KEY_SERIAL = 0x00000000    # the real one is in .local/ReagentBuyer.serials.py
 
 # WHERE THE KEY LIVES - you do not have to say. Loose in the backpack or
 # tucked in a bag inside it, both work.
