@@ -71,10 +71,16 @@ NOT_A_SERIAL = set([
 # than the value because a new gump id should not have to be added above
 # before the check passes.
 NOT_SERIAL_NAMES = ("GUMP", "BUTTON", "HUE", "ITEM_ID", "ITEMID", "GRAPHIC",
-                    "BODY", "SPELL")
+                    "BODY", "SPELL",
+                    # A BOUND IS NOT A SERIAL. SERIAL_LOW and SERIAL_HIGH
+                    # below are the range this very check uses, and the
+                    # first run of the tool reported them as leaked serials
+                    # in its own source - which is the right answer to the
+                    # wrong question.
+                    "_LOW", "_HIGH", "_MIN", "_MAX", "BOUND", "RANGE")
 
-LOW = 0x10000000
-HIGH = 0xFFFFFFFF
+SERIAL_LOW = 0x10000000
+SERIAL_HIGH = 0xFFFFFFFF
 
 
 def git(*args):
@@ -110,7 +116,7 @@ def numbers_in(value):
 
 
 def looks_like_a_serial(number):
-    return LOW <= number <= HIGH and number not in NOT_A_SERIAL
+    return SERIAL_LOW <= number <= SERIAL_HIGH and number not in NOT_A_SERIAL
 
 
 def serials_in_source(source):
