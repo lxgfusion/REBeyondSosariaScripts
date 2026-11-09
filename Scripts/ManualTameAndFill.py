@@ -22,8 +22,10 @@ How it decides what to fill
 2. The animal is found - from the client's own pet list, or, when that has not
    caught up yet, by reading the tooltips of controlled creatures within
    TAME_SCAN_RANGE.
-3. Its NAME is matched against a catalogue of 112 tameable species, and its body
-   value has to agree with the name.
+3. Its NAME is matched against the catalogue of tameable species IN FULL, not
+   as a substring - "a lesser hiryu" is not a hiryu, and since the two share
+   the body value 0xF3 the name is the only thing that can tell them apart -
+   and its body value has to agree with the name.
 4. That species' deed is read out of your pack, double-clicked, and the animal
    targeted. The credit is spent.
 
@@ -37,7 +39,12 @@ What it will never touch
   the script started. It snapshots all of that before reading a journal line.
 - Your mount.
 - Anything named in KEEP_NAME_WORDS, or listed in NEVER_FILL_SERIALS.
-- Anything whose name does not match a species you hold a deed for.
+- Anything whose name does not match a species you hold a deed for IN FULL.
+  A name that merely contains one is named and refused - "'lesser hiryu' is
+  not a 'hiryu'" - with a paste-ready EXTRA_ANIMALS row, body included, if
+  your shard really does deed it.
+- A DEED whose "Creature Type:" names a species the catalogue does not know is
+  skipped the same way, rather than filed under the nearest substring.
 - Anything whose name and body value disagree.
 
 SETUP
@@ -87,6 +94,9 @@ Notes
   not load is left alone. A missed fill costs one animal; the alternative is
   trusting a body value, which is how the parent script once came to target
   zombies.
+- An animal the shard refuses FILL_ATTEMPTS times over is given up on rather
+  than offered again every lap. A deed is refused for reasons that do not
+  change by asking again.
 - Nothing is put on Razor's ignore list. This script does not search for
   creatures, so it has nothing to ignore.
 """
@@ -150,9 +160,22 @@ ONLY_ANIMALS = []
 # Never fill deeds for these, even holding one.
 NEVER_ANIMALS = []
 
-# Species your shard added that are not in the catalogue.
+# Species your shard added that are not in the catalogue. This is the seam for
+# shard data: ANIMAL_CATALOGUE below is extracted from ServUO source and stays
+# that way, and anything the shard invented goes here.
 # Format: ("name", [body, ...], min_tame_skill)
-EXTRA_ANIMALS = []
+EXTRA_ANIMALS = [
+    # BeyondSosaria added a taming order for these, 2026-11-09. The body is
+    # read off the Enhanced Mobile Inspector on a live one (MobileID 0x00F3) -
+    # THE SAME BODY AS A HIRYU, so the body guard cannot tell the two apart and
+    # the name is the only thing that can. See species_from_name().
+    #
+    # The 0.0 is NOT shard data: the minimum taming skill has not been read
+    # from anywhere. It costs nothing here because this fork sets
+    # SKIP_ABOVE_SKILL = False, so the figure is never consulted - but do not
+    # copy this row into TameAndFill.py, where it is.
+    ("lesser hiryu",          [0xF3],                    0.0),
+]
 
 # FALSE HERE, AND True IN TameAndFill.py. That script skips species it has not
 # the skill to tame, because it is the one doing the taming and would otherwise
@@ -228,6 +251,11 @@ TAME_CREDIT_MS = 45000
 # not be the animal you tamed at all.
 MAX_FILL_DIST = 3
 
+# Words that may sit in FRONT of a creature's name without changing which
+# species it is. Everything after them is part of the species, which is what
+# keeps "a lesser hiryu" from reading as a hiryu - see species_from_name().
+NAME_NOISE_WORDS = ["a", "an", "the"]
+
 # How far out to look for the animal you just tamed when the client's own pet
 # list has not caught up with it. Tooltips are only read inside this range, and
 # only while a credit is waiting to be spent, so this costs nothing at all when
@@ -241,7 +269,11 @@ TAME_SCAN_RANGE = 6
 DEED_TARGET_TIMEOUT = 4000     # ms to wait for the deed's target cursor
 DEED_SETTLE_MS = 400           # ms after the cursor opens before answering it
 DEED_RESULT_MS = 1500          # ms to wait for the deed to react
-DEED_RETRIES = 3               # deed double-click + target attempts
+DEED_RETRIES = 3               # cursor attempts within ONE fill
+FILL_ATTEMPTS = 2              # fills to try on one animal before giving up on
+                               # it altogether. This is what stops an animal
+                               # the shard will never accept being offered
+                               # again every lap until its credit expires.
 PROPS_TIMEOUT = 1500           # ms to wait for a tooltip
 
 POLL_MS = 250            # journal poll interval. All the idle loop does is read
@@ -450,6 +482,9 @@ _filled = [0]            # animals deeded this run, for the stop line
 
 _credits = []            # one time.time() per unspent taming-success line
 _known = set()           # serials already ruled on; never looked at again
+_tries = {}              # serial -> fills attempted, to stop retrying forever
+_exact = {}              # species name -> anchored pattern, built on demand
+_unknown_said = set()    # deed species already complained about, said once
 _said = set()            # (serial, text) already explained, so it is said once
 # =============================================================================
 # HELPERS
@@ -702,14 +737,26 @@ def field_value(text, label):
 
 
 def species_from_deed(text):
-    """Which species a deed is for. Explicit type field wins over free text."""
+    """(species, stated) for a deed. The type field wins over free text.
+
+    THE FIELD IS MATCHED IN FULL. It arrives clean - "creature type: lesser
+    hiryu" yields exactly "lesser hiryu" - so there is nothing to search
+    inside it, and searching inside it is what filed a LESSER HIRYU deed as a
+    hiryu deed on 2026-11-09. `stated` carries the value back even when
+    nothing matched, so the caller can name it and hand over the row that
+    would fix it.
+
+    The free-text fallback stays loose. A deed with no type field has its
+    species buried in other words, and a substring is the only thing to go on.
+    """
     for label in DEED_SPECIES_FIELDS:
         value = field_value(text, label.strip().lower())
         if value:
-            species = match_species(value)
+            species, cleaned, _loose = species_from_name(value)
             if species is not None:
-                return species
-    return match_species(text)
+                return species, cleaned
+            return None, cleaned
+    return match_species(text), ""
 
 
 def deed_progress(text):
@@ -795,10 +842,29 @@ def scan_deeds(full=False):
         text = item_text(item)
         if not looks_like_deed(text):
             continue
-        species = species_from_deed(text)
+        species, stated = species_from_deed(text)
         if species is None:
-            debug("Deed-like item names no known species: %s"
-                  % (item.Name or "0x%X" % item.ItemID), HUE_WARN)
+            if stated and stated not in _unknown_said:
+                # LOUD, NOT debug(). This deed is real and it is being
+                # skipped, and the alternative - filing it under the nearest
+                # substring - is what put a lesser hiryu deed in the hiryu
+                # slot and had the script offering animals to the wrong one.
+                #
+                # ONCE PER SPECIES, THOUGH. This runs at startup, after every
+                # fill and every DEED_RESCAN_MS, and a warning that repeats
+                # forever gets scrolled past, which is the same as not saying
+                # it at all.
+                _unknown_said.add(stated)
+                log("A deed says 'Creature Type: %s', which is not a species "
+                    "in the catalogue -- SKIPPING IT, so nothing is put in "
+                    "the wrong deed." % stated, HUE_BAD)
+                log("   If your shard really does deed one, add this to "
+                    "EXTRA_ANIMALS (the body is printed when you tame one):",
+                    HUE_WARN)
+                log("   %s" % unknown_species_line(stated), HUE_WARN)
+            elif not stated:
+                debug("Deed-like item names no known species: %s"
+                      % (item.Name or "0x%X" % item.ItemID), HUE_WARN)
             continue
 
         progress = deed_progress(text)
@@ -978,6 +1044,71 @@ def snapshot():
     return len(_known)
 
 
+def exact_name_pattern(name):
+    """An anchored pattern for one species name, built once and kept.
+
+    Lazily, and cached on the name, deliberately: building these inside
+    build_species() would add one more thing that has to happen before a name
+    can be read, and an ordering that can be got wrong silently is worse than
+    a dictionary lookup per creature.
+    """
+    found = _exact.get(name)
+    if found is None:
+        parts = [p for p in re.split(r"[^a-z0-9]+", name) if p]
+        found = re.compile(r"\A" + r"[^a-z0-9]*".join(
+            re.escape(p) for p in parts) + r"\Z")
+        _exact[name] = found
+    return found
+
+
+def species_from_name(raw):
+    """(species, cleaned, loose) for a name that IS a species and nothing else.
+
+    THE NAME HAS TO MATCH IN FULL. That is the difference between this and the
+    free-text match_species(), and it is used for the two places where the name
+    arrives clean: a creature's own name, and a deed's "Creature Type:" field.
+
+    "a lesser hiryu" CONTAINS "hiryu", and on 2026-11-09 that is exactly what
+    went wrong in game. The animal read as a hiryu and was offered to the hiryu
+    deed over and over, which the shard refused every time; and the lesser
+    hiryu DEED, whose field says "Creature Type: Lesser Hiryu", was itself
+    registered as a hiryu deed by the same substring match.
+
+    Sorting the patterns longest-first does not save it. That only picks the
+    best of the names the catalogue HAS, and the problem is a species it has
+    not got. Nor can the body: a live lesser hiryu reads MobileID 0x00F3, the
+    same as a hiryu, so the name is the only discriminator there is.
+
+    `loose` is what the substring match WOULD have answered, so the caller can
+    name the species it was about to be mistaken for instead of just refusing
+    and leaving you to guess why.
+    """
+    words = [w for w in re.split(r"[^a-z0-9]+", (raw or "").lower()) if w]
+    while words and words[0] in NAME_NOISE_WORDS:
+        words.pop(0)
+    cleaned = " ".join(words)
+    if not cleaned:
+        return None, "", None
+    for species, _loose in _patterns:
+        if exact_name_pattern(species["name"]).match(cleaned):
+            return species, cleaned, species
+    return None, cleaned, match_species(cleaned)
+
+
+def unknown_species_line(cleaned, body=None):
+    """A paste-ready EXTRA_ANIMALS row for a species the catalogue lacks.
+
+    Printed rather than guessed at. CLAUDE.md is explicit that shard data comes
+    from source or a live dump and never from memory, and the live creature in
+    front of you is a dump: its body is exact. The skill is left at 0.0 and
+    said to be unread, which costs nothing here because this fork sets
+    SKIP_ABOVE_SKILL = False.
+    """
+    where = "0x%X" % body if body is not None else "body"
+    return ('    ("%s", [%s], 0.0),    # skill not read from the shard'
+            % (cleaned, where))
+
+
 def pet_species(mob):
     """(species, why, retry) for one animal. species None means leave it alone.
 
@@ -1007,9 +1138,21 @@ def pet_species(mob):
             return None, ("the name matches KEEP_NAME_WORDS (%r), so it is a "
                           "keeper" % word), False
 
-    species = match_species(name)
+    species, cleaned, loose = species_from_name(name)
     if species is None:
-        return None, "it is not a species in the catalogue", False
+        if loose is not None:
+            # The substring match would have called this a `loose` and offered
+            # it that species' deed - the lesser hiryu bug. Name both, so the
+            # cause is obvious from the journal alone, and hand over the row
+            # that fixes it with the body read off this very animal.
+            return None, ("'%s' is not a '%s' -- its name has more in it than "
+                          "that, and '%s' is not in the catalogue. If your "
+                          "shard deeds one, add to EXTRA_ANIMALS:  %s"
+                          % (cleaned, loose["name"], cleaned,
+                             unknown_species_line(cleaned, mob.Body))), False
+        return None, ("'%s' is not a species in the catalogue. If your shard "
+                      "deeds one, add to EXTRA_ANIMALS:  %s"
+                      % (cleaned, unknown_species_line(cleaned, mob.Body))), False
     if species["name"] not in _active:
         return None, "there is no %s deed in your pack" % species["name"], True
     if mob.Body not in species["bodies"]:
@@ -1091,7 +1234,7 @@ def add_to_deed(species_name, pet_serial):
 
     # Final guard: the deed must still name this species.
     text = item_text(deed)
-    matched = species_from_deed(text)
+    matched, _stated = species_from_deed(text)
     if matched is None or matched["name"] != species_name:
         log("Refusing to use %s for %s - it reads as %s."
             % (deed.Name or "deed", species_name,
@@ -1206,7 +1349,17 @@ def consider(serial):
 
     log("Filling the %s deed%s." % (name, deed_status(name)))
     if not add_to_deed(name, serial):
-        return "wait"
+        _tries[serial] = _tries.get(serial, 0) + 1
+        if _tries[serial] < FILL_ATTEMPTS:
+            return "wait"
+        # OTHERWISE IT KEEPS TRYING, which is what the lesser hiryu looked like
+        # in game: refused, retried, refused again until the credit expired. A
+        # deed is refused for reasons that do not change by asking again - it
+        # is not for this species, or the animal is not ours to give.
+        log("The shard has refused %s %d times -- giving up on it. If it "
+            "should fit that deed, then its name and the deed's do not agree."
+            % (label, _tries[serial]), HUE_BAD)
+        return "keep"
 
     spend_credit()
     _filled[0] += 1

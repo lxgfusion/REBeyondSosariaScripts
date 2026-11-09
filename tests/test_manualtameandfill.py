@@ -800,6 +800,184 @@ def test_preflight_survives_a_build_with_no_player_mount():
     check("and preflight still passes", m["preflight"](), True)
 
 
+# ===========================================================================
+# 6. THE LESSER HIRYU (reported from game, 2026-11-09)
+# ===========================================================================
+#
+# A lesser hiryu was offered to a hiryu deed, over and over. Nothing was lost -
+# the shard refused it every time - but it never stopped asking.
+#
+# BOTH SIDES WERE WRONG, and either alone is enough to cause it. "a lesser
+# hiryu" CONTAINS "hiryu", so the ANIMAL read as a hiryu; and the deed's own
+# field says "Creature Type: Lesser Hiryu", which went through the same
+# substring match, so the LESSER HIRYU DEED was registered as a hiryu deed.
+# Holding both, scan_deeds() then dropped one as "already have a deed for it".
+#
+# THE BODY CANNOT HELP. A live lesser hiryu reads MobileID 0x00F3 on the
+# Enhanced Mobile Inspector - the same body as a hiryu. The name is the only
+# discriminator there is, which is why it has to be matched in full.
+
+# The tooltips exactly as the shard sends them: properties run together, so
+# "HiryuFilled" has to be pulled apart before any of this works.
+REAL_LESSER_DEED = "Level: 3Creature Type: Lesser HiryuFilled: 6/10Gold: 100%"
+REAL_HIRYU_DEED = "Level: 3Creature Type: HiryuFilled: 2/10Gold: 100%"
+
+
+def deed_pack(m, *tooltips):
+    """Put taming orders in the pack from raw, run-together tooltip text."""
+    made = []
+    for index, raw in enumerate(tooltips):
+        item = StubItem(0x40006000 + index, "A Taming Order", [raw],
+                        m["Player"].Backpack.Serial)
+        m["Items"].add(item)
+        made.append(item)
+    m["rescan"]("test")
+    return made
+
+
+def test_the_lesser_hiryu_deed_is_not_a_hiryu_deed():
+    m = load()
+    deed_pack(m, REAL_LESSER_DEED)
+    check("the shard's own tooltip registers a lesser hiryu deed",
+          sorted(m["_active"]), ["lesser hiryu"])
+    check("and it reads the progress off it too",
+          m["deed_status"]("lesser hiryu"), " [6/10]")
+
+
+def test_both_hiryu_deeds_are_kept_apart():
+    """THE REGRESSION. Before the fix both matched "hiryu" and scan_deeds kept
+    only the first, calling the second a spare - so one deed was ignored
+    outright and the other was as likely as not the wrong one."""
+    m = load()
+    lesser, full = deed_pack(m, REAL_LESSER_DEED, REAL_HIRYU_DEED)
+    check("both deeds register", sorted(m["_active"]),
+          ["hiryu", "lesser hiryu"])
+    check("each pointing at its own deed",
+          [m["_active"]["lesser hiryu"]["deed"], m["_active"]["hiryu"]["deed"]],
+          [lesser.Serial, full.Serial])
+
+
+def test_each_hiryu_goes_in_its_own_deed():
+    m = load()
+    lesser_deed, hiryu_deed = deed_pack(m, REAL_LESSER_DEED, REAL_HIRYU_DEED)
+
+    check("the two species share a body value, so it cannot tell them apart",
+          m["_species"]["lesser hiryu"]["bodies"],
+          m["_species"]["hiryu"]["bodies"])
+
+    m["Mobiles"].add(StubMobile(0x50300, "a lesser hiryu", 0xF3, ["(tame)"]))
+    m["Journal"].say("It seems to accept you as master.", 11.0)
+    m["poll_tames"]()
+    m["Target"].on_execute = lambda s: m["Mobiles"].remove(s)
+    check("a lesser hiryu fills", m["consider"](0x50300), "filled")
+    check("and it was the LESSER hiryu deed that was used",
+          m["Items"].used, [lesser_deed.Serial])
+
+    m["Mobiles"].add(StubMobile(0x50301, "a hiryu", 0xF3, ["(tame)"]))
+    m["Journal"].say("It seems to accept you as master.", 12.0)
+    m["poll_tames"]()
+    check("a hiryu fills too", m["consider"](0x50301), "filled")
+    check("into the hiryu deed, not the lesser one",
+          m["Items"].used[-1], hiryu_deed.Serial)
+
+
+def test_a_name_that_merely_contains_a_species_is_refused():
+    """The general case, which is why this is a matcher fix and not a new row.
+
+    A shard can add any variant it likes. One whose name contains a catalogue
+    name used to read as that species silently; it is now refused by name, with
+    the row that would fix it and the body read off the animal itself.
+    """
+    m = load()
+    deed_pack(m, REAL_HIRYU_DEED)
+    mob = StubMobile(0x50310, "a paragon hiryu", 0xF3, [])
+    species, why, retry = m["pet_species"](mob)
+    check("a paragon hiryu is not a hiryu", species, None)
+    check("it names what it was nearly mistaken for", "'hiryu'" in why, True)
+    check("and hands over a row to paste, body included",
+          '("paragon hiryu", [0xF3], 0.0)' in why, True)
+    check("asking again would not change it", retry, False)
+
+
+def test_a_deed_for_an_unknown_species_is_skipped_loudly():
+    m = load()
+    m["DEBUG"] = False          # so only a log() line can speak
+    deed_pack(m, "Level: 3Creature Type: Wyrmling DrakeFilled: 0/10")
+    check("a deed naming an unknown species is not registered",
+          sorted(m["_active"]), [])
+    said = " | ".join(m["Misc"].messages)
+    check("it says so out loud, not in debug", "SKIPPING IT" in said, True)
+    check("naming what the deed actually said", "wyrmling drake" in said, True)
+    check("with a row to paste", '("wyrmling drake", [body], 0.0)' in said,
+          True)
+    # And it did NOT quietly file it under "drake", which the substring match
+    # would have done.
+    check("and it is not filed under the species its name contains",
+          "drake" in m["_active"], False)
+
+
+def test_the_unknown_deed_warning_is_said_once():
+    """scan_deeds runs at startup, after every fill and every DEED_RESCAN_MS.
+    Found by rendering the journal: the whole warning came out every time, and
+    a warning that repeats forever gets scrolled past."""
+    m = load()
+    m["DEBUG"] = False
+    deed_pack(m, "Level: 3Creature Type: Wyrmling DrakeFilled: 0/10")
+    said = len(m["Misc"].messages)
+    check("it says its piece the first time", said > 0, True)
+    for _ in range(4):
+        m["rescan"]("again")
+    check("four more scans say nothing more", len(m["Misc"].messages), said)
+
+
+def test_a_deed_the_shard_keeps_refusing_is_given_up_on():
+    """The symptom the owner actually saw: not lost, just asked forever."""
+    m = load()
+    deed_pack(m, REAL_HIRYU_DEED)
+    m["Mobiles"].add(StubMobile(0x50320, "a hiryu", 0xF3, ["(tame)"]))
+    m["Journal"].say("It seems to accept you as master.", 11.0)
+    m["poll_tames"]()
+    m["Target"].on_execute = None          # the shard never takes it
+
+    verdicts = [m["consider"](0x50320) for _ in range(m["FILL_ATTEMPTS"])]
+    check("it tries FILL_ATTEMPTS times and then gives up",
+          verdicts, ["wait"] * (m["FILL_ATTEMPTS"] - 1) + ["keep"])
+    check("and says the shard refused it",
+          any("giving up on it" in t for t in m["Misc"].messages), True)
+
+
+def test_the_lesser_hiryu_row_is_shard_data_and_says_so():
+    """ANIMAL_CATALOGUE is extracted from ServUO source and stays that way.
+    Anything the shard invented goes in EXTRA_ANIMALS, which is the seam for
+    exactly this."""
+    m = load()
+    rows = dict((name, (bodies, skill))
+                for name, bodies, skill in m["EXTRA_ANIMALS"])
+    check("lesser hiryu is in EXTRA_ANIMALS", "lesser hiryu" in rows, True)
+    check("with the body read off the live inspector",
+          rows["lesser hiryu"][0], [0xF3])
+    check("and the ServUO catalogue is left alone",
+          any(name == "lesser hiryu" for name, _b, _s in m["ANIMAL_CATALOGUE"]),
+          False)
+    # The skill in that row is NOT shard data. It is never consulted here, and
+    # this is the check that fails if someone turns the flag back on without
+    # going and reading the real number.
+    check("its unread skill figure is only safe while this is False",
+          m["SKIP_ABOVE_SKILL"], False)
+
+
+def test_punctuation_variants_still_match():
+    """The anchored pattern must not break what the loose one got right."""
+    m = load()
+    for spelling in ["a ki-rin", "a ki rin", "a kirin", "KI-RIN"]:
+        species, _cleaned, _loose = m["species_from_name"](spelling)
+        check("%-10s still reads as ki-rin" % spelling,
+              (species or {}).get("name"), "ki-rin")
+    for spelling in ["a hind", "an alligator", "the sheep"]:
+        species, _cleaned, _loose = m["species_from_name"](spelling)
+        check("%-14s still matches" % spelling, species is not None, True)
+
+
 def main():
     tests = [value for key, value in sorted(globals().items())
              if key.startswith("test_") and callable(value)]

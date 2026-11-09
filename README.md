@@ -193,8 +193,10 @@ attack, loot or butcher, and it never targets a wild animal.
    caught up yet, by reading the tooltips of controlled creatures within
    `TAME_SCAN_RANGE`. The tooltip scan only runs while a credit is waiting, so
    it costs nothing when you are not taming.
-3. Its **name** is matched against the same catalogue of 112 species the parent
-   uses, and its body value has to agree with the name.
+3. Its **name** is matched against the species catalogue **in full**, not as a
+   substring, and its body value has to agree with the name. A lesser hiryu is
+   not a hiryu, and since the two share the body value `0xF3` the name is the
+   only thing that can tell them apart.
 4. That species' deed is read out of your pack, double-clicked, and the animal
    targeted. The credit is spent — but only once the fill has gone through,
    so an attempt that misses can be retried.
@@ -208,7 +210,13 @@ attack, loot or butcher, and it never targets a wild animal.
 - Anything named in `KEEP_NAME_WORDS`, or listed in `NEVER_FILL_SERIALS`.
   Renaming a keeper is the only guard that survives a restart, so it is the one
   to use for animals you would be upset to lose.
-- Anything whose name does not match a species you hold a deed for.
+- Anything whose name does not match a species you hold a deed for **in
+  full**. A name that merely contains one is named and refused — *"'paragon
+  hiryu' is not a 'hiryu'"* — along with a paste-ready `EXTRA_ANIMALS` row,
+  body included, for if your shard really does deed it.
+- A **deed** whose `Creature Type:` names a species the catalogue does not know
+  is skipped the same way, loudly and once, rather than filed under the nearest
+  substring.
 - Anything whose name and body value disagree.
 
 **Nothing is filled without a credit**, which is what stops an old pet of yours
@@ -229,6 +237,13 @@ keep-word matched.
 - No body-value index is built. Nothing is searched for, so there is nothing to
   index.
 - It puts nothing on Razor's ignore list, for the same reason.
+- `EXTRA_ANIMALS` carries the species this shard added — currently
+  `("lesser hiryu", [0xF3], 0.0)`, whose body was read off the Enhanced Mobile
+  Inspector on a live one. `ANIMAL_CATALOGUE` stays as extracted from ServUO
+  source. The skill figure in that row is **not** shard data and is never
+  consulted, because `SKIP_ABOVE_SKILL` is `False` here.
+- An animal the shard refuses `FILL_ATTEMPTS` times over is given up on. A deed
+  is refused for reasons that do not change by asking again.
 - It still clears your journal on each fill — that is how the deed's result
   is read — but it drains new lines immediately beforehand, so a tame that
   lands mid-fill is still counted.

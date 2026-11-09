@@ -302,6 +302,21 @@ it is shown to be in a part neither fork touched.
   pre-startup lines are ignored, matching can be case-insensitive, and other
   features' journal state is left alone. Reserve `Search`/`Clear` for
   "I just did X, what happened".
+- **A name that arrives clean is matched IN FULL; only buried text gets a
+  substring.** "a lesser hiryu" CONTAINS "hiryu", so a substring match read the
+  animal as a hiryu — *and* registered the lesser hiryu DEED, whose field says
+  `Creature Type: Lesser Hiryu`, as a hiryu deed, which then hid the real hiryu
+  deed as "a spare". Sorting the patterns longest-first does not save this: it
+  only picks the best of the names the table HAS, and the problem is a species
+  it has not got. Nor can a body value — a live lesser hiryu reads `0x00F3`, the
+  same as a hiryu. A creature's `Name` and a tooltip FIELD value are clean, so
+  anchor the pattern (`\A...\Z`) and refuse anything that does not match in
+  full; a whole tooltip is not clean, so it keeps the substring. When the strict
+  match fails, report what the loose one WOULD have said and print a
+  paste-ready table row with the body read off the live creature: a refusal that
+  names the species it was nearly mistaken for is the difference between a fix
+  and a mystery. Add the shard's own species to the EXTRA list, never to a table
+  that says it was extracted from source.
 - **To act on something the PLAYER did, require the server's word for it, and
   spend it.** Client state alone is not evidence: `Player.Pets` says an animal
   is yours, not that you have just tamed it, so a script that fills taming deeds
