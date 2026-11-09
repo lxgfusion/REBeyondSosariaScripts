@@ -327,6 +327,23 @@ it is shown to be in a part neither fork touched.
   names the species it was nearly mistaken for is the difference between a fix
   and a mystery. Add the shard's own species to the EXTRA list, never to a table
   that says it was extracted from source.
+- **A display dial is only safe if nothing printed is load-bearing — and
+  that is proved by running both ends, not by reading the code.** Quieting a
+  script means moving most of its lines behind a level, which is safe here
+  only because every one of them goes through a single `Misc.SendMessage` and
+  no decision reads back something that was printed. Do not assert that: run
+  the same path at TALK 0 and TALK 2 and compare what HAPPENED — the item
+  used, the target answered, the credit spent, the count — and require the
+  tuples to be identical while only the line count differs. Then mutate the
+  dial in BOTH directions, because a level that silences the explanations
+  along with the noise is a worse script rather than a quieter one and passes
+  every test that only checks for silence. Keep at every level the one line
+  that says the script did nothing when it was expected to do something: a
+  quiet script that is silent after you have asked it for work reads as a
+  broken one. And give a quiet script a way to be asked — in a Razor
+  script with no gump that means a spoken word, and the listener for it
+  belongs INSIDE the one function that drains the journal, never beside it,
+  or a word said in the window before a `Journal.Clear()` is gone.
 - **A field that every button submits must stay silent when nothing
   changed.** A gump text entry is read back from the *response*, so it
   arrives on every press that screen has — in `RuneCraftAndStore.py`'s

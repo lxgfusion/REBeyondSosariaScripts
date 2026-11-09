@@ -591,8 +591,24 @@ def test_no_credit_no_fill():
     check("a pet with no taming line behind it waits",
           m["consider"](0x50040), "wait")
     check("and nothing was double-clicked", m["Items"].used, [])
-    check("and it says why",
+    # QUIET AT TALK 0 (2026-11-10). explain() goes through chat() now. There is
+    # one of these for every animal standing near you that it is correctly
+    # ignoring - every old pet of yours reads as "I did not hear you tame it" -
+    # and that was most of what made this script shout.
+    check("and says nothing about it at TALK 0",
           any("did not hear you tame it" in t for t in m["Misc"].messages),
+          False)
+
+    # BUT IT STILL EXPLAINS ITSELF WHEN ASKED TO. Both halves are the test: a
+    # dial that silenced the explanation along with the noise would be a worse
+    # script rather than a quieter one.
+    loud = fresh()
+    loud["TALK"] = 1
+    hind(loud, serial=0x50041)
+    check("the same refusal at TALK 1 still waits",
+          loud["consider"](0x50041), "wait")
+    check("  ...and says why",
+          any("did not hear you tame it" in t for t in loud["Misc"].messages),
           True)
 
 
@@ -740,6 +756,175 @@ def test_it_says_each_thing_once_per_reason():
 
 
 # ===========================================================================
+# 4b. THE QUIET, AND WHAT IT COST
+# ===========================================================================
+
+def test_the_talk_level_changes_nothing_but_the_talking():
+    """The answer to "is it entirely needed for the script to work?" -- no.
+
+    The same fill is run at all three talk levels and what HAPPENED is
+    compared: the deed double-clicked, the animal targeted, the credit spent,
+    the running count, the verdict. Only the number of lines differs.
+
+    THIS IS THE CLAIM THE WHOLE ROUND RESTS ON, and reading the source cannot
+    establish it the way running both ends can. Every line goes through log(),
+    which is one Misc.SendMessage; if anything printed were load-bearing, the
+    tuples below would differ.
+    """
+    done = []
+    lines = []
+    for level in (0, 1, 2):
+        m = fresh()
+        m["TALK"] = level
+        m["DEBUG"] = level >= 2
+        m["Misc"].messages[:] = []
+        arm(m, serial=0x50400)
+        verdict = m["consider"](0x50400)
+        done.append((verdict, tuple(m["Items"].used),
+                     tuple(m["Target"].executed), len(m["_credits"]),
+                     m["_filled"][0]))
+        lines.append(len(m["Misc"].messages))
+
+    check("every talk level does exactly the same thing", len(set(done)), 1)
+    check("  ...which is a completed fill", done[0][0], "filled")
+    check("  ...the deed used", list(done[0][1]), [0x40005001])
+    check("  ...the animal targeted", list(done[0][2]), [0x50400])
+    check("  ...the credit spent", done[0][3], 0)
+    check("and only the talking differs", lines[0] < lines[1] < lines[2],
+          True)
+    check("one line for a fill at TALK 0", lines[0], 1)
+
+
+def test_saying_deeds_asks_for_a_report():
+    """The other half of going quiet: a script that says little must answer."""
+    m = fresh()
+    m["Misc"].messages[:] = []
+    m["Journal"].say("deeds", 11.0)
+    m["poll_tames"]()
+    said = " | ".join(m["Misc"].messages)
+    check("saying it gets an answer", "Deeds (you asked)" in said, True)
+    check("  ...naming the species and its progress",
+          "hind [23/60]" in said, True)
+    # IT IS NOT A TAME. The command shares poll_tames() with the credit rule,
+    # so the one thing it must never do is bank one.
+    check("and it banks no taming credit", len(m["_credits"]), 0)
+
+    # ASKED MEANS ANSWERED, EVERY TIME. The dedupe that keeps the heartbeat
+    # quiet must not turn the command into a dud the second time it is used.
+    m["Misc"].messages[:] = []
+    m["Journal"].say("deeds", 12.0)
+    m["poll_tames"]()
+    check("and answers again when asked again",
+          any("Deeds (you asked)" in t for t in m["Misc"].messages), True)
+
+    # A WORD SAID JUST BEFORE A Journal.Clear() IS STILL HEARD, for the same
+    # reason a taming line is: deed_attempt() drains through poll_tames()
+    # first, and this listener lives inside that drain rather than beside it.
+    nearly = fresh()
+    arm(nearly, serial=0x50410)
+    nearly["Journal"].say("deeds", 12.0)
+    nearly["Misc"].messages[:] = []
+    nearly["consider"](0x50410)
+    check("a command said during a fill is not lost to the clear",
+          any("Deeds (you asked)" in t for t in nearly["Misc"].messages),
+          True)
+
+
+def test_a_wasted_tame_is_reported_even_when_quiet():
+    """You did the work and nothing was deeded.
+
+    FOUND BY RENDERING THE TRANSCRIPT, not by reading the code: at TALK 0,
+    taming a lesser hiryu with no lesser hiryu deed in the pack produced
+    nothing at all on screen, because the per-animal reasons are chat() now.
+    A script that silently does nothing after you have tamed something reads
+    as a broken script, so this one line stays at every talk level.
+    """
+    m = fresh()
+    m["Mobiles"].add(StubMobile(0x50600, "a lesser hiryu", 0xF3, ["(tame)"]))
+    m["Journal"].say("It seems to accept you as master.", 11.0)
+    m["poll_tames"]()
+    check("the tame is banked", len(m["_credits"]), 1)
+
+    m["Misc"].messages[:] = []
+    check("the animal is left alone -- no deed for it",
+          m["consider"](0x50600), "wait")
+    check("  ...and at TALK 0 nothing is said at the time",
+          len(m["Misc"].messages), 0)
+
+    # The credit window closes with the animal still undeeded.
+    m["time"].now += (m["TAME_CREDIT_MS"] / 1000.0) + 1.0
+    m["prune_credits"]()
+    check("but the wasted tame IS reported",
+          any("went undeeded" in t for t in m["Misc"].messages), True)
+    check("  ...and says how to find out what you are holding",
+          any("deeds" in t for t in m["Misc"].messages), True)
+
+    # ONE LINE PER WASTED TAME, not one per lap: the credit is gone, so a
+    # second prune has nothing left to report.
+    m["Misc"].messages[:] = []
+    m["prune_credits"]()
+    check("and only once", len(m["Misc"].messages), 0)
+
+
+def test_the_report_does_not_repeat_itself():
+    # fresh() scans the pack, so the script has already reported by the time
+    # this starts -- which is the state the heartbeat actually fires in.
+    m = fresh()
+    m["Misc"].messages[:] = []
+    check("a report identical to the last one is not said",
+          m["deed_report"]("heartbeat"), False)
+    check("so nothing reached the screen", len(m["Misc"].messages), 0)
+    check("asking outright says it anyway",
+          m["deed_report"]("you asked", True), True)
+
+    # AND A CHANGED ANSWER IS STILL NEWS. Suppressing the identical line must
+    # not suppress a different one, or the heartbeat reports nothing ever.
+    m["Items"].by_serial[0x40005001]._props = [
+        "Level: 2", "Creature Type: Hind", "Filled: 31/60", "Gold: 100%"]
+    m["Misc"].messages[:] = []
+    check("a changed report is said", m["deed_report"]("heartbeat"), True)
+    check("  ...with the new progress in it",
+          "[31/60]" in m["Misc"].messages[0], True)
+
+
+def test_an_empty_pack_is_said_once_and_never_nagged():
+    """The old script repeated "no deeds in your pack" once a minute, forever,
+    for as long as it ran. That line is gone and this is what replaced it."""
+    m = load()
+    m["Misc"].messages[:] = []
+    check("an empty pack is reported", m["deed_report"]("startup", True), True)
+    check("  ...in words that say what to do",
+          "none in your pack" in " | ".join(m["Misc"].messages), True)
+    check("and is not reported again", m["deed_report"]("latest"), False)
+    check("so the screen still holds one line", len(m["Misc"].messages), 1)
+
+
+def test_a_fill_does_not_also_print_the_whole_report():
+    """The fill line already carries that species and its progress, so the
+    heartbeat must not notice the change and repeat the lot a moment later."""
+    m = fresh()
+    deed = m["Items"].by_serial[0x40005001]
+    arm(m, serial=0x50500)
+
+    # The shard takes the animal AND the deed moves on, which is what makes
+    # this test mean something: without the sync in consider(), deed_report()
+    # would see 24/60 where it remembered 23/60 and print the whole line.
+    def consumed(serial):
+        m["Mobiles"].remove(serial)
+        deed._props = ["Level: 2", "Creature Type: Hind", "Filled: 24/60",
+                       "Gold: 100%"]
+
+    m["Target"].on_execute = consumed
+    m["Misc"].messages[:] = []
+    check("the fill happens", m["consider"](0x50500), "filled")
+    check("and says one line", len(m["Misc"].messages), 1)
+    check("  ...carrying the progress it just moved",
+          "[24/60]" in m["Misc"].messages[0], True)
+    check("the heartbeat then has nothing to add",
+          m["deed_report"]("latest"), False)
+
+
+# ===========================================================================
 # 5. PREFLIGHT
 # ===========================================================================
 
@@ -771,8 +956,28 @@ def test_preflight_reports_and_passes():
     check("it names the version", m["SCRIPT_VERSION"] in said, True)
     check("it says how many animals are protected",
           "out of reach of this script" in said, True)
-    check("it names the mount", "never be deeded" in said, True)
-    check("and the deeds it will fill", "Filling (startup)" in said, True)
+    check("and the deeds it will fill", "Deeds (startup)" in said, True)
+    check("  ...with the progress read off the deed", "[23/60]" in said, True)
+    check("and how to ask it again later", "deeds" in said, True)
+
+    # THREE LINES, which is the whole of what this round was asked for: which
+    # copy loaded, what is already out of reach, and what it will fill.
+    check("startup is three lines, not a screenful",
+          len(m["Misc"].messages), 3)
+    check("so the mount note is not one of them",
+          "never be deeded" in said, False)
+
+    # AT TALK 1 IT IS BACK, with everything else.
+    loud = load()
+    loud["TALK"] = 1
+    loud["Items"].add(StubItem(0x40005001, "a taming order deed",
+                               ["Creature Type: Hind", "Filled: 23/60"],
+                               loud["Player"].Backpack.Serial))
+    loud["Player"].Mount = StubMobile(0x50202, "a ridable llama", 0xDC,
+                                      ["(tame)"])
+    check("preflight passes at TALK 1 too", loud["preflight"](), True)
+    check("and names the mount there",
+          any("never be deeded" in t for t in loud["Misc"].messages), True)
 
 
 def test_preflight_survives_a_build_with_no_player_mount():

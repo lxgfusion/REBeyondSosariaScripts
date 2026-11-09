@@ -9,7 +9,7 @@ at a RunUO/ServUO-derived freeshard.
 | Script | What it does |
 |---|---|
 | [`Scripts/TameAndFill.py`](Scripts/TameAndFill.py) | Reads the taming order deeds in your pack and hunts only those species. Walks to each one, tames it, and puts it in the deed for its species. |
-| [`Scripts/ManualTameAndFill.py`](Scripts/ManualTameAndFill.py) | **You tame, it fills.** A fork of `TameAndFill` with everything that moves your character or targets a creature taken out: no hunting, no walking, no casting, no recall, no butchering. It stands still, reads your journal, and when *you* tame something it works out which species it was and puts it in that species' deed. Nothing is filled without an unspent taming-success line from the journal, so a pet you have had for a year cannot be fed to a deed by walking back into range — and everything already yours at startup is snapshotted out of reach regardless. |
+| [`Scripts/ManualTameAndFill.py`](Scripts/ManualTameAndFill.py) | **You tame, it fills.** A fork of `TameAndFill` with everything that moves your character or targets a creature taken out: no hunting, no walking, no casting, no recall, no butchering. It stands still, reads your journal, and when *you* tame something it works out which species it was and puts it in that species' deed. Nothing is filled without an unspent taming-success line from the journal, so a pet you have had for a year cannot be fed to a deed by walking back into range — and everything already yours at startup is snapshotted out of reach regardless. **It is quiet:** three lines at startup, one per animal deeded, and it answers with everything in your pack when you say `deeds` in game. |
 | [`Scripts/COVFarm.py`](Scripts/COVFarm.py) | **Camps the Slasher of Veils, kills it from range, and loots it.** Waits for the spawn, opens with Wildfire, then holds 4-5 tiles while spamming Nether Blast — the standoff is enforced mid-cast, not just between casts. Confirms the kill with a *corpse* rather than the monster vanishing, walks onto it, says `[grab`, and returns to the starting spot for the next spawn. Breaks off below a configurable health percentage. |
 | [`Scripts/petcommandcenter2.py`](Scripts/petcommandcenter2.py) | **Deploy and shrink your pets by speaking a phrase.** Say one phrase to release every pet statue in your pack and issue the guard command; say another to shrink the nearest pets back in. Set `SETUP_MODE = True` and it walks you through targeting your statues and shrink tool, then prints a finished config block to paste in — no reading item IDs out of the inspector. |
 | [`Scripts/harvest_runner.py`](Scripts/harvest_runner.py) | **Mining + lumberjacking on one script.** Account-runebook travel, per-job rune routes, smelting, drop-off runs, vendor rounds, meditation-backed mana, and the Greyskull call-out. |
@@ -225,9 +225,48 @@ case a simple "is this new in the client's pet list?" test gets wrong — the
 pet that was out of range at startup and wanders back an hour later. See
 `REQUIRE_TAME_CREDIT`; turning it off is reported in red at startup.
 
-If it hears the tame and then does nothing, it says why, once per animal and per
-reason: no deed for that species, too far away, the name will not load, or a
-keep-word matched.
+### What it says, and asking it something
+
+It is **quiet**, because a script that stands still for an hour should not fill
+your screen while it does it. At startup you get three lines — which copy Razor
+loaded, how many pets of yours are already out of its reach, and the deeds you
+are holding — and after that:
+
+```
+[ManualTamer] Deeds (startup): hind [23/60], hiryu [2/10]
+[ManualTamer] hind -> its taming order [24/60]. 1 deeded this run.
+[ManualTamer] hiryu -> its taming order [3/10]. 2 deeded this run.
+[ManualTamer] Deeds (you asked): hind [24/60], hiryu [3/10]
+```
+
+**One line per animal deeded**, carrying the deed's progress and the running
+count, plus anything you have to act on — a deed naming a species the
+catalogue does not know, an animal the shard keeps refusing, a cursor stuck
+open.
+
+**Say `deeds` in game** and it answers with every deed in your pack and how far
+along each one is. It also says that by itself within `STATUS_EVERY_MS`
+(5 minutes) of the answer changing, and never repeats an answer that has not
+changed — so an untouched pack is reported once and then stays quiet. The word
+is `STATUS_COMMANDS`; a passer-by saying it gets you one status line too, which
+is the price of a command that cannot fail to be heard.
+
+**A tame that goes nowhere is still reported**, whatever the talk level: *"A
+tame went undeeded — nothing in reach matched a deed in your pack."* A quiet
+script that silently does nothing after you have tamed something reads as a
+broken one, so that line stays.
+
+`TALK` is the dial. **0** is the above. **1** adds what it is about to do and
+why it left an animal alone, once per animal and per reason — no deed for that
+species, too far away, the name will not load, a keep-word matched. **2** adds
+every journal line a deed produced, which is what it used to do and what to put
+back when something has gone wrong.
+
+**None of it is load-bearing**, which is what makes the dial safe: every line
+goes through one `Misc.SendMessage`, and nothing anywhere reads back something
+that was printed. The suite proves it rather than asserting it — the same fill
+is run at all three levels and the deed used, the animal targeted, the credit
+spent and the running count are compared. Only the line count differs.
 
 ### Differences from the parent
 

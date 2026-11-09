@@ -33,6 +33,21 @@ NOTHING IS FILLED WITHOUT A CREDIT. That is what stops this script eating a pet
 you have had for a year: the taming line for that animal was spoken and spent
 long ago. See REQUIRE_TAME_CREDIT.
 
+What it says, and how to ask it something
+-----------------------------------------
+It is QUIET. At startup you get three lines - which copy is loaded, how many
+pets of yours are already out of its reach, and the deeds you are holding -
+and after that one line per animal it deeds, plus anything you have to act on.
+Nothing it prints is load-bearing, so the quiet costs nothing: see TALK.
+
+SAY "deeds" IN GAME and it answers with every deed in your pack and how far
+along each one is. It also says that by itself within STATUS_EVERY_MS of the
+answer changing, and never repeats an answer that has not changed.
+
+TALK = 1 puts back what it is about to do and why it left an animal alone;
+TALK = 2 adds every journal line a deed produced, which is what it used to do
+and is the setting to put back when something has gone wrong.
+
 What it will never touch
 ------------------------
 - Anything that was already yours, or already tame and standing near you, when
@@ -110,7 +125,7 @@ import time
 # script even after the file on disk changes, and two debugging rounds have
 # already been spent on a bug that was fixed on disk but not in the folder Razor
 # reads. If this line does not say what you expect, hit Reload.
-SCRIPT_VERSION = "2026-11-09.1"
+SCRIPT_VERSION = "2026-11-10.1"
 # =============================================================================
 # CONFIG - DEED DISCOVERY
 # =============================================================================
@@ -280,8 +295,49 @@ POLL_MS = 250            # journal poll interval. All the idle loop does is read
                          # new journal lines, so this can afford to be tight.
 IDLE_PAUSE = 1000        # pause when there is no deed in the pack to fill
 
-# Print what the pack scan sees and every journal line the deed produces.
-DEBUG = True
+# HOW MUCH IT SAYS (2026-11-10), per the user: "we have alot of journal
+# information coming up ... I would like it to where it does not spam the left
+# of my screen all the time, and give me an update on what animals i have deeds
+# for to tame, but still operate the same way."
+#
+# NONE OF IT IS LOAD-BEARING, which is what makes this safe. Every line this
+# script prints goes through log(), and log() is one Misc.SendMessage and
+# nothing else - no decision anywhere reads back something that was printed,
+# and the journal work this script does (poll_tames, dump_journal) is reading,
+# never printing. So the quietest setting changes what you see and nothing
+# whatsoever about what it does.
+#
+#   0 QUIET  - the deed report, one line per animal deeded, and the problems
+#              you have to act on. The default.
+#   1 NORMAL - and what it is about to do, and why it left an animal alone.
+#   2 LOUD   - and every journal line a deed produced. What it used to do, and
+#              the setting to put back when something has gone wrong.
+TALK = 0
+
+# DERIVED, NOT SET. Every debug() and dump_journal() call carried over from
+# TameAndFill.py reads DEBUG, so deriving it from TALK means the one dial
+# drives those too and there is no second switch to forget.
+DEBUG = TALK >= 2
+
+# How often to check whether the deed report has changed, in ms. A report
+# identical to the last one is never repeated, so this is not "a line every
+# five minutes" - it is "tell me within five minutes of a deed appearing,
+# filling up, or being taken out of the pack". 0 turns the check off; asking by
+# name below always answers regardless.
+STATUS_EVERY_MS = 300000
+
+# SAY ANY OF THESE IN GAME AND IT REPORTS what deeds you are holding and how
+# far along each one is. This is the other half of going quiet: a script that
+# says little has to answer when it is asked.
+#
+# NOT RESTRICTED TO YOUR OWN SPEECH, deliberately. A JournalEntry carries a
+# Serial, so this could require entry.Serial == Player.Serial - but what that
+# field holds for a spoken line is not described in
+# docs/api-reference-generated.md and has not been read off a live dump, and
+# guessing it wrong would make the command a silent dud that looks like a
+# broken script. Matching the text alone cannot fail to work. The cost is that
+# a passer-by saying "deeds" also gets you one status line.
+STATUS_COMMANDS = ["deeds"]
 
 # Optional shard-specific confirmations for the deed step. Leave empty and
 # success is judged by the animal disappearing.
@@ -486,6 +542,8 @@ _tries = {}              # serial -> fills attempted, to stop retrying forever
 _exact = {}              # species name -> anchored pattern, built on demand
 _unknown_said = set()    # deed species already complained about, said once
 _said = set()            # (serial, text) already explained, so it is said once
+_reported = [""]         # the last deed report, so an unchanged one is not repeated
+_status_at = [0.0]       # when the periodic report last ran, on time.time()
 # =============================================================================
 # HELPERS
 # =============================================================================
@@ -537,6 +595,23 @@ def clear_cursor():
         Target.ClearQueue()
     return not Target.HasTarget()
 
+def chat(text, hue=HUE_INFO):
+    """Say it only at TALK 1 or more. The fork's own; see TALK for the levels.
+
+    THIS IS THE WHOLE OF HOW IT WENT QUIET. Every line that narrated what the
+    script was about to do, or why it left an animal alone, goes through here
+    instead of log(). Nothing load-bearing passes through either of them -
+    both end at one Misc.SendMessage - so turning this off changes what you
+    see and nothing else.
+
+    BESIDE debug() RATHER THAN INSIDE IT. debug() is the carried-over switch
+    for the journal dumps and the pack scan, which are for when something has
+    gone wrong; these lines are ordinary narration, and wanting one is not
+    wanting the other.
+    """
+    if TALK >= 1:
+        log(text, hue)
+
 # =============================================================================
 # THE JOURNAL - HEARING A TAME LAND
 # =============================================================================
@@ -583,6 +658,15 @@ def poll_tames():
         if stamp > newest:
             newest = stamp
         text = str(getattr(entry, "Text", "") or "").lower()
+        # ASKED FOR A REPORT, and handled HERE on purpose - this is the one
+        # place the journal is drained, and deed_attempt() calls poll_tames()
+        # immediately before every Journal.Clear(). A listener anywhere else
+        # would lose any word said in the window before a clear, and a word
+        # lost that way is not read late, it is gone (CLAUDE.md).
+        if STATUS_COMMANDS and text.strip(" .,!?") in STATUS_COMMANDS:
+            deed_report("you asked", force=True)
+            _status_at[0] = time.time()
+            continue
         for message in MSG_TAMED:
             if message.lower() in text:
                 # time.time() HERE, not the journal stamp. Razor stamps in local
@@ -592,8 +676,10 @@ def poll_tames():
                 # read within POLL_MS of arriving, so the two agree closely
                 # enough for a 45-second window.
                 _credits.append(time.time())
-                log("Tame heard: %s" % (getattr(entry, "Text", "") or ""),
-                    HUE_GOOD)
+                # chat(), NOT log(). The fill line that follows a second later
+                # is the one worth seeing, and it says strictly more.
+                chat("Tame heard: %s" % (getattr(entry, "Text", "") or ""),
+                     HUE_GOOD)
                 break
     _cursor[0] = newest
 
@@ -603,7 +689,26 @@ def prune_credits():
     cutoff = time.time() - (TAME_CREDIT_MS / 1000.0)
     while _credits and _credits[0] < cutoff:
         _credits.pop(0)
-        debug("A taming credit expired unspent.", HUE_WARN)
+        # log(), NOT debug() (2026-11-10). THE ONE THING A QUIET SCRIPT STILL
+        # HAS TO SAY: you tamed something and nothing was deeded. The
+        # per-animal reasons go through chat() now, so without this line a
+        # tame with no matching deed in the pack passed in complete silence -
+        # found by rendering the transcript, where a lesser hiryu tamed with
+        # no lesser hiryu deed produced nothing at all on screen.
+        #
+        # HERE RATHER THAN AT THE REFUSAL, because this fires once per wasted
+        # tame while a refusal fires once per animal per reason and multiplies
+        # with the pets standing around you. The cost is that it arrives
+        # TAME_CREDIT_MS after the tame; TALK = 1 says why at once.
+        #
+        # THE ADVICE IS ONLY FOR SOMEBODY WHO HAS NOT TAKEN IT. At TALK 1 the
+        # reason was already printed at the time, so telling them to turn
+        # TALK up reads as the script not knowing what it is doing.
+        log("A tame went undeeded -- nothing in reach matched a deed in your "
+            "pack. Say '%s' to see what you are holding.%s"
+            % ((STATUS_COMMANDS or ["deeds"])[0],
+               "" if TALK >= 1 else " TALK = 1 says why at the time."),
+            HUE_WARN)
 
 
 def have_credit():
@@ -910,11 +1015,16 @@ def rescan(reason):
     before = sorted(_active)
     count = scan_deeds()
     after = sorted(_active)
+    # ONE STATUS LINE, and only when the SET of species changed. A deed
+    # merely moving on (24/60 -> 25/60) is reported by the fill line that
+    # moved it, so reporting it here as well would put two lines on screen for
+    # every animal - which is the spam this round was asked to remove.
+    #
+    # FORCED, because the set changing is news whether or not the rendered
+    # text happens to differ: a deed swapped for another at the same progress
+    # reads the same and is not the same.
     if after != before:
-        if after:
-            log("Filling (%s): %s" % (reason, ", ".join(after)), HUE_GOOD)
-        else:
-            log("No usable taming order deeds in your pack (%s)." % reason, HUE_WARN)
+        deed_report(reason, force=True)
     return count
 # =============================================================================
 # READING A CREATURE
@@ -1246,12 +1356,15 @@ def add_to_deed(species_name, pet_serial):
 
     for attempt in range(1, DEED_RETRIES + 1):
         if pet_is_gone(pet_serial):
-            log("%s added to its taming order." % species_name, HUE_GOOD)
+            # chat(), NOT log(). consider() prints one line per animal, with
+            # the deed's progress and the running count in it; this one said
+            # the same event with less in it.
+            chat("%s added to its taming order." % species_name, HUE_GOOD)
             return True
 
         result = deed_attempt(deed.Serial, pet_serial)
         if result == "ok":
-            log("%s added to its taming order." % species_name, HUE_GOOD)
+            chat("%s added to its taming order." % species_name, HUE_GOOD)
             return True
 
         log("Deed attempt %d/%d did not take (%s)."
@@ -1291,13 +1404,50 @@ def deed_status(species_name):
     return " [%d/%d]" % (progress[0], progress[1])
 
 
+def deed_line():
+    """Every deed in the pack and how far along it is, as one string."""
+    if not _active:
+        return "none in your pack - put some in and it will pick them up."
+    return ", ".join("%s%s" % (name, deed_status(name))
+                     for name in sorted(_active))
+
+
+def deed_report(reason, force=False):
+    """Say which deeds are in the pack. True if it said anything.
+
+    THE SCRIPT'S ONE STATUS LINE, and the reason the rest of it could go
+    quiet: asked for by the user along with the quiet, as the thing they
+    actually wanted on screen.
+
+    NOT REPEATED UNLESS IT CHANGED, which is what stops it becoming the spam
+    it replaced. The heartbeat in run() calls this every STATUS_EVERY_MS, so
+    an untouched pack answers once at startup and then says nothing until a
+    deed appears, fills up or leaves. force=True is for the three cases where
+    the answer is wanted whether or not it has changed: startup, being asked
+    by name, and the species set changing.
+    """
+    body = deed_line()
+    if not force and body == _reported[0]:
+        return False
+    _reported[0] = body
+    log("Deeds (%s): %s" % (reason, body), HUE_GOOD if _active else HUE_WARN)
+    return True
+
+
 def explain(serial, text, hue=HUE_INFO):
-    """Say it once per animal per reason. These are reached every lap."""
+    """Say it once per animal per reason. These are reached every lap.
+
+    THROUGH chat(), so TALK 0 drops them. There is one of these for every
+    animal standing near you that it is correctly ignoring - an old pet of
+    yours reads as "I did not hear you tame it" every time the script starts -
+    and a screenful of lines about animals it is right to leave alone was most
+    of what made this script shout.
+    """
     key = (serial, text)
     if key in _said:
         return
     _said.add(key)
-    log(text, hue)
+    chat(text, hue)
 
 
 def consider(serial):
@@ -1347,7 +1497,7 @@ def consider(serial):
                 HUE_WARN)
         return "wait"
 
-    log("Filling the %s deed%s." % (name, deed_status(name)))
+    chat("Filling the %s deed%s." % (name, deed_status(name)))
     if not add_to_deed(name, serial):
         _tries[serial] = _tries.get(serial, 0) + 1
         if _tries[serial] < FILL_ATTEMPTS:
@@ -1364,16 +1514,23 @@ def consider(serial):
     spend_credit()
     _filled[0] += 1
     rescan("after a fill")
-    # add_to_deed() has already said the animal went in. This says only what
-    # that line does not: where the deed has got to, and the running count.
+    # THE ONE LINE PER ANIMAL, at every talk level, because this is the thing
+    # you are watching for. add_to_deed() used to say "added to its taming
+    # order" as well and now says that through chat(), so at TALK 0 a fill is
+    # exactly this line and nothing else.
     if name in _active:
-        log("%s deed%s -- %d filled this run."
+        log("%s -> its taming order%s. %d deeded this run."
             % (name, deed_status(name), _filled[0]), HUE_GOOD)
     else:
         # It dropped out of the list in that rescan, so it is full now or the
         # shard consumed it. Worth saying, rather than showing as a blank.
-        log("The %s deed is done -- %d filled this run."
+        log("%s -> its taming order, which is now done. %d deeded this run."
             % (name, _filled[0]), HUE_GOOD)
+    # THE REPORT COUNTS AS SAID, without saying it. The line above already
+    # carries this species and its progress, and without this the heartbeat
+    # would notice the change and print the whole report straight after every
+    # single fill.
+    _reported[0] = deed_line()
     return "filled"
 
 # =============================================================================
@@ -1381,7 +1538,9 @@ def consider(serial):
 # =============================================================================
 
 def preflight():
-    log("ManualTameAndFill %s - you tame, it fills." % SCRIPT_VERSION, HUE_GOOD)
+    log("ManualTameAndFill %s - you tame, it fills. Say '%s' any time for a "
+        "deed report." % (SCRIPT_VERSION, (STATUS_COMMANDS or ["?"])[0]),
+        HUE_GOOD)
 
     if not build_species():
         log("The animal catalogue came out empty - check ONLY_ANIMALS and "
@@ -1396,7 +1555,9 @@ def preflight():
         HUE_GOOD)
     mount = mount_serial()
     if mount:
-        log("Your mount (0x%X) will never be deeded." % mount, HUE_GOOD)
+        # chat(): the snapshot line above already covers the mount, and
+        # FILL_MOUNT being ON is shouted separately below.
+        chat("Your mount (0x%X) will never be deeded." % mount, HUE_GOOD)
     else:
         debug("No mount read from Player.Mount (or this build has no such "
               "property). The snapshot covers it either way.")
@@ -1406,9 +1567,14 @@ def preflight():
     _cursor[0] = newest_journal_stamp()
     debug("Journal cursor set at %r." % _cursor[0])
 
-    if not rescan("startup"):
-        log("No usable taming order deeds in your pack. Put some in and it "
-            "will pick them up - there is nothing else to do.", HUE_WARN)
+    # rescan() reports when the SET changed, which at startup it always has
+    # when there is anything to find. An EMPTY pack is the one case it says
+    # nothing about - empty to empty is not a change - and startup must still
+    # state what it is going to do, even when that is "nothing yet".
+    rescan("startup")
+    if not _active:
+        deed_report("startup", force=True)
+    _status_at[0] = time.time()
 
     if not REQUIRE_TAME_CREDIT:
         log("REQUIRE_TAME_CREDIT is OFF: any pet of yours this script did not "
@@ -1416,19 +1582,14 @@ def preflight():
     if FILL_MOUNT:
         log("FILL_MOUNT is ON. Your mount can be deeded.", HUE_BAD)
 
-    log("Ready. Tame something.", HUE_GOOD)
+    # chat(). The first line said which copy loaded and the deed report said
+    # what it will fill; a third line saying it is running is the kind of
+    # thing this round was asked to take away.
+    chat("Ready. Tame something.", HUE_GOOD)
     return True
 
 
 def run():
-    idle = [0.0]
-
-    def quiet(text, hue=HUE_WARN):
-        """Say it at most once a minute. These fire every lap."""
-        if time.time() - idle[0] >= 60.0:
-            idle[0] = time.time()
-            log(text, hue)
-
     while True:
         if Player.IsGhost:
             log("You are dead. Stopping.", HUE_BAD)
@@ -1443,9 +1604,20 @@ def run():
         if (time.time() - _last_scan) * 1000.0 >= DEED_RESCAN_MS:
             rescan("periodic")
 
+        # THE HEARTBEAT, and a quiet one: deed_report() says nothing unless
+        # the answer has changed since it last spoke. So this is not a line
+        # every five minutes, it is "tell me within five minutes of a deed
+        # appearing, filling up or being taken out".
+        if (STATUS_EVERY_MS > 0
+                and (time.time() - _status_at[0]) * 1000.0 >= STATUS_EVERY_MS):
+            _status_at[0] = time.time()
+            deed_report("latest")
+
         if not _active:
-            quiet("No taming order deeds in your pack - waiting for one.",
-                  HUE_INFO)
+            # NOTHING SAID HERE ANY MORE. The old line repeated "no taming
+            # order deeds in your pack" once a minute for as long as the
+            # script ran. The report above says it once, and says it again
+            # the moment it stops being true.
             Misc.Pause(IDLE_PAUSE)
             continue
 
