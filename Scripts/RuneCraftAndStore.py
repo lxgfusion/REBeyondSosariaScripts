@@ -6540,6 +6540,90 @@ def read_property_lines(item):
         return []
 
 
+# A CURSOR LEFT OPEN IS INDISTINGUISHABLE FROM A REFUSED RUNE (2026-11-08).
+# Until today nothing in this file cancelled a target cursor - Target.Cancel()
+# appeared nowhere, against four Target.WaitForTarget() calls. See
+# clear_stale_target() for what that does to an application.
+APPLY_CURSOR_SETTLE_MS = 250
+APPLY_JOURNAL_DUMP_LINES = 12   # Enough for a refusal plus its context; not a transcript.
+
+
+def clear_stale_target(why):
+    """Cancel a target cursor that is open before this script opened one.
+
+    THE FAILURE IT PREVENTS. Target.WaitForTarget() does not know whose cursor
+    it found. With a stale one open it returns True instantly, the following
+    Target.TargetExecute() answers THAT cursor, and the cursor the rune itself
+    raised is left hanging - so the rune is never consumed, the attempt is
+    reported as "may not have gone through", and the retry raises a third
+    cursor on top. Every retry makes it worse, and the run ends at
+    "application kept not completing as expected after 3 attempts".
+
+    Returns True if one was there and was cancelled, which is worth saying out
+    loud: a cursor nobody in this script opened means something else did.
+    """
+    try:
+        if not Target.HasTarget():
+            return False
+    except Exception:
+        return False          # No HasTarget on this build: nothing to clean up safely.
+    log("A target cursor was ALREADY OPEN {} -- cancelling it first. It is not this "
+        "script's, and answering it instead of the rune's own cursor is how an "
+        "application silently does nothing.".format(why), 33)
+    try:
+        Target.Cancel()
+    except Exception:
+        pass
+    safe_pause(APPLY_CURSOR_SETTLE_MS)
+    return True
+
+
+def attempt_journal_lines():
+    """Every distinct line the shard said during the attempt just made.
+
+    SAFE TO READ WITHOUT CLEARING, and only because apply_rune_to_item() calls
+    Journal.Clear() immediately before Items.UseItem() - the same guarantee
+    application_was_refused() relies on. Collected BEFORE anything is logged,
+    so this script's own log lines cannot appear in its own evidence.
+    """
+    lines = []
+    try:
+        for entry in (Journal.GetJournalEntry(None) or []):
+            text = (getattr(entry, "Text", "") or "").strip()
+            if text and text not in lines:
+                lines.append(text)
+    except Exception:
+        pass
+    return lines
+
+
+def say_attempt_journal(what, lines):
+    """Print what the shard said, verbatim, when an application did not land.
+
+    ONE SENTENCE WAS BEING READ AND THE REST DISCARDED. application_was_refused()
+    tests for "You cannot enhance that." and nothing else, so any other refusal
+    wording - or a server that says nothing at all - fell through to the retry
+    path and reported only that the stack had not moved. That is the symptom,
+    never the cause, and it is why this fault was not diagnosable from the
+    script's own output.
+
+    SILENCE IS ITSELF A FINDING, and the most useful one: a server that rejects
+    a rune says so. Nothing at all means the target never reached it.
+    """
+    if not lines:
+        log("{} -- and the shard said NOTHING AT ALL during the attempt. A rejected "
+            "rune produces a message; silence points at the target never reaching "
+            "the server, which is what a cursor that was not ours does."
+            .format(what), 33)
+        return
+    log("{} -- what the shard said during the attempt, verbatim:".format(what), 33)
+    for text in lines[:APPLY_JOURNAL_DUMP_LINES]:
+        log("    | {}".format(text), 33)
+    if len(lines) > APPLY_JOURNAL_DUMP_LINES:
+        log("    | ... and {} more line(s).".format(
+            len(lines) - APPLY_JOURNAL_DUMP_LINES), 33)
+
+
 APPLY_CONSUME_POLL_INTERVAL_MS = 150
 APPLY_CONSUME_TIMEOUT_MS = 2000  # Same ballpark as the old fixed 1500ms wait -- polling returns
                                    # as soon as the rune is actually consumed instead of always
@@ -6589,6 +6673,9 @@ def apply_rune_to_item(rune, target_item):
         amount_before = int(getattr(rune, "Amount", 1) or 1)
     except (TypeError, ValueError):
         amount_before = 1
+    # BEFORE THE JOURNAL CLEAR, so the message naming the stale cursor survives
+    # into the log rather than being wiped by the clear that follows it.
+    clear_stale_target("before using '{}'".format(bare_item_name(rune)))
     Journal.Clear()
     Items.UseItem(rune.Serial)
     target_appeared = Target.WaitForTarget(2000, False)
@@ -6597,6 +6684,8 @@ def apply_rune_to_item(rune, target_item):
         target_appeared = Target.WaitForTarget(2000, False)
     if not target_appeared:
         log("Warning: no target cursor appeared after using '{}'.".format(rune.Name), 33)
+        say_attempt_journal("No cursor for '{}'".format(bare_item_name(rune)),
+                            attempt_journal_lines())
         return False
     Target.TargetExecute(target_item.Serial)
 
@@ -6621,9 +6710,27 @@ def apply_rune_to_item(rune, target_item):
     # which on a stack IS the count ("'100 In Rune' was still in the backpack") -- so it was
     # printing the proof of success as the symptom of failure, and nothing in the message said
     # what the number was being compared against.
+    # COLLECTED FIRST, LOGGED SECOND. Every log line this script writes goes into
+    # the journal too, so reading the evidence after printing the warning would
+    # hand back the warning as part of the evidence.
+    attempt_lines = attempt_journal_lines()
     log("Warning: the '{}' stack still holds {} after {}ms (it was {} before the attempt) -- "
         "the application may not have gone through."
         .format(bare_item_name(rune), amount_last, waited_ms, amount_before), 33)
+    say_attempt_journal(
+        "'{}' was not consumed".format(bare_item_name(rune)), attempt_lines)
+    # OUR OWN CURSOR, STILL HANGING. If the rune raised a cursor and the target
+    # never answered it, it is still open now - and the retry would find it and
+    # answer it with the NEXT rune's target. Cancelling here is what keeps one
+    # failed application from poisoning the two attempts after it.
+    try:
+        if Target.HasTarget():
+            log("The target cursor from that attempt is still open -- cancelling it so "
+                "the retry starts clean.", 33)
+            Target.Cancel()
+            safe_pause(APPLY_CURSOR_SETTLE_MS)
+    except Exception:
+        pass
     return False
 
 APPLICATION_REFUSED_PATTERN = re.compile(r"you cannot enhance that", re.I)
