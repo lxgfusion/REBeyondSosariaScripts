@@ -60,6 +60,9 @@ two must be kept in step.
 | `HouseSignWatch.py` (alerts on slightly/somewhat/greatly worn and IDOC house signs in range; writes and re-reads `HouseAlerts/house_alerts.txt` beside itself, so a logged house only alerts again for a new owner — **untested in game**) | `E:\uoclients\RazorEnhanced\Scripts\` |
 | `Leatherman.py` | `E:\uoclients\RazorEnhanced\Scripts\` |
 | `sandmaker.py` (lower-case live, `Sandmaker.py` in the repo) | `E:\uoclients\RazorEnhanced\Scripts\` |
+| `RuneCraftAndStore.py` (crafts rune-crafting runes and stores them, applies nothing — a GPL-3.0 fork of Omniwrath's Omni Runecrafting, **in the repo**) | `E:\uoclients\RazorEnhanced\Scripts\` |
+| `OmniRuneCraftFork.py` (the apply half of the same lineage — **not in the repo**) | `E:\uoclients\RazorEnhanced\Scripts\` |
+| `omnirunecraft.py` (upstream's own file, left alone as the reference copy) | `E:\uoclients\RazorEnhanced\Scripts\` |
 
 So "the live folder" depends on which script is being edited.
 
@@ -123,6 +126,57 @@ rebuilt from Mystic Gatherer, which was the most current copy. **Compare
 `SCRIPT_VERSION` and the md5 of the code half across all five before assuming
 they agree** — mtime is not a guide, the reverted copy had the newest timestamp
 of the three, and file size alone will not tell two config blocks apart.
+
+## The rune-crafting fork: three files, somebody else's code
+
+`RuneCraftAndStore.py` is **published in this repo**. The other two are local
+only.
+
+| File | What it is |
+|---|---|
+| `omnirunecraft.py` | Upstream's own, untouched. The reference copy — diff against it to see what the forks changed. |
+| `OmniRuneCraftFork.py` | The apply half plus local changes (Master Key perk deed, all pages of the `[AR` book, updater off). Not published. |
+| `RuneCraftAndStore.py` | Make-and-store only, sized off `ASSUMED_ITEM_COUNT = 50` assumed items. **Published**, with the GPL notice in its header. |
+
+All three share roughly 11,000 lines of Omniwrath's work
+(github.com/Omniwrath/beyond-sosaria-runecrafting).
+
+**It is GPL-3.0, and the published file says so.** Upstream is GPL v3, so the
+fork is too. The header carries the licence notice and the modification
+statement GPL section 5(a) asks for. The repo deliberately carries **no copy
+of the licence text** — the user's call, asked and answered on
+2026-11-08 — so that is a known, deliberate gap in a full section 4/5
+conveyance, not an oversight to "fix" unasked. Nothing else in this repo is
+GPL; the other scripts are separate works sharing a folder.
+
+**Keeping the two forks in step is manual.** A fix made in one does not reach
+the other. `tests/test_runecraftandstore.py` is the guard: three of its
+checks diff every shared definition against `OmniRuneCraftFork.py` and fail
+on drift. Those three announce themselves as **skipped** when the fork file
+is absent, which is what happens on a clone — so a green run elsewhere
+does not mean the forks agree.
+
+**`ASSUMED_ITEM_COUNT = 50`, and nothing reads the backpack.** Three
+functions are deliberately re-defined *after* their originals to make that
+true (`find_slot_items`, `snapshot_property_values`, `ensure_slot_source`).
+Shadowing is the mechanism, so **the order of definition is the behaviour**:
+an override moved above its original is simply dead code. The test checks the
+order, not just the presence.
+
+**The updater must stay off.** Upstream signs its releases and the script can
+replace itself; letting it would overwrite the fork with upstream's file.
+`update_offer_at_start()` returns immediately, and the test asserts that its
+first real statement is a `return`.
+
+**No serial in the published file.** It has no serial config at all — it
+resolves the keys by name — so it is not registered in
+`tools/sync_serials.py`. One real Master Keys serial did travel in a comment
+and was replaced with the example `0x4000ABCD` on 2026-11-08, **in the live
+copy as well as the repo one**, so `diff --strip-trailing-cr` between them
+still means something.
+
+**Report faults here, not upstream.** A bug in this file is the fork's until
+it is shown to be in a part neither fork touched.
 
 ## Conventions
 
@@ -213,7 +267,7 @@ of the three, and file size alone will not tell two config blocks apart.
   **The title carries no article, and it is one word.** Inspected 2026-10-24:
   `Arlinda` → `Alchemist`, `Shanata` → `Mage` — not "the alchemist". A script
   looking for `"the mage"` found no vendors anywhere and said nothing. Match
-  the bare title as **whole words** (`mage`), so it cannot also claim
+  the bare title as **whole words** (`\bmage\b`), so it cannot also claim
   `Magery` or a `Mageblade`, and run the tooltip through the concatenation
   seam fix first — `ArlindaAlchemist` has no word boundary in it.
 - When an entity lookup fails, dump every candidate in range *with its tooltip*
@@ -488,6 +542,10 @@ python tests/test_fill_tame_deeds.py
 
 ```bash
 python tests/test_house_sign_watch.py
+```
+
+```bash
+python tests/test_runecraftandstore.py
 ```
 
 No Razor runtime needed. `tests/test_tame_animals.py` reads the script, strips

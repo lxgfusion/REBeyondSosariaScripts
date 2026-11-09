@@ -18,6 +18,12 @@ RAZOR = {
     "CUO", "DPSMeter", "Vendor", "PacketLogger", "ScriptTimer",
 }
 
+# Module dunders. `__file__` is the one that matters and it is load-bearing:
+# RazorEnhanced's working directory is the TazUO root, not the Scripts
+# folder, so a script that writes beside itself has to resolve its own path
+# rather than use a relative one.
+DUNDERS = {"__file__", "__name__", "__doc__"}
+
 
 def defined_names(tree):
     names = set()
@@ -38,6 +44,24 @@ def defined_names(tree):
             for sub in ast.walk(node):
                 if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
                     names.add(sub.id)
+                # A FUNCTION DEFINED IN AN `except ImportError:` IS DEFINED.
+                # It is not a Name/Store node, so the walk above missed it,
+                # and the shape it missed is the standard optional-import
+                # fallback:
+                #
+                #     try:
+                #         from Omni_DiskLog import disk_log
+                #     except ImportError:
+                #         def disk_log(text): return False
+                #
+                # which read as "disk_log is never defined" - on a file
+                # where it is defined twice over.
+                elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                      ast.ClassDef)):
+                    names.add(sub.name)
+                elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+                    for alias in sub.names:
+                        names.add((alias.asname or alias.name).split(".")[0])
     return names
 
 
@@ -75,7 +99,7 @@ def check(path):
     with open(path, encoding="utf-8") as handle:
         tree = ast.parse(handle.read(), path)
 
-    known = defined_names(tree) | set(dir(builtins)) | RAZOR
+    known = defined_names(tree) | set(dir(builtins)) | RAZOR | DUNDERS
     missing = {}
 
     # Top-level functions only. local_names already walks the whole subtree,
@@ -108,7 +132,7 @@ def check_module_order(path):
 
     defined = {}
     problems = []
-    safe = set(dir(builtins)) | RAZOR
+    safe = set(dir(builtins)) | RAZOR | DUNDERS
 
     def runs_now(node):
         """The parts of a top-level statement that execute at import time.

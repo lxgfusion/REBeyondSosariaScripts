@@ -14,6 +14,7 @@ at a RunUO/ServUO-derived freeshard.
 | [`Scripts/harvest_runner.py`](Scripts/harvest_runner.py) | **Mining + lumberjacking on one script.** Account-runebook travel, per-job rune routes, smelting, drop-off runs, vendor rounds, meditation-backed mana, and the Greyskull call-out. |
 | [`Scripts/mining_runner.py`](Scripts/mining_runner.py) | Superseded by `harvest_runner.py`. Kept as a working fallback until the integrated script is confirmed in-game — delete it once it is. |
 | [`Scripts/resource_order_runner.py`](Scripts/resource_order_runner.py) | **Fills resource orders.** Counts the chest's ingots by hue, takes orders it can afford out of the book, fills them, then recalls to `RO > RO` and drags the completed deeds to the Resource Gatherer. Keeps 100 of each metal behind. Confirmed end-to-end in game. |
+| [`Scripts/RuneCraftAndStore.py`](Scripts/RuneCraftAndStore.py) | **Crafts rune-crafting runes and stores them. Applies nothing.** A modified version of [Omniwrath's Omni Runecrafting](https://github.com/Omniwrath/beyond-sosaria-runecrafting) cut down to one job: stocking the storage key. Pick an equipment slot, type the properties and target values you want on that kind of item, and it sizes the batch for **fifty** of them — the count is assumed, not read off your backpack, so you do not need to own the gear you are stocking for. It crafts that many runes, puts them in the `Runecrafting Storage` key, and stops; no item of yours is ever at risk, and no Perk Deed is spent. Runes already in the key are counted first, so running it twice does not craft the batch twice. **GPL-3.0 like its upstream** — see the file header. |
 
 ## A note on the diagnostics
 
@@ -639,6 +640,87 @@ Its click-probe stays off by default — blind-clicking runebook buttons can rec
 you or spend a charge. Both diagnostics write a full dump to `%TEMP%` and print
 the path.
 
+## `RuneCraftAndStore.py`
+
+A modified version of [Omniwrath's Omni
+Runecrafting](https://github.com/Omniwrath/beyond-sosaria-runecrafting),
+designed to do one thing: **make runes and store them**. It never applies a
+rune to anything.
+
+Upstream crafts rune-crafting runes *and* applies them to your equipment up
+to a target value per stat. This fork keeps the first half. You pick a slot,
+fill in the properties and the values you want on that kind of item, and it
+runs upstream's own simulation to work out how many runes that gear would
+consume — then crafts them, puts them in the `Runecrafting Storage` key,
+and stops.
+
+### The fifty is an assumption
+
+The batch is sized for **50 items** of the slot you picked, each starting
+with none of the properties you asked for. That number is `ASSUMED_ITEM_COUNT`
+near the bottom of the file.
+
+Nothing searches your backpack. That is deliberate and it is the point of the
+script: you are stocking runes for gear you have not got yet, and sizing the
+batch off whatever happens to be in your pack would craft nothing on the one
+occasion it is most wanted — an empty pack. So the count on the preview
+screen is the count you asked for, whatever you own.
+
+The cost is exactly linear in it. Measured against the script's own
+simulation (target 100, a 3—9 gain property): 14.8 runes per item at
+every pool size from 1 to 100. So this is a batch-size dial, not a tuning
+parameter — 50 makes 2.5x what 20 did, for 2.5x the stone.
+
+Runes already in the key, and any in your pack, are **subtracted before
+anything is crafted**, so running it twice against the same gear does not
+craft the batch twice. They are counted, not withdrawn.
+
+### What it deliberately does not do
+
+- **It never applies a rune**, so no item of yours is ever at risk. This is
+  the one promise worth proving, and `tests/test_runecraftandstore.py` proves
+  it by reachability rather than by testing a happy path: there is no call
+  path from the mode picker to the apply flow.
+- **It never spends a Perk Deed** and never checks whether the break-chance
+  buff is up. That perk reduces the chance of breaking an *item* while
+  applying a rune; nothing is applied here. It does not travel to a perk
+  chest either. The one perk it still reads is Infinite Backpack Weight,
+  which tells the crafter whether it has to keep the run inside your weight
+  limit.
+- **The updater is off.** Upstream's signed self-update would replace this
+  file with upstream's, losing the fork.
+
+The preview still talks about breaks and odds, because that is where the
+number comes from: "how many runes does this gear need" is exactly "how many
+applications, including the ones lost to breakage". Those odds describe the
+future apply run you are stocking for, not anything this script does.
+
+### Setup
+
+Identical to upstream's: 300 Inscription, a `Reagent Keys` and a
+`Runecrafting Storage` key in your pack, and two runes in one Account
+Runebook folder named exactly `Home` and `Scribe` (`Scribe` beside an NPC who
+sells Rune Chisels). The perk-chest row of the setup screen is not used here.
+Settings live in a `RuneCraftAndStore/` folder beside the script.
+
+### Credit, and the licence
+
+The crafting, the simulation, the gump handling and the storage-key
+mechanics are Omniwrath's — roughly 11,000 lines of this file are their
+work. What is this fork's is the make-and-store behaviour, the assumed gear,
+the Master Key support and the gump-press guard. **Report faults here, not
+upstream.**
+
+Omni Runecrafting is GNU GPL v3, so this modified version is too: share it
+and change it freely, but a changed version you hand out must stay GPL v3 and
+go out with its source. The notice and the modification statement are in the
+file's own header; this repository does not carry a copy of the licence text,
+which is a deliberate choice and not a complete GPL section 4/5 conveyance.
+Upstream's copy is at
+[LICENSE](https://github.com/Omniwrath/beyond-sosaria-runecrafting/blob/main/LICENSE).
+Nothing else in this repository is GPL — the other scripts are separate
+works that happen to share a folder.
+
 ## Diagnosing a job that fails
 
 Set `DIAGNOSTIC_MODE = True` at the top of
@@ -705,6 +787,19 @@ from the implementation.
   C# declaration shape that an earlier version of the parser silently dropped
   (nested class with the brace on the next line, `public static int Hits { get`,
   `= new()` field initialisers, single-line method bodies, instance methods).
+- `test_runecraftandstore.py` — 50 checks on the rune stocker, and they
+  are structural: an 11,000-line script that drives gumps cannot be run
+  offline, but "can control ever reach the apply flow?" is a question the
+  call graph answers exactly, and it is the one question that matters here.
+  So: no path from the mode picker to `run_slot_application()`, the store
+  flow reached instead, no Perk Deed spent and no travel to a perk chest, the
+  updater still disabled, the three assumed-gear overrides each defined
+  *after* the original they shadow (shadowing is the mechanism, so the order
+  of definition is the behaviour), and the fifty stand-ins carrying negative
+  serials so none can collide with a real item. Three further checks diff
+  every shared definition against the local `OmniRuneCraftFork.py` and fail
+  on drift; that file is not published, so they announce themselves as
+  skipped on a clone rather than passing quietly.
 
 ## Reference
 
