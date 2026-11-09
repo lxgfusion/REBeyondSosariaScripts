@@ -9256,9 +9256,13 @@ def apply_progress_lines(p):
     rows.append(("Items: {} in the pack -- {} at target, {} to go".format(
         p["pool"], p["at_target"], to_go), 68))
     if p["broken"]:
+        # AMBER, NOT RED. Breaking is how this works -- the perk reduces the chance, it does not
+        # remove it -- so red here would be on for the rest of the run after the first item goes,
+        # and a warning colour that is always on is not a warning. Red belongs to the Supply row,
+        # which uses it for the one thing worth acting on: the supply outrunning the items.
         rows.append(("Broken: {}  (1 per {} applied)".format(
             p["broken"], int(round(float(p["applied"]) / p["broken"])) if p["applied"] else "?"),
-            33))
+            43))
     else:
         rows.append(("Broken: none yet", 68))
     refused = ",  {} refused".format(p["refused"]) if p["refused"] else ""
